@@ -2,12 +2,12 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║         Route-TMB BFF — Unified ATM Integration Verification                 ║
-║                                                                            ║
-║  Acts as a dummy driver-tablet client. Queries the unified ATM endpoints   ║
-║  for a specific route to validate the full data contract.                  ║
-║                                                                            ║
-║  Usage:                                                                    ║
-║      python verify_bff_server.py --route-id M30                            ║
+║                                                                              ║
+║  Acts as a dummy driver-tablet client. Queries the unified ATM endpoints     ║
+║  for a specific route to validate the full data contract.                    ║
+║                                                                              ║
+║  Usage:                                                                      ║
+║      python verify_bff_server.py --route-id M30                              ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 

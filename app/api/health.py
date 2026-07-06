@@ -6,6 +6,9 @@ balancers to determine the application's liveness and readiness status.
 
     GET /health       → Liveness probe (always 200 if the process is alive)
     GET /health/ready → Readiness probe (checks Redis + worker status)
+
+These endpoints are EXEMPT from API key authentication so that
+orchestrators can probe without credentials.
 """
 
 from __future__ import annotations
@@ -43,8 +46,8 @@ async def readiness(request: Request) -> dict:
     """Check whether all backend dependencies are healthy.
 
     Verifies:
-    - Redis connectivity (PING)
-    - Background worker status (AMB, TMB)
+    - Redis connectivity (PING) and key count
+    - Background worker status (ATM RT)
 
     Returns 200 with a detailed status object if all checks pass,
     or 503 with degraded status if any dependency is unhealthy.
@@ -53,21 +56,20 @@ async def readiness(request: Request) -> dict:
 
     # --- Redis health ---
     redis_ok = False
+    redis_keys = -1
     try:
         cache = app.state.cache
         redis_ok = await cache.health_check()
+        if redis_ok:
+            redis_keys = await cache.key_count()
     except Exception:
         logger.warning("Redis health check failed during readiness probe")
 
     # --- Worker health ---
     workers_status = {}
-    amb_worker = getattr(app.state, "amb_worker", None)
-    tmb_worker = getattr(app.state, "tmb_worker", None)
-
-    if amb_worker:
-        workers_status["amb"] = amb_worker.stats
-    if tmb_worker:
-        workers_status["tmb"] = tmb_worker.stats
+    atm_rt_worker = getattr(app.state, "atm_rt_worker", None)
+    if atm_rt_worker:
+        workers_status["atm_rt"] = atm_rt_worker.status()
 
     # --- Overall status ---
     all_healthy = redis_ok
@@ -76,7 +78,10 @@ async def readiness(request: Request) -> dict:
     response_data = {
         "status": status,
         "checks": {
-            "redis": {"connected": redis_ok},
+            "redis": {
+                "connected": redis_ok,
+                "key_count": redis_keys,
+            },
             "workers": workers_status,
         },
     }

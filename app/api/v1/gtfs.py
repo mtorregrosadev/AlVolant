@@ -7,19 +7,26 @@ on the driver tablets.
     GET /api/v1/gtfs/shapes              → all routes as GeoJSON FeatureCollection
     GET /api/v1/gtfs/shapes/{route_id}   → single route GeoJSON
     GET /api/v1/gtfs/routes              → route metadata listing
+
+All endpoints require a valid ``X-API-Key`` header.
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import ORJSONResponse
 
+from app.core.auth import require_api_key
 from app.core.logging import get_logger
 from app.models.gtfs import GTFSShapesResponse, RouteInfo, RouteShape
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/gtfs", tags=["GTFS Static"])
+router = APIRouter(
+    prefix="/gtfs",
+    tags=["GTFS Static"],
+    dependencies=[Depends(require_api_key)],
+)
 
 
 @router.get(

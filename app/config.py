@@ -29,6 +29,29 @@ class Settings(BaseSettings):
     )
 
     # -------------------------------------------------------------------------
+    # Security & Authentication
+    # -------------------------------------------------------------------------
+    BFF_API_KEY: str = ""  # Machine-to-machine API key (REQUIRED in production)
+
+    # -------------------------------------------------------------------------
+    # Rate Limiting
+    # -------------------------------------------------------------------------
+    RATE_LIMIT_RPM: int = 60  # Max requests per minute per IP (REST)
+    RATE_LIMIT_WS_MPM: int = 120  # Max WebSocket messages per minute per client
+
+    # -------------------------------------------------------------------------
+    # WebSocket
+    # -------------------------------------------------------------------------
+    MAX_WS_CONNECTIONS: int = 200  # Hard cap on simultaneous WS connections
+    MAX_WS_TOPICS_PER_CLIENT: int = 20  # Max topic subscriptions per connection
+    MAX_WS_MESSAGE_BYTES: int = 4096  # Max incoming WS message size (4KB)
+
+    # -------------------------------------------------------------------------
+    # CORS
+    # -------------------------------------------------------------------------
+    CORS_ALLOWED_ORIGINS: str = ""  # Comma-separated origins, empty = same-origin only
+
+    # -------------------------------------------------------------------------
     # ATM T-mobilitat Real-Time (GTFS-RT)
     # -------------------------------------------------------------------------
     ATM_RT_TRIP_UPDATES_URL: str = "https://t-mobilitat.atm.cat/opendata/trip_updates/user/token/open"

@@ -38,6 +38,7 @@ from app.cache.redis_manager import CacheManager
 from app.config import settings
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import get_logger, setup_logging
+from app.core.rate_limiter import RateLimiterMiddleware
 from app.services.atm_rt_service import ATMRTService
 from app.services.gtfs_service import GTFSService
 from app.workers.atm_rt_worker import ATMRTWorker
@@ -60,6 +61,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("=" * 60)
     logger.info("Route-TMB BFF starting up...")
     logger.info("=" * 60)
+
+    # --- 0. Security Configuration ---
+    if not settings.BFF_API_KEY:
+        logger.warning(
+            "⚠️  BFF_API_KEY is not set! All authenticated endpoints will "
+            "reject requests. Set BFF_API_KEY in .env for production."
+        )
+    app.state.api_key = settings.BFF_API_KEY
+    app.state.settings = settings
 
     # --- 1. Redis Cache ---
     cache = CacheManager(redis_url=settings.REDIS_URL)
@@ -132,7 +142,7 @@ app = FastAPI(
         "for Barcelona bus driver tablets. Aggregates ATM "
         "GTFS-Realtime and static GTFS data behind a Redis cache layer."
     ),
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
     default_response_class=ORJSONResponse,
     docs_url="/docs",
@@ -140,14 +150,31 @@ app = FastAPI(
 )
 
 # --- CORS Middleware ---
-# Allow tablet app origins.  In production, restrict to the specific
-# domain/IP of the tablet fleet management system.
+# Parse allowed origins from configuration.  Empty string means no
+# cross-origin requests are allowed (same-origin only).
+_cors_origins: list[str] = [
+    origin.strip()
+    for origin in settings.CORS_ALLOWED_ORIGINS.split(",")
+    if origin.strip()
+]
+
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "OPTIONS"],
+        allow_headers=["X-API-Key", "Content-Type", "Accept"],
+    )
+    logger.info("CORS enabled for origins: %s", _cors_origins)
+else:
+    # No CORS at all — only same-origin requests allowed
+    logger.info("CORS disabled — same-origin only")
+
+# --- Rate Limiter Middleware ---
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # TODO: Restrict in production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    RateLimiterMiddleware,
+    rpm=settings.RATE_LIMIT_RPM,
 )
 
 # --- Exception Handlers ---

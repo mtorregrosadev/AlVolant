@@ -3,13 +3,16 @@ API endpoints for ATM GTFS-Realtime data.
 
 Provides access to live vehicle positions, trip updates, and service alerts
 fetched from the unified ATM production endpoints.
+
+All endpoints require a valid ``X-API-Key`` header.
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import ORJSONResponse
 
+from app.core.auth import require_api_key
 from app.models.atm_rt import (
     ATMRealtimeFeed,
     ServiceAlert,
@@ -18,7 +21,11 @@ from app.models.atm_rt import (
 )
 from app.services.atm_rt_service import ATMRTService
 
-router = APIRouter(prefix="/atm_rt", tags=["ATM Real-Time"])
+router = APIRouter(
+    prefix="/atm_rt",
+    tags=["ATM Real-Time"],
+    dependencies=[Depends(require_api_key)],
+)
 
 
 @router.get(

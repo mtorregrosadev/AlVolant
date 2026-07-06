@@ -5,11 +5,16 @@ These models represent the normalized entities extracted from the ATM
 Protocol Buffer feeds (TripUpdates, VehiclePositions, Alerts). The BFF
 parses the binary feeds and stores these lightweight JSON-serializable
 models in Redis for fast retrieval by the tablet clients.
+
+Enhanced with rich alert classification to support:
+- Detour descriptions with alternative stops
+- Per-stop cancellation status
+- Alert type classification (DETOUR, STOP_CANCELLATION, SCHEDULE_INFO)
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import StrEnum
 
 from pydantic import BaseModel, Field
@@ -48,6 +53,76 @@ class AlertEffect(StrEnum):
     NO_EFFECT = "NO_EFFECT"
     ACCESSIBILITY_ISSUE = "ACCESSIBILITY_ISSUE"
 
+
+class AlertType(StrEnum):
+    """High-level classification of what the alert represents.
+
+    Derived from the GTFS-RT ``effect`` field and description text analysis.
+    This simplifies frontend rendering: the tablet can show different UI
+    treatments for detours vs. stop cancellations vs. informational notices.
+    """
+    DETOUR = "DETOUR"
+    STOP_CANCELLATION = "STOP_CANCELLATION"
+    SCHEDULE_INFO = "SCHEDULE_INFO"
+    SERVICE_CHANGE = "SERVICE_CHANGE"
+    GENERAL_INFO = "GENERAL_INFO"
+
+
+class StopStatus(StrEnum):
+    """Operational status of a stop within a route context.
+
+    Used in ``AffectedStopDetail`` to indicate whether a stop is
+    temporarily canceled, moved, or has been added as a replacement.
+    """
+    ACTIVE = "ACTIVE"
+    TEMPORARILY_CANCELED = "TEMPORARILY_CANCELED"
+    MOVED = "MOVED"
+    ADDED = "ADDED"
+
+
+class AlertSeverity(StrEnum):
+    """Alert severity level for UI prioritization."""
+    INFO = "INFO"
+    WARNING = "WARNING"
+    SEVERE = "SEVERE"
+
+
+# ---------------------------------------------------------------------------
+# Sub-models for enriched alerts
+# ---------------------------------------------------------------------------
+
+class AffectedStopDetail(BaseModel):
+    """Detailed status of a single stop affected by an alert.
+
+    When a stop is temporarily canceled due to construction or a detour,
+    this model captures its status and the reason for the disruption.
+    """
+    stop_id: str = Field(..., description="GTFS stop_id (with AMB_ prefix)")
+    stop_name: str = Field("", description="Human-readable stop name")
+    status: StopStatus = Field(
+        StopStatus.TEMPORARILY_CANCELED,
+        description="Current operational status of this stop",
+    )
+    reason: str = Field("", description="Brief explanation of why the stop is affected")
+
+
+class AlternativeStop(BaseModel):
+    """A replacement stop offered when the regular stop is canceled.
+
+    Maps a canceled stop to its temporary replacement so the driver
+    can navigate to the correct alternative location.
+    """
+    stop_id: str = Field(..., description="GTFS stop_id of the alternative stop")
+    stop_name: str = Field("", description="Human-readable name of the alternative")
+    replaces_stop_id: str = Field(
+        "",
+        description="GTFS stop_id of the canceled stop this replaces",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Core GTFS-RT models
+# ---------------------------------------------------------------------------
 
 class VehiclePosition(BaseModel):
     """Real-time position of a transit vehicle."""
@@ -93,6 +168,13 @@ class ServiceAlert(BaseModel):
 
     Text fields are pre-filtered to Catalan (``ca`` or ``cat``) when available.
     Timestamps are normalized to ISO 8601 strings.
+
+    Enhanced with classification fields for rich driver-facing UI:
+    - ``alert_type``: High-level classification (DETOUR, STOP_CANCELLATION, etc.)
+    - ``severity``: UI prioritization level
+    - ``affected_stop_details``: Per-stop status with reasons
+    - ``alternative_stops``: Replacement stops for canceled ones
+    - ``detour_description``: Human-readable detour path
     """
 
     alert_id: str = Field(..., description="Unique alert identifier from the feed")
@@ -118,12 +200,34 @@ class ServiceAlert(BaseModel):
         description="List of GTFS stop_ids affected by this alert",
     )
 
+    # --- Enhanced classification fields ---
+    alert_type: str = Field(
+        AlertType.GENERAL_INFO,
+        description="High-level alert classification for UI rendering",
+    )
+    severity: str = Field(
+        AlertSeverity.INFO,
+        description="Alert severity level (INFO, WARNING, SEVERE)",
+    )
+    affected_stop_details: list[AffectedStopDetail] = Field(
+        default_factory=list,
+        description="Per-stop status and reason details",
+    )
+    alternative_stops: list[AlternativeStop] = Field(
+        default_factory=list,
+        description="Replacement stops for temporarily canceled ones",
+    )
+    detour_description: str = Field(
+        "",
+        description="Human-readable description of the detour path",
+    )
+
 
 class ATMRealtimeFeed(BaseModel):
     """Complete parsed ATM GTFS-RT feed snapshot containing data from all feeds."""
 
     feed_timestamp: datetime = Field(
-        default_factory=datetime.utcnow,
+        default_factory=lambda: datetime.now(tz=timezone.utc),
         description="UTC time when the feeds were fetched and parsed",
     )
     vehicle_positions: list[VehiclePosition] = Field(default_factory=list)

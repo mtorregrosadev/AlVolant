@@ -9,6 +9,7 @@ this manager, which enforces:
 * **Automatic JSON serialization** via ``orjson`` for sub-millisecond encode/decode
 * **Configurable TTL** per write so stale data is evicted automatically
 * **Connection pooling** via ``redis.asyncio.ConnectionPool``
+* **TTL safety net** — warns if any write is made without a TTL
 
 Usage:
     from app.cache.redis_manager import CacheManager
@@ -30,6 +31,10 @@ import redis.asyncio as aioredis
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
+
+# Safety net: maximum TTL (24 hours) applied when no TTL is specified
+# to prevent immortal keys from accumulating in Redis.
+_DEFAULT_MAX_TTL = 86400  # 24 hours
 
 
 class CacheManager:
@@ -81,7 +86,7 @@ class CacheManager:
         return self._client
 
     # ------------------------------------------------------------------
-    # Health
+    # Health & Monitoring
     # ------------------------------------------------------------------
 
     async def health_check(self) -> bool:
@@ -95,6 +100,17 @@ class CacheManager:
         except Exception:
             logger.warning("Redis health check failed")
             return False
+
+    async def key_count(self) -> int:
+        """Return the total number of keys in the current Redis database.
+
+        Useful for monitoring memory usage and detecting key leaks.
+        """
+        try:
+            return await self.client.dbsize()
+        except Exception:
+            logger.warning("Failed to get Redis key count")
+            return -1
 
     # ------------------------------------------------------------------
     # Raw String Operations
@@ -119,15 +135,23 @@ class CacheManager:
     ) -> None:
         """Store a raw string/bytes value in the cache.
 
+        If no TTL is provided, a safety-net TTL of 24 hours is applied
+        to prevent immortal keys from accumulating in Redis.
+
         Args:
             key: The cache key.
             value: The value to store.
-            ttl: Time-to-live in seconds. ``None`` means no expiration.
+            ttl: Time-to-live in seconds. ``None`` applies the safety-net TTL.
         """
-        if ttl is not None:
-            await self.client.setex(key, ttl, value)
-        else:
-            await self.client.set(key, value)
+        if ttl is None:
+            logger.debug(
+                "No TTL provided for key '%s' — applying safety-net TTL of %ds",
+                key,
+                _DEFAULT_MAX_TTL,
+            )
+            ttl = _DEFAULT_MAX_TTL
+
+        await self.client.setex(key, ttl, value)
 
     async def delete(self, key: str) -> int:
         """Delete a key from the cache.
@@ -141,7 +165,7 @@ class CacheManager:
         return await self.client.delete(key)
 
     async def delete_pattern(self, pattern: str) -> int:
-        """Delete all keys matching a glob pattern.
+        """Delete all keys matching a glob pattern using pipelined batches.
 
         Args:
             pattern: Redis glob pattern (e.g. ``tmb:ibus:*``).
@@ -150,9 +174,27 @@ class CacheManager:
             Number of keys removed.
         """
         count = 0
-        async for key in self.client.scan_iter(match=pattern, count=100):
-            await self.client.delete(key)
-            count += 1
+        batch: list[bytes | str] = []
+        batch_size = 100
+
+        async for key in self.client.scan_iter(match=pattern, count=batch_size):
+            batch.append(key)
+            if len(batch) >= batch_size:
+                pipe = self.client.pipeline(transaction=False)
+                for k in batch:
+                    pipe.delete(k)
+                await pipe.execute()
+                count += len(batch)
+                batch.clear()
+
+        # Flush remaining
+        if batch:
+            pipe = self.client.pipeline(transaction=False)
+            for k in batch:
+                pipe.delete(k)
+            await pipe.execute()
+            count += len(batch)
+
         return count
 
     # ------------------------------------------------------------------
@@ -231,12 +273,11 @@ class CacheManager:
         Args:
             mapping: Dictionary of ``{key: value}`` pairs.
             ttl: Time-to-live in seconds applied to all keys.
+                 Falls back to safety-net TTL if not provided.
         """
+        effective_ttl = ttl if ttl is not None else _DEFAULT_MAX_TTL
         pipe = self.client.pipeline(transaction=False)
         for key, value in mapping.items():
             serialized = orjson.dumps(value)
-            if ttl is not None:
-                pipe.setex(key, ttl, serialized)
-            else:
-                pipe.set(key, serialized)
+            pipe.setex(key, effective_ttl, serialized)
         await pipe.execute()

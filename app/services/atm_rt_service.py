@@ -7,11 +7,18 @@ Fetches the three unified ATM production feeds:
 3. ServiceAlerts
 
 Parses the binary protobuf payloads and stores normalized entities in Redis.
+
+Enhanced with:
+- Subprocess timeout to prevent zombie curl processes
+- Response size limits to prevent OOM
+- Auto-classification of alerts (detour, stop cancellation, schedule info)
+- Alternative stop extraction from description text
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import datetime, timezone
 
 import httpx
@@ -23,10 +30,15 @@ from app.config import Settings
 from app.core.exceptions import ExternalAPIError, GTFSParseError
 from app.core.logging import get_logger
 from app.models.atm_rt import (
+    AffectedStopDetail,
     AlertCause,
     AlertEffect,
+    AlertSeverity,
+    AlertType,
+    AlternativeStop,
     ATMRealtimeFeed,
     ServiceAlert,
+    StopStatus,
     StopTimeUpdate,
     TripUpdate,
     VehiclePosition,
@@ -43,6 +55,17 @@ _KEY_LAST_UPDATED = "atm_rt:meta:last_updated"
 
 # ATM language priority mapping (ca = Catalan, es = Spanish, en = English)
 _LANG_PRIORITY = ("ca", "es", "en", "")
+
+# Safety limits
+_MAX_RESPONSE_BYTES = 50 * 1024 * 1024  # 50 MB
+_CURL_TIMEOUT_SECONDS = 30
+
+# Regex pattern to extract stop codes and names from Catalan alert descriptions
+# Matches patterns like "009463 Jumilla, 53" or "105958 Metro Can Peixauet"
+_STOP_CODE_PATTERN = re.compile(
+    r"(\d{5,6})\s+([A-ZÀ-Ü][^-\n\d]{2,60}?)(?:\s*-\s*|\s*$)",
+    re.MULTILINE,
+)
 
 
 class ATMRTService:
@@ -150,26 +173,55 @@ class ATMRTService:
         return feed
 
     async def _fetch_feed(self, url: str, name: str) -> bytes | None:
-        """Fetch a GTFS-RT protobuf feed using curl to bypass WAF."""
+        """Fetch a GTFS-RT protobuf feed using curl to bypass WAF.
+
+        Includes a subprocess timeout to prevent zombie processes and
+        a response size limit to prevent OOM.
+        """
         if not url:
             return None
 
         logger.debug("Fetching %s from %s", name, url)
         try:
             proc = await asyncio.create_subprocess_exec(
-                "curl", "-sL", "-A", "curl/8.20.0", url,
+                "curl", "-sL", "-A", "curl/8.20.0",
+                "--max-filesize", str(_MAX_RESPONSE_BYTES),
+                url,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await proc.communicate()
+
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=_CURL_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                raise ExternalAPIError(
+                    "ATM",
+                    f"Timeout fetching {name} (>{_CURL_TIMEOUT_SECONDS}s)",
+                )
+
             if proc.returncode != 0:
                 raise ExternalAPIError("ATM", f"curl failed for {name}: {stderr.decode()}")
-            
+
             # Check if we got an HTML response instead of binary
             if stdout.startswith(b"<html") or stdout.startswith(b"<!DOC"):
                 raise ExternalAPIError("ATM", f"Received HTML instead of protobuf for {name}")
-                
+
+            # Size check (belt and suspenders — curl --max-filesize should catch this)
+            if len(stdout) > _MAX_RESPONSE_BYTES:
+                raise ExternalAPIError(
+                    "ATM",
+                    f"Response for {name} exceeds size limit "
+                    f"({len(stdout)} > {_MAX_RESPONSE_BYTES} bytes)",
+                )
+
             return stdout
+        except ExternalAPIError:
+            raise
         except Exception as exc:
             raise ExternalAPIError("ATM", f"Failed to fetch {name}: {exc}") from exc
 
@@ -269,7 +321,15 @@ class ATMRTService:
         )
 
     def _parse_alert(self, entity_id: str, al: gtfs_realtime_pb2.Alert) -> ServiceAlert | None:
-        """Extract a ServiceAlert entity, enforcing Catalan language priority."""
+        """Extract a ServiceAlert entity with auto-classification.
+
+        Enriches the standard GTFS-RT alert with:
+        - ``alert_type``: Derived from effect + description analysis
+        - ``severity``: Derived from effect
+        - ``alternative_stops``: Parsed from description text
+        - ``affected_stop_details``: Per-stop status
+        - ``detour_description``: Extracted from description
+        """
         if not entity_id:
             return None
 
@@ -306,6 +366,13 @@ class ATMRTService:
             if entity_selector.HasField("stop_id"):
                 stops.append(entity_selector.stop_id)
 
+        # --- Auto-classification ---
+        alert_type = self._classify_alert_type(effect_str, header, desc)
+        severity = self._classify_severity(effect_str, alert_type)
+        alternative_stops = self._extract_alternative_stops(desc)
+        affected_details = self._build_affected_stop_details(stops, alert_type, header)
+        detour_desc = self._extract_detour_description(desc) if alert_type == AlertType.DETOUR else ""
+
         return ServiceAlert(
             alert_id=entity_id,
             header_text=header,
@@ -317,7 +384,139 @@ class ATMRTService:
             active_period_end=end_iso,
             affected_route_ids=routes,
             affected_stop_ids=stops,
+            alert_type=alert_type,
+            severity=severity,
+            affected_stop_details=affected_details,
+            alternative_stops=alternative_stops,
+            detour_description=detour_desc,
         )
+
+    # ------------------------------------------------------------------
+    # Alert Classification Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _classify_alert_type(effect: str, header: str, description: str) -> str:
+        """Classify the alert into a high-level type.
+
+        Uses the GTFS-RT effect field as primary signal, then falls back
+        to keyword analysis of the Catalan description text.
+        """
+        header_lower = header.lower()
+        desc_lower = description.lower()
+
+        # DETOUR: explicit effect or keywords
+        if effect == "DETOUR" or "desviament" in header_lower or "desviament" in desc_lower:
+            # Check if it's actually a stop cancellation disguised as detour
+            if "anul·la" in header_lower and "desviament" not in header_lower:
+                return AlertType.STOP_CANCELLATION
+            return AlertType.DETOUR
+
+        # NO_SERVICE: stop or route is fully suspended
+        if effect == "NO_SERVICE" or "anul·la" in header_lower:
+            return AlertType.STOP_CANCELLATION
+
+        # MODIFIED_SERVICE or REDUCED_SERVICE
+        if effect in ("MODIFIED_SERVICE", "REDUCED_SERVICE"):
+            return AlertType.SERVICE_CHANGE
+
+        # Schedule/operational info (e.g. "parades d'origen i final de recorregut")
+        if any(
+            kw in desc_lower
+            for kw in ("regulació horària", "origen i final", "sense haver de tornar")
+        ):
+            return AlertType.SCHEDULE_INFO
+
+        return AlertType.GENERAL_INFO
+
+    @staticmethod
+    def _classify_severity(effect: str, alert_type: str) -> str:
+        """Determine alert severity for UI prioritization."""
+        if effect in ("NO_SERVICE",) or alert_type == AlertType.STOP_CANCELLATION:
+            return AlertSeverity.SEVERE
+        if effect in ("DETOUR", "MODIFIED_SERVICE") or alert_type == AlertType.DETOUR:
+            return AlertSeverity.WARNING
+        return AlertSeverity.INFO
+
+    @staticmethod
+    def _extract_alternative_stops(description: str) -> list[AlternativeStop]:
+        """Parse alternative stop codes and names from description text.
+
+        AMB alerts typically list alternatives as:
+            ``Parades alternatives: - 009463 Jumilla, 53 - 009464 Almeria, 39``
+
+        Returns a list of ``AlternativeStop`` objects.
+        """
+        alternatives: list[AlternativeStop] = []
+
+        # Look for the "Parades alternatives:" section
+        alt_match = re.search(
+            r"[Pp]arad[ea]s?\s+alternativ[ea]s?\s*:?\s*(.*?)(?:Les\s+lín|L'itinerari|$)",
+            description,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if not alt_match:
+            return alternatives
+
+        alt_text = alt_match.group(1)
+
+        # Extract individual stop codes and names
+        for m in _STOP_CODE_PATTERN.finditer(alt_text):
+            code = m.group(1)
+            name = m.group(2).strip().rstrip(" -")
+            if name:
+                alternatives.append(
+                    AlternativeStop(
+                        stop_id=f"AMB_{code}",
+                        stop_name=name,
+                    )
+                )
+
+        return alternatives
+
+    @staticmethod
+    def _build_affected_stop_details(
+        stop_ids: list[str],
+        alert_type: str,
+        header: str,
+    ) -> list[AffectedStopDetail]:
+        """Build per-stop detail records for affected stops."""
+        details: list[AffectedStopDetail] = []
+        for stop_id in stop_ids:
+            status = StopStatus.TEMPORARILY_CANCELED
+            if alert_type == AlertType.DETOUR:
+                status = StopStatus.TEMPORARILY_CANCELED
+            elif alert_type == AlertType.SCHEDULE_INFO:
+                status = StopStatus.ACTIVE
+
+            details.append(
+                AffectedStopDetail(
+                    stop_id=stop_id,
+                    status=status,
+                    reason=header,
+                )
+            )
+        return details
+
+    @staticmethod
+    def _extract_detour_description(description: str) -> str:
+        """Extract a concise detour path description from the full text.
+
+        Looks for the section describing the actual route modification.
+        """
+        # Look for "es modifica el recorregut habitual" pattern
+        match = re.search(
+            r"(es modifica el recorregut habitual.*?)(?:Parad[ea]s?\s+alternativ|$)",
+            description,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if match:
+            text = match.group(1).strip()
+            # Clean up excessive whitespace
+            text = re.sub(r"\s+", " ", text)
+            return text[:500]  # Cap at 500 chars
+
+        return ""
 
     def _extract_translated_string(self, ts: gtfs_realtime_pb2.TranslatedString) -> str:
         """Extract the preferred translation from a TranslatedString."""

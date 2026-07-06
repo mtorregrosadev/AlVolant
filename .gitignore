@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables (secrets)
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data downloads (large GTFS files)
+data/*.zip
+data/*.txt
+data/*.csv
+!data/.gitkeep
+
+# Coverage
+htmlcov/
+.coverage
+coverage.xml
+
+# Docker
+*.log
+
+# Debug & Local dumps
+*.pb
+sample_route_data.json

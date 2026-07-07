@@ -34,6 +34,7 @@ logger = get_logger(__name__)
 _KEY_ALL_SHAPES = "gtfs:shapes:all"
 _KEY_SHAPE_PREFIX = "gtfs:shapes:route"
 _KEY_ROUTES = "gtfs:routes:all"
+_KEY_STOPS_PREFIX = "gtfs:stops:route"
 _KEY_LAST_UPDATED = "gtfs:meta:last_updated"
 
 
@@ -99,12 +100,14 @@ class GTFSService:
         logger.info("Starting GTFS shapes load from %s", self._gtfs_url)
 
         zip_bytes = await self._download_gtfs_zip()
-        shapes_data, routes_data, trips_data = self._extract_gtfs_files(zip_bytes)
+        shapes_data, routes_data, trips_data, stops_data, stop_times_data = self._extract_gtfs_files(zip_bytes)
 
         # Parse CSV files
         shapes_by_id = self._parse_shapes(shapes_data)
         routes_by_id = self._parse_routes(routes_data)
-        route_to_shape = self._parse_trips_mapping(trips_data)
+        route_to_shape, route_to_trip = self._parse_trips_mapping(trips_data)
+        stops_by_id = self._parse_stops(stops_data)
+        trip_to_stops = self._parse_stop_times(stop_times_data)
 
         # Build GeoJSON features per route
         route_shapes: list[RouteShape] = []
@@ -148,8 +151,11 @@ class GTFSService:
                 )
             )
 
-        # Cache everything
+        # Cache shapes
         await self._cache_shapes(route_shapes, routes_by_id)
+
+        # Cache stops
+        await self._cache_stops(route_to_trip, trip_to_stops, stops_by_id)
 
         logger.info("GTFS shapes loaded: %d routes cached", len(route_shapes))
         return len(route_shapes)
@@ -178,6 +184,18 @@ class GTFSService:
         if data is None:
             return None
         return RouteShape(**data)
+
+    async def get_route_stops(self, route_id: str) -> dict | None:
+        """Retrieve the stops for a single route from cache as a GeoJSON FeatureCollection.
+
+        Args:
+            route_id: GTFS route_id.
+
+        Returns:
+            GeoJSON FeatureCollection of stops, or ``None``.
+        """
+        data = await self._cache.get_json(f"{_KEY_STOPS_PREFIX}:{route_id}")
+        return data
 
     async def get_all_routes(self) -> list[RouteInfo]:
         """Retrieve route metadata (without geometry) from cache.
@@ -225,14 +243,14 @@ class GTFSService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _extract_gtfs_files(zip_bytes: bytes) -> tuple[str, str, str]:
-        """Extract shapes.txt, routes.txt, and trips.txt from the ZIP.
+    def _extract_gtfs_files(zip_bytes: bytes) -> tuple[str, str, str, str, str]:
+        """Extract shapes.txt, routes.txt, trips.txt, stops.txt, and stop_times.txt from the ZIP.
 
         Args:
             zip_bytes: Raw ZIP file content.
 
         Returns:
-            Tuple of (shapes_csv, routes_csv, trips_csv) as strings.
+            Tuple of (shapes, routes, trips, stops, stop_times) as strings.
 
         Raises:
             GTFSParseError: If required files are missing.
@@ -242,7 +260,7 @@ class GTFSService:
                 file_list = zf.namelist()
                 logger.debug("GTFS ZIP contents: %s", file_list)
 
-                required = ["shapes.txt", "routes.txt", "trips.txt"]
+                required = ["shapes.txt", "routes.txt", "trips.txt", "stops.txt", "stop_times.txt"]
                 missing = [f for f in required if f not in file_list]
                 if missing:
                     raise GTFSParseError(
@@ -253,8 +271,10 @@ class GTFSService:
                 shapes_data = zf.read("shapes.txt").decode("utf-8-sig")
                 routes_data = zf.read("routes.txt").decode("utf-8-sig")
                 trips_data = zf.read("trips.txt").decode("utf-8-sig")
+                stops_data = zf.read("stops.txt").decode("utf-8-sig")
+                stop_times_data = zf.read("stop_times.txt").decode("utf-8-sig")
 
-                return shapes_data, routes_data, trips_data
+                return shapes_data, routes_data, trips_data, stops_data, stop_times_data
         except zipfile.BadZipFile as exc:
             raise GTFSParseError("gtfs.zip", f"Invalid ZIP file: {exc}") from exc
 
@@ -325,8 +345,8 @@ class GTFSService:
         return routes
 
     @staticmethod
-    def _parse_trips_mapping(csv_data: str) -> dict[str, str]:
-        """Parse trips.txt to extract route_id → shape_id mapping.
+    def _parse_trips_mapping(csv_data: str) -> tuple[dict[str, str], dict[str, str]]:
+        """Parse trips.txt to extract route_id → shape_id and route_id → trip_id mappings.
 
         When multiple trips map a route to different shapes, we keep the
         first occurrence.  The T-mobilitat "simplified" dataset should
@@ -336,19 +356,67 @@ class GTFSService:
             csv_data: Contents of trips.txt.
 
         Returns:
-            Dict mapping route_id to its shape_id.
+            Tuple of (route_to_shape dict, route_to_trip dict).
         """
         route_to_shape: dict[str, str] = {}
+        route_to_trip: dict[str, str] = {}
         reader = csv.DictReader(io.StringIO(csv_data))
 
         for row in reader:
             route_id = row.get("route_id", "").strip()
             shape_id = row.get("shape_id", "").strip()
+            trip_id = row.get("trip_id", "").strip()
             if route_id and shape_id and route_id not in route_to_shape:
                 route_to_shape[route_id] = shape_id
+            if route_id and trip_id and route_id not in route_to_trip:
+                route_to_trip[route_id] = trip_id
 
         logger.debug("Mapped %d routes to shapes from trips.txt", len(route_to_shape))
-        return route_to_shape
+        return route_to_shape, route_to_trip
+
+    @staticmethod
+    def _parse_stops(csv_data: str) -> dict[str, dict]:
+        """Parse stops.txt to extract stop details.
+        
+        Returns:
+            Dict mapping stop_id to dict with lat, lon, and name.
+        """
+        stops: dict[str, dict] = {}
+        reader = csv.DictReader(io.StringIO(csv_data))
+        for row in reader:
+            stop_id = row.get("stop_id", "").strip()
+            if stop_id:
+                stops[stop_id] = {
+                    "lat": float(row.get("stop_lat", 0)),
+                    "lon": float(row.get("stop_lon", 0)),
+                    "name": row.get("stop_name", "").strip()
+                }
+        return stops
+
+    @staticmethod
+    def _parse_stop_times(csv_data: str) -> dict[str, list[str]]:
+        """Parse stop_times.txt to map trip_id to ordered list of stop_ids.
+        
+        Returns:
+            Dict mapping trip_id to a list of stop_id strings.
+        """
+        trip_stops: dict[str, list[dict]] = defaultdict(list)
+        reader = csv.DictReader(io.StringIO(csv_data))
+        for row in reader:
+            trip_id = row.get("trip_id", "").strip()
+            if not trip_id:
+                continue
+            trip_stops[trip_id].append({
+                "stop_id": row.get("stop_id", "").strip(),
+                "sequence": int(row.get("stop_sequence", 0))
+            })
+        
+        # Sort by sequence
+        result: dict[str, list[str]] = {}
+        for trip_id, stops in trip_stops.items():
+            stops.sort(key=lambda x: x["sequence"])
+            result[trip_id] = [s["stop_id"] for s in stops]
+        return result
 
     # ------------------------------------------------------------------
     # Private — Caching
@@ -422,3 +490,46 @@ class GTFSService:
             len(route_infos),
             ttl,
         )
+
+    async def _cache_stops(
+        self,
+        route_to_trip: dict[str, str],
+        trip_to_stops: dict[str, list[str]],
+        stops_by_id: dict[str, dict],
+    ) -> None:
+        """Write stops FeatureCollections to Redis per route."""
+        ttl = self._settings.CACHE_TTL_GTFS_SHAPES
+        now_iso = datetime.now(tz=timezone.utc).isoformat()
+        
+        individual_mapping: dict[str, dict] = {}
+        for route_id, trip_id in route_to_trip.items():
+            stop_ids = trip_to_stops.get(trip_id, [])
+            features = []
+            for sid in stop_ids:
+                sinfo = stops_by_id.get(sid)
+                if not sinfo:
+                    continue
+                features.append({
+                    "type": "Feature",
+                    "properties": {
+                        "route_id": route_id,
+                        "stop_id": sid,
+                        "stop_name": sinfo["name"],
+                    },
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [sinfo["lon"], sinfo["lat"]]
+                    }
+                })
+                
+            individual_mapping[f"{_KEY_STOPS_PREFIX}:{route_id}"] = {
+                "type": "FeatureCollection",
+                "features": features,
+                "route_id": route_id,
+                "stop_count": len(features),
+                "last_updated": now_iso
+            }
+
+        if individual_mapping:
+            await self._cache.mset_json(individual_mapping, ttl=ttl)
+            logger.info("Cached stops for %d routes", len(individual_mapping))

@@ -45,6 +45,26 @@ export const apiService = {
     }
   },
 
+  async fetchRouteStops(routeId: string) {
+    try {
+      const response = await fetch(`${BASE_URL}/api/v1/gtfs/stops/${routeId}`, {
+        headers: {
+          'X-API-Key': API_KEY,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error(`Error fetching stops for ${routeId}:`, error);
+      throw error;
+    }
+  },
+
   connectWebSocket(onMessage?: (data: any) => void) {
     const ws = new WebSocket(`${WS_URL}/api/v1/ws/live?token=${API_KEY}`);
 

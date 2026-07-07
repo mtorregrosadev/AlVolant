@@ -69,3 +69,15 @@ class GTFSShapesResponse(BaseModel):
     )
     route_count: int = Field(0, description="Total number of routes included")
     last_updated: str = Field("", description="ISO timestamp of last GTFS refresh")
+
+class RouteStopsResponse(BaseModel):
+    """Response containing all stops for a specific route as a GeoJSON FeatureCollection."""
+
+    type: str = Field("FeatureCollection", description="GeoJSON type")
+    features: list[dict] = Field(
+        default_factory=list,
+        description="List of GeoJSON Feature objects (Point per stop)",
+    )
+    route_id: str = Field("", description="GTFS route_id")
+    stop_count: int = Field(0, description="Total number of stops included")
+    last_updated: str = Field("", description="ISO timestamp of last GTFS refresh")

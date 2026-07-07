@@ -7,7 +7,8 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.anonymous.app-conductor"
     },
     "android": {
       "adaptiveIcon": {
@@ -16,14 +17,25 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
+      ],
+      "package": "com.anonymous.appconductor"
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
       "@maplibre/maplibre-react-native",
-      "expo-dev-client"
+      "expo-dev-client",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "AlVolant necessita la teva ubicació per mostrar la posició del bus a la ruta."
+        }
+      ]
     ]
   }
 }

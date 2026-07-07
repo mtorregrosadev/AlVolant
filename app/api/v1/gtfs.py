@@ -18,7 +18,7 @@ from fastapi.responses import ORJSONResponse
 
 from app.core.auth import require_api_key
 from app.core.logging import get_logger
-from app.models.gtfs import GTFSShapesResponse, RouteInfo, RouteShape
+from app.models.gtfs import GTFSShapesResponse, RouteInfo, RouteShape, RouteStopsResponse
 
 logger = get_logger(__name__)
 
@@ -77,6 +77,31 @@ async def get_route_shape(route_id: str, request: Request) -> RouteShape:
             detail=f"No shape found for route '{route_id}'",
         )
     return shape
+
+
+@router.get(
+    "/stops/{route_id}",
+    summary="Get stops for a single route",
+    response_model=RouteStopsResponse,
+    response_class=ORJSONResponse,
+)
+async def get_route_stops(route_id: str, request: Request) -> RouteStopsResponse:
+    """Return the GeoJSON FeatureCollection of stops for a specific route.
+
+    Args:
+        route_id: GTFS route_id.
+
+    Returns:
+        GeoJSON FeatureCollection of Point geometries.
+    """
+    gtfs_service = request.app.state.gtfs_service
+    stops = await gtfs_service.get_route_stops(route_id)
+    if stops is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No stops found for route '{route_id}'",
+        )
+    return stops
 
 
 @router.get(

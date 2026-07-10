@@ -3,11 +3,11 @@
     "name": "app-conductor",
     "slug": "app-conductor",
     "version": "1.0.0",
-    "orientation": "portrait",
+    "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true,
+      "supportsTablet": false,
       "bundleIdentifier": "com.anonymous.app-conductor"
     },
     "android": {
@@ -35,7 +35,8 @@
         {
           "locationWhenInUsePermission": "AlVolant necessita la teva ubicació per mostrar la posició del bus a la ruta."
         }
-      ]
+      ],
+      "expo-font"
     ]
   }
 }

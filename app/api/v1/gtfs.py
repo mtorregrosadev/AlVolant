@@ -1,17 +1,8 @@
-"""
-GTFS static data REST API endpoints (ATM T-mobilitat shapes).
-
-Serves the processed route shapes as GeoJSON for direct map rendering
-on the driver tablets.
-
-    GET /api/v1/gtfs/shapes              → all routes as GeoJSON FeatureCollection
-    GET /api/v1/gtfs/shapes/{route_id}   → single route GeoJSON
-    GET /api/v1/gtfs/routes              → route metadata listing
-
-All endpoints require a valid ``X-API-Key`` header.
-"""
+"""GTFS static data REST API endpoints."""
 
 from __future__ import annotations
+
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import ORJSONResponse
@@ -36,14 +27,6 @@ router = APIRouter(
     response_class=ORJSONResponse,
 )
 async def get_all_shapes(request: Request) -> GTFSShapesResponse:
-    """Return all bus route shapes as a GeoJSON FeatureCollection.
-
-    Each feature is a LineString representing the geographic path of a
-    bus route.  Properties include route name, color, and type.
-
-    This data is loaded from the ATM T-mobilitat static GTFS file and
-    refreshed daily.
-    """
     gtfs_service = request.app.state.gtfs_service
     shapes = await gtfs_service.get_all_shapes()
     if shapes is None:
@@ -60,21 +43,26 @@ async def get_all_shapes(request: Request) -> GTFSShapesResponse:
     response_model=RouteShape,
     response_class=ORJSONResponse,
 )
-async def get_route_shape(route_id: str, request: Request) -> RouteShape:
-    """Return the GeoJSON shape for a specific route.
-
-    Args:
-        route_id: GTFS route_id.
-
-    Returns:
-        Route metadata + GeoJSON LineString geometry.
-    """
+async def get_route_shape(
+    route_id: str,
+    request: Request,
+    direction_id: int | None = None,
+    trip_id: str | None = None,
+) -> RouteShape:
+    """Return route shape, optionally resolved for a specific trip variant."""
     gtfs_service = request.app.state.gtfs_service
-    shape = await gtfs_service.get_route_shape(route_id)
+    shape = await gtfs_service.get_route_shape(
+        route_id=route_id,
+        direction_id=direction_id,
+        trip_id=trip_id,
+    )
     if shape is None:
         raise HTTPException(
             status_code=404,
-            detail=f"No shape found for route '{route_id}'",
+            detail=(
+                f"No shape found for route '{route_id}' "
+                f"(direction={direction_id}, trip_id={trip_id})"
+            ),
         )
     return shape
 
@@ -85,21 +73,26 @@ async def get_route_shape(route_id: str, request: Request) -> RouteShape:
     response_model=RouteStopsResponse,
     response_class=ORJSONResponse,
 )
-async def get_route_stops(route_id: str, request: Request) -> RouteStopsResponse:
-    """Return the GeoJSON FeatureCollection of stops for a specific route.
-
-    Args:
-        route_id: GTFS route_id.
-
-    Returns:
-        GeoJSON FeatureCollection of Point geometries.
-    """
+async def get_route_stops(
+    route_id: str,
+    request: Request,
+    direction_id: int | None = None,
+    trip_id: str | None = None,
+) -> RouteStopsResponse:
+    """Return route stops, optionally resolved for a specific trip variant."""
     gtfs_service = request.app.state.gtfs_service
-    stops = await gtfs_service.get_route_stops(route_id)
+    stops = await gtfs_service.get_route_stops(
+        route_id=route_id,
+        direction_id=direction_id,
+        trip_id=trip_id,
+    )
     if stops is None:
         raise HTTPException(
             status_code=404,
-            detail=f"No stops found for route '{route_id}'",
+            detail=(
+                f"No stops found for route '{route_id}' "
+                f"(direction={direction_id}, trip_id={trip_id})"
+            ),
         )
     return stops
 
@@ -111,9 +104,139 @@ async def get_route_stops(route_id: str, request: Request) -> RouteStopsResponse
     response_class=ORJSONResponse,
 )
 async def get_routes(request: Request) -> list[RouteInfo]:
-    """Return metadata for all routes (without geometry).
-
-    Useful for building route selection UIs on the tablet.
-    """
     gtfs_service = request.app.state.gtfs_service
     return await gtfs_service.get_all_routes()
+
+
+def _get_first_stop_delay_seconds(rt_trip: object) -> int | None:
+    """Return delay only when first stop update exists (stop_sequence <= 1)."""
+    updates = getattr(rt_trip, "stop_time_updates", None)
+    if not updates:
+        return None
+
+    first_stop_candidates = [u for u in updates if getattr(u, "stop_sequence", None) is not None and u.stop_sequence <= 1]
+    if not first_stop_candidates:
+        return None
+
+    first_stop_candidates.sort(key=lambda u: u.stop_sequence)
+    first_update = first_stop_candidates[0]
+    departure_delay = getattr(first_update, "departure_delay", None)
+    arrival_delay = getattr(first_update, "arrival_delay", None)
+    if departure_delay is not None:
+        return departure_delay
+    if arrival_delay is not None:
+        return arrival_delay
+    return 0
+
+
+@router.get(
+    "/routes/{route_id}/upcoming-trips",
+    summary="Get upcoming departures for a single route",
+    response_class=ORJSONResponse,
+)
+async def get_upcoming_trips(
+    route_id: str,
+    direction_id: int,
+    request: Request,
+    limit: int = 4,
+) -> list[dict]:
+    """Return enriched upcoming trips with origin, destination label, and status."""
+    gtfs_service = request.app.state.gtfs_service
+
+    try:
+        import zoneinfo
+
+        now_local = datetime.now(zoneinfo.ZoneInfo("Europe/Madrid"))
+    except Exception:
+        now_local = datetime.now()
+
+    date_str = now_local.strftime("%Y%m%d")
+    time_str = now_local.strftime("%H:%M:%S")
+
+    calendar_exists = await gtfs_service._cache.get_json("gtfs:calendar")
+    if not calendar_exists:
+        return [
+            {
+                "trip_id": "MAINTENANCE_FALLBACK",
+                "is_maintenance": True,
+                "trip_headsign": "Service unavailable",
+                "departure_time": "00:00:00",
+                "delay_seconds": None,
+                "origin_stop_name": "",
+                "destination_name": "",
+                "towards_label": "",
+                "trip_status": "scheduled",
+            }
+        ]
+
+    trips = await gtfs_service.get_upcoming_trips(
+        route_id=route_id,
+        direction_id=direction_id,
+        date_str=date_str,
+        time_str=time_str,
+        limit=max(limit * 4, 20),
+    )
+
+    try:
+        rt_trips = await request.app.state.atm_rt_service.get_cached_trips()
+    except Exception:
+        rt_trips = []
+
+    rt_by_trip_id = {trip.trip_id: trip for trip in rt_trips}
+
+    enriched: list[dict] = []
+    now_epoch = int(now_local.timestamp())
+
+    for trip in trips:
+        trip_id = trip.get("trip_id", "")
+        if not trip_id:
+            continue
+
+        rt_trip = rt_by_trip_id.get(trip_id)
+        first_stop_delay_seconds = _get_first_stop_delay_seconds(rt_trip) if rt_trip else None
+
+        scheduled_epoch = int(trip.get("scheduled_epoch", 0) or 0)
+        effective_delay = first_stop_delay_seconds if first_stop_delay_seconds is not None else 0
+        expected_departure_epoch = scheduled_epoch + effective_delay
+
+        # Remove stale trips that are too far in the past after delay adjustment.
+        if expected_departure_epoch and expected_departure_epoch < (now_epoch - 600):
+            continue
+
+        seconds_until_expected = expected_departure_epoch - now_epoch
+        has_first_stop_rt = first_stop_delay_seconds is not None
+
+        if has_first_stop_rt and first_stop_delay_seconds > 0:
+            trip_status = "delayed"
+        elif has_first_stop_rt and first_stop_delay_seconds < 0:
+            trip_status = "early"
+        elif has_first_stop_rt and seconds_until_expected <= 600:
+            trip_status = "on_time"
+        else:
+            trip_status = "scheduled"
+
+        destination_name = (trip.get("destination_name") or trip.get("trip_headsign") or "").strip()
+        towards_label = (trip.get("towards_label") or (f"Towards {destination_name}" if destination_name else "")).strip()
+
+        enriched.append(
+            {
+                "trip_id": trip_id,
+                "route_id": trip.get("route_id", route_id),
+                "service_id": trip.get("service_id", ""),
+                "trip_headsign": trip.get("trip_headsign", ""),
+                "departure_time": trip.get("departure_time", ""),
+                "scheduled_epoch": scheduled_epoch,
+                "expected_departure_epoch": expected_departure_epoch,
+                "delay_seconds": first_stop_delay_seconds,
+                "has_rt_first_stop_update": has_first_stop_rt,
+                "origin_stop_name": trip.get("origin_stop_name", ""),
+                "destination_name": destination_name,
+                "towards_label": towards_label,
+                "trip_status": trip_status,
+            }
+        )
+
+        if len(enriched) >= limit:
+            break
+
+    return enriched

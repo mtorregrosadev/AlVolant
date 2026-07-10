@@ -2,14 +2,10 @@
 ATM T-mobilitat static GTFS service.
 
 Downloads the static GTFS ZIP from the T-mobilitat Open Data portal and
-extracts route shapes (``shapes.txt``), route metadata (``routes.txt``),
-and trip→shape mappings (``trips.txt``).
+extracts route shapes, route metadata, trips, and stop sequences.
 
-The processed shapes are stored in Redis as GeoJSON LineString features
-so the tablet frontend can render route polylines directly on the map
-without any client-side conversion.
-
-Shapes are refreshed daily (configurable via ``ATM_GTFS_REFRESH_HOURS``).
+The processed data is cached in Redis with both route-level and trip-level
+indexes so clients can render exact trip variants on the map.
 """
 
 from __future__ import annotations
@@ -26,7 +22,7 @@ from app.cache.redis_manager import CacheManager
 from app.config import Settings
 from app.core.exceptions import ExternalAPIError, GTFSParseError
 from app.core.logging import get_logger
-from app.models.gtfs import GTFSShapesResponse, RouteInfo, RouteShape
+from app.models.gtfs import DirectionInfo, GTFSShapesResponse, RouteInfo, RouteShape
 
 logger = get_logger(__name__)
 
@@ -36,25 +32,22 @@ _KEY_SHAPE_PREFIX = "gtfs:shapes:route"
 _KEY_ROUTES = "gtfs:routes:all"
 _KEY_STOPS_PREFIX = "gtfs:stops:route"
 _KEY_LAST_UPDATED = "gtfs:meta:last_updated"
+_KEY_CALENDAR = "gtfs:calendar"
+_KEY_CALENDAR_DATES = "gtfs:calendar_dates"
+_KEY_TRIPS_PREFIX = "gtfs:trips:route"
+_KEY_TRIP_META_PREFIX = "gtfs:trip:meta"
+_KEY_TRIP_STOPS_PREFIX = "gtfs:trip:stops"
+_KEY_TRIP_SHAPE_PREFIX = "gtfs:trip:shape"
 
 
 class GTFSService:
-    """Loader and cache writer for ATM T-mobilitat static GTFS data.
-
-    Args:
-        settings: Application settings (injected).
-        cache: Redis cache manager (injected).
-    """
+    """Loader and cache writer for ATM T-mobilitat static GTFS data."""
 
     def __init__(self, settings: Settings, cache: CacheManager) -> None:
         self._settings = settings
         self._cache = cache
         self._gtfs_url = settings.ATM_GTFS_URL
         self._http: httpx.AsyncClient | None = None
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
 
     async def start(self) -> None:
         """Initialize the HTTP client for GTFS downloads."""
@@ -65,7 +58,7 @@ class GTFSService:
             http2=True,
             follow_redirects=True,
         )
-        logger.info("GTFS HTTP client initialized → %s", self._gtfs_url)
+        logger.info("GTFS HTTP client initialized -> %s", self._gtfs_url)
 
     async def close(self) -> None:
         """Close the HTTP client."""
@@ -79,58 +72,631 @@ class GTFSService:
             raise RuntimeError("GTFSService.start() has not been called")
         return self._http
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     async def load_and_cache_shapes(self) -> int:
-        """Download the GTFS ZIP, parse shapes, and cache as GeoJSON.
-
-        This is intended to be called:
-        - Once on application startup
-        - Periodically (daily) by a refresh task
-
-        Returns:
-            Number of route shapes loaded and cached.
-
-        Raises:
-            ExternalAPIError: If the download fails.
-            GTFSParseError: If required GTFS files are missing or malformed.
-        """
-        logger.info("Starting GTFS shapes load from %s", self._gtfs_url)
+        """Download GTFS ZIP, parse static entities, and cache route/trip indexes."""
+        logger.info("Starting GTFS load from %s", self._gtfs_url)
 
         zip_bytes = await self._download_gtfs_zip()
-        shapes_data, routes_data, trips_data, stops_data, stop_times_data = self._extract_gtfs_files(zip_bytes)
+        (
+            shapes_data,
+            routes_data,
+            trips_data,
+            stops_data,
+            stop_times_data,
+            calendar_data,
+            calendar_dates_data,
+        ) = self._extract_gtfs_files(zip_bytes)
 
-        # Parse CSV files
         shapes_by_id = self._parse_shapes(shapes_data)
         routes_by_id = self._parse_routes(routes_data)
-        route_to_shape, route_to_trip = self._parse_trips_mapping(trips_data)
-        stops_by_id = self._parse_stops(stops_data)
-        trip_to_stops = self._parse_stop_times(stop_times_data)
+        bus_route_ids = {
+            route_id
+            for route_id, route in routes_by_id.items()
+            if int(route.get("route_type", 3)) == 3
+        }
 
-        # Build GeoJSON features per route
+        trip_rows = self._parse_trip_rows(trips_data, bus_route_ids)
+        stops_by_id = self._parse_stops(stops_data)
+        stop_times_by_trip = self._parse_stop_times(stop_times_data)
+        trip_start_times = self._parse_first_stop_departures(stop_times_by_trip)
+
+        route_to_shape, route_to_trip = self._build_representative_mappings(trip_rows)
+        trip_meta_by_id, trip_stops_by_id, trip_shapes_by_id = self._build_trip_indexes(
+            trip_rows=trip_rows,
+            routes_by_id=routes_by_id,
+            shapes_by_id=shapes_by_id,
+            stops_by_id=stops_by_id,
+            stop_times_by_trip=stop_times_by_trip,
+            trip_start_times=trip_start_times,
+        )
+
+        route_shapes = self._build_route_shapes(
+            route_to_shape=route_to_shape,
+            shapes_by_id=shapes_by_id,
+            routes_by_id=routes_by_id,
+            route_to_trip=route_to_trip,
+            trip_meta_by_id=trip_meta_by_id,
+        )
+
+        deduped_routes = self._build_deduplicated_routes(routes_by_id, trip_meta_by_id)
+        trips_by_route_dir = self._build_trips_by_route_direction(
+            trip_rows,
+            trip_start_times,
+            trip_meta_by_id,
+        )
+        calendar = self._parse_calendar(calendar_data)
+        calendar_dates = self._parse_calendar_dates(calendar_dates_data)
+
+        await self._cache_shapes(route_shapes, deduped_routes)
+        await self._cache_stops(route_to_trip, trip_stops_by_id)
+        await self._cache_calendar_and_trips(calendar, calendar_dates, trips_by_route_dir)
+        await self._cache_trip_indexes(trip_meta_by_id, trip_stops_by_id, trip_shapes_by_id)
+
+        logger.info(
+            "GTFS load complete: %d route-direction shapes, %d trip indexes",
+            len(route_shapes),
+            len(trip_meta_by_id),
+        )
+        return len(route_shapes)
+
+    async def get_all_shapes(self) -> GTFSShapesResponse | None:
+        data = await self._cache.get_json(_KEY_ALL_SHAPES)
+        if data is None:
+            return None
+        return GTFSShapesResponse(**data)
+
+    async def get_route_shape(
+        self,
+        route_id: str,
+        direction_id: int | None = None,
+        trip_id: str | None = None,
+    ) -> RouteShape | None:
+        if trip_id:
+            if not await self._trip_matches_route(route_id, trip_id):
+                return None
+            trip_shape = await self._cache.get_json(f"{_KEY_TRIP_SHAPE_PREFIX}:{trip_id}")
+            if trip_shape is not None:
+                return RouteShape(**trip_shape)
+
+        for candidate_route_id in await self._resolve_group_route_ids(route_id):
+            data = None
+            if direction_id is not None:
+                data = await self._cache.get_json(
+                    f"{_KEY_SHAPE_PREFIX}:{candidate_route_id}:{direction_id}"
+                )
+            if data is None:
+                data = await self._cache.get_json(f"{_KEY_SHAPE_PREFIX}:{candidate_route_id}")
+            if data is not None:
+                return RouteShape(**data)
+
+        return None
+
+    async def get_route_stops(
+        self,
+        route_id: str,
+        direction_id: int | None = None,
+        trip_id: str | None = None,
+    ) -> dict | None:
+        if trip_id:
+            if not await self._trip_matches_route(route_id, trip_id):
+                return None
+            trip_stops = await self._cache.get_json(f"{_KEY_TRIP_STOPS_PREFIX}:{trip_id}")
+            if trip_stops is not None:
+                return trip_stops
+
+        for candidate_route_id in await self._resolve_group_route_ids(route_id):
+            data = None
+            if direction_id is not None:
+                data = await self._cache.get_json(
+                    f"{_KEY_STOPS_PREFIX}:{candidate_route_id}:{direction_id}"
+                )
+            if data is None:
+                data = await self._cache.get_json(f"{_KEY_STOPS_PREFIX}:{candidate_route_id}")
+            if data is not None:
+                return data
+
+        return None
+
+    async def get_all_routes(self) -> list[RouteInfo]:
+        data = await self._cache.get_json(_KEY_ROUTES)
+        if data is None:
+            return []
+        return [RouteInfo(**route) for route in data]
+
+    async def get_trip_meta(self, trip_id: str) -> dict | None:
+        return await self._cache.get_json(f"{_KEY_TRIP_META_PREFIX}:{trip_id}")
+
+    async def get_upcoming_trips(
+        self,
+        route_id: str,
+        direction_id: int,
+        date_str: str,
+        time_str: str,
+        limit: int = 4,
+    ) -> list[dict]:
+        """Fetch upcoming trips for route/direction with calendar-aware service-day logic."""
+        from datetime import timedelta
+
+        try:
+            import zoneinfo
+
+            local_tz = zoneinfo.ZoneInfo("Europe/Madrid")
+        except Exception:
+            local_tz = None
+
+        route_ids = await self._resolve_group_route_ids(route_id)
+        grouped_trips: list[dict] = []
+        for candidate_route_id in route_ids:
+            trips_key = f"{_KEY_TRIPS_PREFIX}:{candidate_route_id}:{direction_id}"
+            grouped_trips.extend(await self._cache.get_json(trips_key) or [])
+
+        if not grouped_trips:
+            return []
+
+        calendar = await self._cache.get_json(_KEY_CALENDAR) or []
+        calendar_dates = await self._cache.get_json(_KEY_CALENDAR_DATES) or []
+
+        calendar_by_service = {c["service_id"]: c for c in calendar}
+        exceptions_by_service_date = {
+            (cd["service_id"], cd["date"]): cd["exception_type"]
+            for cd in calendar_dates
+        }
+
+        try:
+            query_dt = datetime.strptime(f"{date_str} {time_str}", "%Y%m%d %H:%M:%S")
+            if local_tz:
+                query_dt = query_dt.replace(tzinfo=local_tz)
+        except Exception:
+            query_dt = datetime.now(tz=local_tz) if local_tz else datetime.now()
+
+        service_days = [query_dt - timedelta(days=1), query_dt, query_dt + timedelta(days=1)]
+        candidates: list[dict] = []
+
+        for service_day in service_days:
+            service_date_str = service_day.strftime("%Y%m%d")
+            service_weekday = service_day.strftime("%A").lower()
+            service_midnight = datetime(service_day.year, service_day.month, service_day.day)
+            if local_tz:
+                service_midnight = service_midnight.replace(tzinfo=local_tz)
+
+            for trip in grouped_trips:
+                service_id = trip.get("service_id", "")
+                if not service_id:
+                    continue
+
+                exception_type = exceptions_by_service_date.get((service_id, service_date_str))
+                is_active = False
+                if exception_type == 1:
+                    is_active = True
+                elif exception_type == 2:
+                    is_active = False
+                else:
+                    cal = calendar_by_service.get(service_id)
+                    if cal:
+                        in_range = cal["start_date"] <= service_date_str <= cal["end_date"]
+                        runs_on_weekday = cal.get(service_weekday, 0) == 1
+                        is_active = in_range and runs_on_weekday
+
+                if not is_active:
+                    continue
+
+                dep_time_str = trip.get("departure_time")
+                if not dep_time_str:
+                    continue
+
+                try:
+                    parts = dep_time_str.split(":")
+                    hours = int(parts[0])
+                    minutes = int(parts[1])
+                    seconds = int(parts[2]) if len(parts) > 2 else 0
+                except Exception:
+                    continue
+
+                trip_dep_dt = service_midnight + timedelta(
+                    hours=hours,
+                    minutes=minutes,
+                    seconds=seconds,
+                )
+                if trip_dep_dt >= query_dt:
+                    trip_copy = dict(trip)
+                    trip_copy["_abs_dep"] = trip_dep_dt
+                    trip_copy["scheduled_epoch"] = int(trip_dep_dt.timestamp())
+                    candidates.append(trip_copy)
+
+        candidates.sort(key=lambda item: item["_abs_dep"])
+
+        seen_trip_ids: set[str] = set()
+        final_trips: list[dict] = []
+        for candidate in candidates:
+            trip_id = candidate.get("trip_id")
+            if not trip_id or trip_id in seen_trip_ids:
+                continue
+
+            seen_trip_ids.add(trip_id)
+            normalized = dict(candidate)
+            normalized.pop("_abs_dep", None)
+            final_trips.append(normalized)
+
+            if len(final_trips) >= max(limit * 5, 20):
+                break
+
+        return final_trips
+
+    async def _download_gtfs_zip(self) -> bytes:
+        try:
+            response = await self.http.get(self._gtfs_url)
+            response.raise_for_status()
+            return response.content
+        except httpx.TimeoutException as exc:
+            raise ExternalAPIError("ATM", "Timeout downloading GTFS ZIP") from exc
+        except httpx.HTTPStatusError as exc:
+            raise ExternalAPIError(
+                "ATM",
+                f"HTTP {exc.response.status_code} downloading GTFS ZIP",
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise ExternalAPIError("ATM", f"Connection error downloading GTFS ZIP: {exc}") from exc
+
+    @staticmethod
+    def _extract_gtfs_files(zip_bytes: bytes) -> tuple[str, str, str, str, str, str, str]:
+        try:
+            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+                file_list = zf.namelist()
+                required = ["shapes.txt", "routes.txt", "trips.txt", "stops.txt", "stop_times.txt"]
+                missing = [file_name for file_name in required if file_name not in file_list]
+                if missing:
+                    raise GTFSParseError("gtfs.zip", f"Missing required files: {', '.join(missing)}")
+
+                shapes_data = zf.read("shapes.txt").decode("utf-8-sig")
+                routes_data = zf.read("routes.txt").decode("utf-8-sig")
+                trips_data = zf.read("trips.txt").decode("utf-8-sig")
+                stops_data = zf.read("stops.txt").decode("utf-8-sig")
+                stop_times_data = zf.read("stop_times.txt").decode("utf-8-sig")
+                calendar_data = zf.read("calendar.txt").decode("utf-8-sig") if "calendar.txt" in file_list else ""
+                calendar_dates_data = (
+                    zf.read("calendar_dates.txt").decode("utf-8-sig") if "calendar_dates.txt" in file_list else ""
+                )
+
+                return (
+                    shapes_data,
+                    routes_data,
+                    trips_data,
+                    stops_data,
+                    stop_times_data,
+                    calendar_data,
+                    calendar_dates_data,
+                )
+        except zipfile.BadZipFile as exc:
+            raise GTFSParseError("gtfs.zip", f"Invalid ZIP file: {exc}") from exc
+
+    @staticmethod
+    def _parse_shapes(csv_data: str) -> dict[str, list[dict]]:
+        shapes: dict[str, list[dict]] = defaultdict(list)
+        reader = csv.DictReader(io.StringIO(csv_data))
+
+        for row in reader:
+            shape_id = row.get("shape_id", "").strip()
+            if not shape_id:
+                continue
+
+            shapes[shape_id].append(
+                {
+                    "lat": float(row.get("shape_pt_lat", 0) or 0),
+                    "lon": float(row.get("shape_pt_lon", 0) or 0),
+                    "sequence": int(row.get("shape_pt_sequence", 0) or 0),
+                }
+            )
+
+        for shape_id in shapes:
+            shapes[shape_id].sort(key=lambda point: point["sequence"])
+
+        return dict(shapes)
+
+    @staticmethod
+    def _parse_routes(csv_data: str) -> dict[str, dict]:
+        routes: dict[str, dict] = {}
+        reader = csv.DictReader(io.StringIO(csv_data))
+
+        for row in reader:
+            route_id = row.get("route_id", "").strip()
+            if not route_id:
+                continue
+
+            route_type_raw = row.get("route_type", "3").strip()
+            try:
+                route_type = int(route_type_raw)
+            except ValueError:
+                route_type = 3
+
+            routes[route_id] = {
+                "route_short_name": row.get("route_short_name", "").strip(),
+                "route_long_name": row.get("route_long_name", "").strip(),
+                "route_color": row.get("route_color", "").strip(),
+                "route_text_color": row.get("route_text_color", "").strip(),
+                "route_type": route_type,
+                "agency_id": row.get("agency_id", "").strip(),
+            }
+
+        return routes
+
+    @staticmethod
+    def _parse_trip_rows(csv_data: str, bus_route_ids: set[str]) -> list[dict]:
+        trip_rows: list[dict] = []
+        reader = csv.DictReader(io.StringIO(csv_data))
+
+        for row in reader:
+            route_id = row.get("route_id", "").strip()
+            trip_id = row.get("trip_id", "").strip()
+            if not route_id or not trip_id or route_id not in bus_route_ids:
+                continue
+
+            direction_raw = row.get("direction_id", "0").strip()
+            try:
+                direction_id = int(direction_raw)
+            except ValueError:
+                direction_id = 0
+
+            trip_rows.append(
+                {
+                    "route_id": route_id,
+                    "direction_id": direction_id,
+                    "trip_id": trip_id,
+                    "service_id": row.get("service_id", "").strip(),
+                    "trip_headsign": row.get("trip_headsign", "").strip(),
+                    "shape_id": row.get("shape_id", "").strip(),
+                }
+            )
+
+        return trip_rows
+
+    @staticmethod
+    def _parse_stops(csv_data: str) -> dict[str, dict]:
+        stops: dict[str, dict] = {}
+        reader = csv.DictReader(io.StringIO(csv_data))
+
+        for row in reader:
+            stop_id = row.get("stop_id", "").strip()
+            if not stop_id:
+                continue
+
+            stops[stop_id] = {
+                "lat": float(row.get("stop_lat", 0) or 0),
+                "lon": float(row.get("stop_lon", 0) or 0),
+                "name": row.get("stop_name", "").strip(),
+            }
+
+        return stops
+
+    @staticmethod
+    def _parse_stop_times(csv_data: str) -> dict[str, list[dict]]:
+        trip_stops: dict[str, list[dict]] = defaultdict(list)
+        reader = csv.DictReader(io.StringIO(csv_data))
+
+        for row in reader:
+            trip_id = row.get("trip_id", "").strip()
+            if not trip_id:
+                continue
+
+            trip_stops[trip_id].append(
+                {
+                    "stop_id": row.get("stop_id", "").strip(),
+                    "sequence": int(row.get("stop_sequence", 0) or 0),
+                    "arrival_time": row.get("arrival_time", "").strip(),
+                    "departure_time": row.get("departure_time", "").strip(),
+                }
+            )
+
+        for trip_id in trip_stops:
+            trip_stops[trip_id].sort(key=lambda stop: stop["sequence"])
+
+        return dict(trip_stops)
+
+    @staticmethod
+    def _parse_first_stop_departures(stop_times_by_trip: dict[str, list[dict]]) -> dict[str, str]:
+        first_departures: dict[str, str] = {}
+        for trip_id, stops in stop_times_by_trip.items():
+            if not stops:
+                continue
+
+            first = min(stops, key=lambda stop: stop["sequence"])
+            departure = first.get("departure_time") or first.get("arrival_time")
+            if departure:
+                first_departures[trip_id] = departure
+
+        return first_departures
+
+    @staticmethod
+    def _build_representative_mappings(trip_rows: list[dict]) -> tuple[dict[tuple[str, int], str], dict[tuple[str, int], str]]:
+        route_to_shape: dict[tuple[str, int], str] = {}
+        route_to_trip: dict[tuple[str, int], str] = {}
+
+        for trip in trip_rows:
+            key = (trip["route_id"], trip["direction_id"])
+            if key not in route_to_shape and trip.get("shape_id"):
+                route_to_shape[key] = trip["shape_id"]
+            if key not in route_to_trip:
+                route_to_trip[key] = trip["trip_id"]
+
+        return route_to_shape, route_to_trip
+
+    @staticmethod
+    def _towards_label(destination_name: str) -> str:
+        clean_destination = destination_name.strip()
+        return f"Towards {clean_destination}" if clean_destination else ""
+
+    def _build_trip_indexes(
+        self,
+        trip_rows: list[dict],
+        routes_by_id: dict[str, dict],
+        shapes_by_id: dict[str, list[dict]],
+        stops_by_id: dict[str, dict],
+        stop_times_by_trip: dict[str, list[dict]],
+        trip_start_times: dict[str, str],
+    ) -> tuple[dict[str, dict], dict[str, dict], dict[str, dict]]:
+        now_iso = datetime.now(tz=timezone.utc).isoformat()
+        trip_meta_by_id: dict[str, dict] = {}
+        trip_stops_by_id: dict[str, dict] = {}
+        trip_shapes_by_id: dict[str, dict] = {}
+
+        for trip in trip_rows:
+            trip_id = trip["trip_id"]
+            route_id = trip["route_id"]
+            direction_id = trip["direction_id"]
+            shape_id = trip.get("shape_id", "")
+            route_info = routes_by_id.get(route_id, {})
+
+            stop_rows = stop_times_by_trip.get(trip_id, [])
+            stop_features: list[dict] = []
+            origin_stop_name = ""
+            destination_stop_name = ""
+            origin_stop_id = ""
+            destination_stop_id = ""
+
+            if stop_rows:
+                first = stop_rows[0]
+                last = stop_rows[-1]
+                origin_stop_id = first.get("stop_id", "")
+                destination_stop_id = last.get("stop_id", "")
+                origin_stop_name = stops_by_id.get(origin_stop_id, {}).get("name", "")
+                destination_stop_name = stops_by_id.get(destination_stop_id, {}).get("name", "")
+
+            for stop in stop_rows:
+                stop_id = stop.get("stop_id", "")
+                stop_info = stops_by_id.get(stop_id)
+                if not stop_info:
+                    continue
+
+                stop_features.append(
+                    {
+                        "type": "Feature",
+                        "properties": {
+                            "route_id": route_id,
+                            "direction_id": direction_id,
+                            "trip_id": trip_id,
+                            "stop_id": stop_id,
+                            "stop_sequence": stop.get("sequence", 0),
+                            "stop_name": stop_info.get("name", ""),
+                        },
+                        "geometry": {
+                            "type": "Point",
+                            "coordinates": [stop_info.get("lon", 0), stop_info.get("lat", 0)],
+                        },
+                    }
+                )
+
+            destination_name = trip.get("trip_headsign") or destination_stop_name
+            trip_meta = {
+                "trip_id": trip_id,
+                "route_id": route_id,
+                "direction_id": direction_id,
+                "service_id": trip.get("service_id", ""),
+                "trip_headsign": trip.get("trip_headsign", ""),
+                "shape_id": shape_id,
+                "departure_time": trip_start_times.get(trip_id, ""),
+                "origin_stop_name": origin_stop_name,
+                "destination_stop_name": destination_stop_name,
+                "origin_stop_id": origin_stop_id,
+                "destination_stop_id": destination_stop_id,
+                "towards_label": self._towards_label(destination_name),
+                "destination_name": destination_name,
+                "route_short_name": route_info.get("route_short_name", ""),
+                "route_long_name": route_info.get("route_long_name", ""),
+                "route_color": route_info.get("route_color", ""),
+                "route_text_color": route_info.get("route_text_color", ""),
+                "route_type": int(route_info.get("route_type", 3)),
+                "agency_id": route_info.get("agency_id", ""),
+            }
+            trip_meta_by_id[trip_id] = trip_meta
+
+            trip_stops_by_id[trip_id] = {
+                "type": "FeatureCollection",
+                "features": stop_features,
+                "route_id": route_id,
+                "direction_id": direction_id,
+                "trip_id": trip_id,
+                "stop_count": len(stop_features),
+                "last_updated": now_iso,
+            }
+
+            if shape_id in shapes_by_id:
+                points = shapes_by_id[shape_id]
+                coordinates = [[point["lon"], point["lat"]] for point in points]
+                geojson_feature = {
+                    "type": "Feature",
+                    "properties": {
+                        "route_id": route_id,
+                        "direction_id": direction_id,
+                        "shape_id": shape_id,
+                        "trip_id": trip_id,
+                        "route_short_name": route_info.get("route_short_name", ""),
+                        "route_long_name": route_info.get("route_long_name", ""),
+                        "route_color": route_info.get("route_color", ""),
+                        "route_text_color": route_info.get("route_text_color", ""),
+                        "route_type": int(route_info.get("route_type", 3)),
+                        "destination_name": destination_name,
+                        "towards_label": self._towards_label(destination_name),
+                    },
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": coordinates,
+                    },
+                }
+
+                trip_shapes_by_id[trip_id] = RouteShape(
+                    route_id=route_id,
+                    shape_id=shape_id,
+                    route_short_name=route_info.get("route_short_name", ""),
+                    route_long_name=route_info.get("route_long_name", ""),
+                    route_color=route_info.get("route_color", ""),
+                    route_text_color=route_info.get("route_text_color", ""),
+                    route_type=int(route_info.get("route_type", 3)),
+                    direction_id=direction_id,
+                    trip_id=trip_id,
+                    destination_name=destination_name,
+                    towards_label=self._towards_label(destination_name),
+                    geojson=geojson_feature,
+                ).model_dump(mode="json")
+
+        return trip_meta_by_id, trip_stops_by_id, trip_shapes_by_id
+
+    def _build_route_shapes(
+        self,
+        route_to_shape: dict[tuple[str, int], str],
+        shapes_by_id: dict[str, list[dict]],
+        routes_by_id: dict[str, dict],
+        route_to_trip: dict[tuple[str, int], str],
+        trip_meta_by_id: dict[str, dict],
+    ) -> list[RouteShape]:
         route_shapes: list[RouteShape] = []
-        for route_id, shape_id in route_to_shape.items():
+
+        for (route_id, direction_id), shape_id in route_to_shape.items():
             if shape_id not in shapes_by_id:
                 continue
 
             route_info = routes_by_id.get(route_id, {})
-            points = shapes_by_id[shape_id]
+            if int(route_info.get("route_type", 3)) != 3:
+                continue
 
-            # GeoJSON coordinates: [longitude, latitude] per spec
-            coordinates = [[p["lon"], p["lat"]] for p in points]
+            representative_trip_id = route_to_trip.get((route_id, direction_id))
+            representative_meta = trip_meta_by_id.get(representative_trip_id or "", {})
+            destination_name = representative_meta.get("destination_name", "")
+            towards_label = representative_meta.get("towards_label", "")
 
+            coordinates = [[point["lon"], point["lat"]] for point in shapes_by_id[shape_id]]
             geojson_feature = {
                 "type": "Feature",
                 "properties": {
                     "route_id": route_id,
+                    "direction_id": direction_id,
                     "shape_id": shape_id,
+                    "trip_id": representative_trip_id,
                     "route_short_name": route_info.get("route_short_name", ""),
                     "route_long_name": route_info.get("route_long_name", ""),
                     "route_color": route_info.get("route_color", ""),
                     "route_text_color": route_info.get("route_text_color", ""),
                     "route_type": int(route_info.get("route_type", 3)),
+                    "destination_name": destination_name,
+                    "towards_label": towards_label,
                 },
                 "geometry": {
                     "type": "LineString",
@@ -147,389 +713,261 @@ class GTFSService:
                     route_color=route_info.get("route_color", ""),
                     route_text_color=route_info.get("route_text_color", ""),
                     route_type=int(route_info.get("route_type", 3)),
+                    direction_id=direction_id,
+                    trip_id=representative_trip_id,
+                    destination_name=destination_name,
+                    towards_label=towards_label,
                     geojson=geojson_feature,
                 )
             )
 
-        # Cache shapes
-        await self._cache_shapes(route_shapes, routes_by_id)
+        return route_shapes
 
-        # Cache stops
-        await self._cache_stops(route_to_trip, trip_to_stops, stops_by_id)
+    def _build_deduplicated_routes(self, routes_by_id: dict[str, dict], trip_meta_by_id: dict[str, dict]) -> list[dict]:
+        grouped: dict[str, list[str]] = defaultdict(list)
 
-        logger.info("GTFS shapes loaded: %d routes cached", len(route_shapes))
-        return len(route_shapes)
-
-    async def get_all_shapes(self) -> GTFSShapesResponse | None:
-        """Retrieve all route shapes from cache as a GeoJSON FeatureCollection.
-
-        Returns:
-            GeoJSON FeatureCollection or ``None`` if not loaded yet.
-        """
-        data = await self._cache.get_json(_KEY_ALL_SHAPES)
-        if data is None:
-            return None
-        return GTFSShapesResponse(**data)
-
-    async def get_route_shape(self, route_id: str) -> RouteShape | None:
-        """Retrieve the shape for a single route from cache.
-
-        Args:
-            route_id: GTFS route_id.
-
-        Returns:
-            Route shape with GeoJSON geometry, or ``None``.
-        """
-        data = await self._cache.get_json(f"{_KEY_SHAPE_PREFIX}:{route_id}")
-        if data is None:
-            return None
-        return RouteShape(**data)
-
-    async def get_route_stops(self, route_id: str) -> dict | None:
-        """Retrieve the stops for a single route from cache as a GeoJSON FeatureCollection.
-
-        Args:
-            route_id: GTFS route_id.
-
-        Returns:
-            GeoJSON FeatureCollection of stops, or ``None``.
-        """
-        data = await self._cache.get_json(f"{_KEY_STOPS_PREFIX}:{route_id}")
-        return data
-
-    async def get_all_routes(self) -> list[RouteInfo]:
-        """Retrieve route metadata (without geometry) from cache.
-
-        Returns:
-            List of route info objects.
-        """
-        data = await self._cache.get_json(_KEY_ROUTES)
-        if data is None:
-            return []
-        return [RouteInfo(**r) for r in data]
-
-    # ------------------------------------------------------------------
-    # Private — Download
-    # ------------------------------------------------------------------
-
-    async def _download_gtfs_zip(self) -> bytes:
-        """Download the GTFS ZIP file.
-
-        Returns:
-            Raw ZIP bytes.
-
-        Raises:
-            ExternalAPIError: On network/HTTP errors.
-        """
-        try:
-            response = await self.http.get(self._gtfs_url)
-            response.raise_for_status()
-            return response.content
-        except httpx.TimeoutException as exc:
-            raise ExternalAPIError("ATM", "Timeout downloading GTFS ZIP") from exc
-        except httpx.HTTPStatusError as exc:
-            raise ExternalAPIError(
-                "ATM",
-                f"HTTP {exc.response.status_code} downloading GTFS ZIP",
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise ExternalAPIError(
-                "ATM",
-                f"Connection error downloading GTFS ZIP: {exc}",
-            ) from exc
-
-    # ------------------------------------------------------------------
-    # Private — ZIP Extraction
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _extract_gtfs_files(zip_bytes: bytes) -> tuple[str, str, str, str, str]:
-        """Extract shapes.txt, routes.txt, trips.txt, stops.txt, and stop_times.txt from the ZIP.
-
-        Args:
-            zip_bytes: Raw ZIP file content.
-
-        Returns:
-            Tuple of (shapes, routes, trips, stops, stop_times) as strings.
-
-        Raises:
-            GTFSParseError: If required files are missing.
-        """
-        try:
-            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-                file_list = zf.namelist()
-                logger.debug("GTFS ZIP contents: %s", file_list)
-
-                required = ["shapes.txt", "routes.txt", "trips.txt", "stops.txt", "stop_times.txt"]
-                missing = [f for f in required if f not in file_list]
-                if missing:
-                    raise GTFSParseError(
-                        "gtfs.zip",
-                        f"Missing required files: {', '.join(missing)}",
-                    )
-
-                shapes_data = zf.read("shapes.txt").decode("utf-8-sig")
-                routes_data = zf.read("routes.txt").decode("utf-8-sig")
-                trips_data = zf.read("trips.txt").decode("utf-8-sig")
-                stops_data = zf.read("stops.txt").decode("utf-8-sig")
-                stop_times_data = zf.read("stop_times.txt").decode("utf-8-sig")
-
-                return shapes_data, routes_data, trips_data, stops_data, stop_times_data
-        except zipfile.BadZipFile as exc:
-            raise GTFSParseError("gtfs.zip", f"Invalid ZIP file: {exc}") from exc
-
-    # ------------------------------------------------------------------
-    # Private — CSV Parsing
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _parse_shapes(csv_data: str) -> dict[str, list[dict]]:
-        """Parse shapes.txt into a dict of shape_id → sorted points.
-
-        Args:
-            csv_data: Contents of shapes.txt.
-
-        Returns:
-            Dict mapping shape_id to a list of point dicts sorted by sequence.
-        """
-        shapes: dict[str, list[dict]] = defaultdict(list)
-        reader = csv.DictReader(io.StringIO(csv_data))
-
-        for row in reader:
-            shape_id = row.get("shape_id", "").strip()
-            if not shape_id:
+        for route_id, route_info in routes_by_id.items():
+            if int(route_info.get("route_type", 3)) != 3:
                 continue
-            shapes[shape_id].append(
+            short_name = (route_info.get("route_short_name") or route_id).strip().upper()
+            grouped[short_name].append(route_id)
+
+        route_infos: list[dict] = []
+        for grouped_route_ids in grouped.values():
+            grouped_route_ids.sort()
+            canonical_route_id = grouped_route_ids[0]
+            canonical = routes_by_id.get(canonical_route_id, {})
+
+            direction_destinations: list[DirectionInfo] = []
+            by_direction: dict[int, str] = {}
+            for trip_meta in trip_meta_by_id.values():
+                if trip_meta.get("route_id") not in grouped_route_ids:
+                    continue
+                direction_id = int(trip_meta.get("direction_id", 0))
+                if direction_id in by_direction and by_direction[direction_id]:
+                    continue
+                destination_name = (
+                    trip_meta.get("trip_headsign")
+                    or trip_meta.get("destination_stop_name")
+                    or canonical.get("route_long_name", "")
+                )
+                by_direction[direction_id] = destination_name
+
+            for direction_id in sorted(by_direction.keys()):
+                destination_name = by_direction[direction_id]
+                direction_destinations.append(
+                    DirectionInfo(
+                        direction_id=direction_id,
+                        destination_name=destination_name,
+                        label=self._towards_label(destination_name),
+                    )
+                )
+
+            route_infos.append(
+                RouteInfo(
+                    route_id=canonical_route_id,
+                    route_short_name=canonical.get("route_short_name", ""),
+                    route_long_name=canonical.get("route_long_name", ""),
+                    route_color=canonical.get("route_color", ""),
+                    route_text_color=canonical.get("route_text_color", ""),
+                    route_type=int(canonical.get("route_type", 3)),
+                    agency_id=canonical.get("agency_id", ""),
+                    route_ids=grouped_route_ids,
+                    direction_destinations=direction_destinations,
+                    display_name=(
+                        f"{canonical.get('route_short_name', '').strip()} {canonical.get('route_long_name', '').strip()}"
+                    ).strip(),
+                ).model_dump(mode="json")
+            )
+
+        route_infos.sort(key=lambda route: (route.get("route_short_name") or "", route.get("route_id") or ""))
+        return route_infos
+
+    @staticmethod
+    def _build_trips_by_route_direction(
+        trip_rows: list[dict],
+        trip_start_times: dict[str, str],
+        trip_meta_by_id: dict[str, dict],
+    ) -> dict[tuple[str, int], list[dict]]:
+        trips_by_route_dir: dict[tuple[str, int], list[dict]] = defaultdict(list)
+
+        for trip in trip_rows:
+            trip_id = trip["trip_id"]
+            departure_time = trip_start_times.get(trip_id)
+            if not departure_time:
+                continue
+
+            meta = trip_meta_by_id.get(trip_id, {})
+            key = (trip["route_id"], trip["direction_id"])
+            trips_by_route_dir[key].append(
                 {
-                    "lat": float(row.get("shape_pt_lat", 0)),
-                    "lon": float(row.get("shape_pt_lon", 0)),
-                    "sequence": int(row.get("shape_pt_sequence", 0)),
-                    "dist": float(row.get("shape_dist_traveled", 0) or 0),
+                    "trip_id": trip_id,
+                    "route_id": trip["route_id"],
+                    "service_id": trip.get("service_id", ""),
+                    "trip_headsign": trip.get("trip_headsign", ""),
+                    "departure_time": departure_time,
+                    "origin_stop_name": meta.get("origin_stop_name", ""),
+                    "destination_stop_name": meta.get("destination_stop_name", ""),
+                    "towards_label": meta.get("towards_label", ""),
+                    "destination_name": meta.get("destination_name", ""),
+                    "shape_id": trip.get("shape_id", ""),
                 }
             )
 
-        # Sort each shape's points by sequence
-        for shape_id in shapes:
-            shapes[shape_id].sort(key=lambda p: p["sequence"])
+        for route_key in trips_by_route_dir:
+            trips_by_route_dir[route_key].sort(key=lambda item: item.get("departure_time", ""))
 
-        logger.debug("Parsed %d shapes from shapes.txt", len(shapes))
-        return dict(shapes)
+        return dict(trips_by_route_dir)
 
-    @staticmethod
-    def _parse_routes(csv_data: str) -> dict[str, dict]:
-        """Parse routes.txt into a dict of route_id → route metadata.
-
-        Args:
-            csv_data: Contents of routes.txt.
-
-        Returns:
-            Dict mapping route_id to route metadata dicts.
-        """
-        routes: dict[str, dict] = {}
-        reader = csv.DictReader(io.StringIO(csv_data))
-
-        for row in reader:
-            route_id = row.get("route_id", "").strip()
-            if not route_id:
-                continue
-            routes[route_id] = {
-                "route_short_name": row.get("route_short_name", "").strip(),
-                "route_long_name": row.get("route_long_name", "").strip(),
-                "route_color": row.get("route_color", "").strip(),
-                "route_text_color": row.get("route_text_color", "").strip(),
-                "route_type": row.get("route_type", "3").strip(),
-                "agency_id": row.get("agency_id", "").strip(),
-            }
-
-        logger.debug("Parsed %d routes from routes.txt", len(routes))
-        return routes
-
-    @staticmethod
-    def _parse_trips_mapping(csv_data: str) -> tuple[dict[str, str], dict[str, str]]:
-        """Parse trips.txt to extract route_id → shape_id and route_id → trip_id mappings.
-
-        When multiple trips map a route to different shapes, we keep the
-        first occurrence.  The T-mobilitat "simplified" dataset should
-        already have deduplicated these.
-
-        Args:
-            csv_data: Contents of trips.txt.
-
-        Returns:
-            Tuple of (route_to_shape dict, route_to_trip dict).
-        """
-        route_to_shape: dict[str, str] = {}
-        route_to_trip: dict[str, str] = {}
-        reader = csv.DictReader(io.StringIO(csv_data))
-
-        for row in reader:
-            route_id = row.get("route_id", "").strip()
-            shape_id = row.get("shape_id", "").strip()
-            trip_id = row.get("trip_id", "").strip()
-            if route_id and shape_id and route_id not in route_to_shape:
-                route_to_shape[route_id] = shape_id
-            if route_id and trip_id and route_id not in route_to_trip:
-                route_to_trip[route_id] = trip_id
-
-        logger.debug("Mapped %d routes to shapes from trips.txt", len(route_to_shape))
-        return route_to_shape, route_to_trip
-
-    @staticmethod
-    def _parse_stops(csv_data: str) -> dict[str, dict]:
-        """Parse stops.txt to extract stop details.
-        
-        Returns:
-            Dict mapping stop_id to dict with lat, lon, and name.
-        """
-        stops: dict[str, dict] = {}
-        reader = csv.DictReader(io.StringIO(csv_data))
-        for row in reader:
-            stop_id = row.get("stop_id", "").strip()
-            if stop_id:
-                stops[stop_id] = {
-                    "lat": float(row.get("stop_lat", 0)),
-                    "lon": float(row.get("stop_lon", 0)),
-                    "name": row.get("stop_name", "").strip()
-                }
-        return stops
-
-    @staticmethod
-    def _parse_stop_times(csv_data: str) -> dict[str, list[str]]:
-        """Parse stop_times.txt to map trip_id to ordered list of stop_ids.
-        
-        Returns:
-            Dict mapping trip_id to a list of stop_id strings.
-        """
-        trip_stops: dict[str, list[dict]] = defaultdict(list)
-        reader = csv.DictReader(io.StringIO(csv_data))
-        for row in reader:
-            trip_id = row.get("trip_id", "").strip()
-            if not trip_id:
-                continue
-            trip_stops[trip_id].append({
-                "stop_id": row.get("stop_id", "").strip(),
-                "sequence": int(row.get("stop_sequence", 0))
-            })
-        
-        # Sort by sequence
-        result: dict[str, list[str]] = {}
-        for trip_id, stops in trip_stops.items():
-            stops.sort(key=lambda x: x["sequence"])
-            result[trip_id] = [s["stop_id"] for s in stops]
-        return result
-
-    # ------------------------------------------------------------------
-    # Private — Caching
-    # ------------------------------------------------------------------
-
-    async def _cache_shapes(
-        self,
-        route_shapes: list[RouteShape],
-        routes_metadata: dict[str, dict],
-    ) -> None:
-        """Write processed shapes and route metadata to Redis.
-
-        Caches:
-        - Individual route shapes: ``gtfs:shapes:route:{route_id}``
-        - All shapes as FeatureCollection: ``gtfs:shapes:all``
-        - Route metadata list: ``gtfs:routes:all``
-        - Last update timestamp: ``gtfs:meta:last_updated``
-
-        Args:
-            route_shapes: List of processed route shapes.
-            routes_metadata: Raw route metadata dict.
-        """
+    async def _cache_shapes(self, route_shapes: list[RouteShape], route_infos: list[dict]) -> None:
         ttl = self._settings.CACHE_TTL_GTFS_SHAPES
         now_iso = datetime.now(tz=timezone.utc).isoformat()
 
-        # Build the FeatureCollection
         feature_collection = GTFSShapesResponse(
             type="FeatureCollection",
-            features=[rs.geojson for rs in route_shapes],
+            features=[route_shape.geojson for route_shape in route_shapes],
             route_count=len(route_shapes),
             last_updated=now_iso,
         )
 
-        # Cache the full FeatureCollection
-        await self._cache.set_json(
-            _KEY_ALL_SHAPES,
-            feature_collection.model_dump(mode="json"),
-            ttl=ttl,
-        )
-
-        # Cache individual route shapes (pipeline for speed)
-        individual_mapping: dict[str, dict] = {}
-        for rs in route_shapes:
-            individual_mapping[f"{_KEY_SHAPE_PREFIX}:{rs.route_id}"] = rs.model_dump(
-                mode="json"
-            )
-        if individual_mapping:
-            await self._cache.mset_json(individual_mapping, ttl=ttl)
-
-        # Cache route metadata list
-        route_infos = [
-            RouteInfo(
-                route_id=rid,
-                route_short_name=rdata.get("route_short_name", ""),
-                route_long_name=rdata.get("route_long_name", ""),
-                route_color=rdata.get("route_color", ""),
-                route_text_color=rdata.get("route_text_color", ""),
-                route_type=int(rdata.get("route_type", 3)),
-                agency_id=rdata.get("agency_id", ""),
-            ).model_dump(mode="json")
-            for rid, rdata in routes_metadata.items()
-        ]
+        await self._cache.set_json(_KEY_ALL_SHAPES, feature_collection.model_dump(mode="json"), ttl=ttl)
         await self._cache.set_json(_KEY_ROUTES, route_infos, ttl=ttl)
-
-        # Store timestamp
         await self._cache.set(_KEY_LAST_UPDATED, now_iso, ttl=ttl)
 
-        logger.info(
-            "Cached %d route shapes + %d route metadata entries (TTL=%ds)",
-            len(route_shapes),
-            len(route_infos),
-            ttl,
-        )
-
-    async def _cache_stops(
-        self,
-        route_to_trip: dict[str, str],
-        trip_to_stops: dict[str, list[str]],
-        stops_by_id: dict[str, dict],
-    ) -> None:
-        """Write stops FeatureCollections to Redis per route."""
-        ttl = self._settings.CACHE_TTL_GTFS_SHAPES
-        now_iso = datetime.now(tz=timezone.utc).isoformat()
-        
         individual_mapping: dict[str, dict] = {}
-        for route_id, trip_id in route_to_trip.items():
-            stop_ids = trip_to_stops.get(trip_id, [])
-            features = []
-            for sid in stop_ids:
-                sinfo = stops_by_id.get(sid)
-                if not sinfo:
-                    continue
-                features.append({
-                    "type": "Feature",
-                    "properties": {
-                        "route_id": route_id,
-                        "stop_id": sid,
-                        "stop_name": sinfo["name"],
-                    },
-                    "geometry": {
-                        "type": "Point",
-                        "coordinates": [sinfo["lon"], sinfo["lat"]]
-                    }
-                })
-                
-            individual_mapping[f"{_KEY_STOPS_PREFIX}:{route_id}"] = {
-                "type": "FeatureCollection",
-                "features": features,
-                "route_id": route_id,
-                "stop_count": len(features),
-                "last_updated": now_iso
-            }
+        for route_shape in route_shapes:
+            direction_id = route_shape.direction_id if route_shape.direction_id is not None else 0
+            individual_mapping[
+                f"{_KEY_SHAPE_PREFIX}:{route_shape.route_id}:{direction_id}"
+            ] = route_shape.model_dump(mode="json")
+            if direction_id == 0:
+                individual_mapping[f"{_KEY_SHAPE_PREFIX}:{route_shape.route_id}"] = route_shape.model_dump(mode="json")
 
         if individual_mapping:
             await self._cache.mset_json(individual_mapping, ttl=ttl)
-            logger.info("Cached stops for %d routes", len(individual_mapping))
+
+    async def _cache_stops(self, route_to_trip: dict[tuple[str, int], str], trip_stops_by_id: dict[str, dict]) -> None:
+        ttl = self._settings.CACHE_TTL_GTFS_SHAPES
+        mapping: dict[str, dict] = {}
+
+        for (route_id, direction_id), trip_id in route_to_trip.items():
+            route_stops = trip_stops_by_id.get(trip_id)
+            if route_stops is None:
+                continue
+
+            mapping[f"{_KEY_STOPS_PREFIX}:{route_id}:{direction_id}"] = route_stops
+            if direction_id == 0:
+                mapping[f"{_KEY_STOPS_PREFIX}:{route_id}"] = route_stops
+
+        if mapping:
+            await self._cache.mset_json(mapping, ttl=ttl)
+
+    async def _cache_calendar_and_trips(
+        self,
+        calendar: list[dict],
+        calendar_dates: list[dict],
+        trips_by_route_dir: dict[tuple[str, int], list[dict]],
+    ) -> None:
+        ttl = self._settings.CACHE_TTL_GTFS_SHAPES
+        await self._cache.set_json(_KEY_CALENDAR, calendar, ttl=ttl)
+        await self._cache.set_json(_KEY_CALENDAR_DATES, calendar_dates, ttl=ttl)
+
+        mapping = {
+            f"{_KEY_TRIPS_PREFIX}:{route_id}:{direction_id}": trips
+            for (route_id, direction_id), trips in trips_by_route_dir.items()
+        }
+        if mapping:
+            await self._cache.mset_json(mapping, ttl=ttl)
+
+    async def _cache_trip_indexes(
+        self,
+        trip_meta_by_id: dict[str, dict],
+        trip_stops_by_id: dict[str, dict],
+        trip_shapes_by_id: dict[str, dict],
+    ) -> None:
+        ttl = self._settings.CACHE_TTL_GTFS_SHAPES
+
+        meta_mapping = {
+            f"{_KEY_TRIP_META_PREFIX}:{trip_id}": meta
+            for trip_id, meta in trip_meta_by_id.items()
+        }
+        if meta_mapping:
+            await self._cache.mset_json(meta_mapping, ttl=ttl)
+
+        stop_mapping = {
+            f"{_KEY_TRIP_STOPS_PREFIX}:{trip_id}": stops
+            for trip_id, stops in trip_stops_by_id.items()
+        }
+        if stop_mapping:
+            await self._cache.mset_json(stop_mapping, ttl=ttl)
+
+        shape_mapping = {
+            f"{_KEY_TRIP_SHAPE_PREFIX}:{trip_id}": shape
+            for trip_id, shape in trip_shapes_by_id.items()
+        }
+        if shape_mapping:
+            await self._cache.mset_json(shape_mapping, ttl=ttl)
+
+    @staticmethod
+    def _parse_calendar(csv_data: str) -> list[dict]:
+        if not csv_data:
+            return []
+
+        calendar = []
+        reader = csv.DictReader(io.StringIO(csv_data))
+        for row in reader:
+            calendar.append(
+                {
+                    "service_id": row.get("service_id", "").strip(),
+                    "monday": int(row.get("monday", 0) or 0),
+                    "tuesday": int(row.get("tuesday", 0) or 0),
+                    "wednesday": int(row.get("wednesday", 0) or 0),
+                    "thursday": int(row.get("thursday", 0) or 0),
+                    "friday": int(row.get("friday", 0) or 0),
+                    "saturday": int(row.get("saturday", 0) or 0),
+                    "sunday": int(row.get("sunday", 0) or 0),
+                    "start_date": row.get("start_date", "").strip(),
+                    "end_date": row.get("end_date", "").strip(),
+                }
+            )
+
+        return calendar
+
+    @staticmethod
+    def _parse_calendar_dates(csv_data: str) -> list[dict]:
+        if not csv_data:
+            return []
+
+        calendar_dates = []
+        reader = csv.DictReader(io.StringIO(csv_data))
+        for row in reader:
+            calendar_dates.append(
+                {
+                    "service_id": row.get("service_id", "").strip(),
+                    "date": row.get("date", "").strip(),
+                    "exception_type": int(row.get("exception_type", 1) or 1),
+                }
+            )
+
+        return calendar_dates
+
+    async def _resolve_group_route_ids(self, route_id: str) -> list[str]:
+        route_data = await self._cache.get_json(_KEY_ROUTES)
+        if not route_data:
+            return [route_id]
+
+        for item in route_data:
+            canonical_route_id = item.get("route_id")
+            grouped_route_ids = item.get("route_ids") or []
+            if route_id == canonical_route_id or route_id in grouped_route_ids:
+                return grouped_route_ids or [canonical_route_id] if canonical_route_id else [route_id]
+
+        return [route_id]
+
+    async def _trip_matches_route(self, route_id: str, trip_id: str) -> bool:
+        trip_meta = await self.get_trip_meta(trip_id)
+        if not trip_meta:
+            return False
+
+        route_ids = await self._resolve_group_route_ids(route_id)
+        return trip_meta.get("route_id") in route_ids

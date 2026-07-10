@@ -2,8 +2,7 @@
 API Key authentication for the BFF server.
 
 Implements a machine-to-machine API key scheme using the ``X-API-Key``
-header (for REST endpoints) or a ``token`` query parameter (for WebSocket
-handshakes).
+header for both HTTP and WebSocket clients.
 
 Health-check endpoints (``/health``, ``/health/ready``) are exempt so that
 orchestrators and load balancers can probe without credentials.
@@ -17,11 +16,11 @@ Usage (REST)::
 
 Usage (WebSocket)::
 
-    from app.core.auth import verify_ws_token
+    from app.core.auth import verify_ws_api_key
 
     @router.websocket("/ws")
     async def ws_endpoint(websocket: WebSocket):
-        if not verify_ws_token(websocket):
+        if not verify_ws_api_key(websocket):
             await websocket.close(code=4401)
             return
         ...
@@ -103,13 +102,11 @@ async def require_api_key(
     return api_key
 
 
-def verify_ws_token(websocket: WebSocket, expected_key: str) -> bool:
-    """Validate the API key provided as a WebSocket query parameter.
+def verify_ws_api_key(websocket: WebSocket, expected_key: str) -> bool:
+    """Validate the API key provided during a WebSocket handshake.
 
-    WebSocket clients cannot send custom headers during the handshake in
-    most browser / embedded runtimes, so the key is passed as:
-
-        ws://host/api/v1/ws/live?token=<API_KEY>
+    React Native sends ``X-API-Key`` as a handshake header, which avoids
+    exposing credentials in URLs and access logs.
 
     Args:
         websocket: The WebSocket connection (pre-accept).
@@ -118,8 +115,8 @@ def verify_ws_token(websocket: WebSocket, expected_key: str) -> bool:
     Returns:
         ``True`` if the token is valid, ``False`` otherwise.
     """
-    token = websocket.query_params.get("token", "")
-    if not token or not hmac.compare_digest(token, expected_key):
+    api_key = websocket.headers.get("x-api-key", "")
+    if not api_key or not hmac.compare_digest(api_key, expected_key):
         logger.warning(
             "WebSocket auth failed from %s",
             websocket.client.host if websocket.client else "unknown",

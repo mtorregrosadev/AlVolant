@@ -41,9 +41,25 @@ from app.core.logging import get_logger, setup_logging
 from app.core.rate_limiter import RateLimiterMiddleware
 from app.services.atm_rt_service import ATMRTService
 from app.services.gtfs_service import GTFSService
+from app.services.traffic_service import TrafficService
 from app.workers.atm_rt_worker import ATMRTWorker
 
 logger = get_logger(__name__)
+
+
+async def _refresh_gtfs_cache(gtfs_service: GTFSService) -> None:
+    """Refresh static GTFS data without blocking API startup."""
+    try:
+        route_count = await gtfs_service.load_and_cache_shapes()
+        logger.info("Loaded %d route shapes into cache", route_count)
+    except asyncio.CancelledError:
+        logger.info("GTFS cache refresh cancelled")
+        raise
+    except Exception:
+        logger.exception(
+            "Failed to refresh GTFS shapes — cached shapes remain available "
+            "until the next refresh"
+        )
 
 
 @asynccontextmanager
@@ -85,15 +101,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await gtfs_service.start()
     app.state.gtfs_service = gtfs_service
 
-    # --- 3. Load Static GTFS Shapes ---
-    try:
-        route_count = await gtfs_service.load_and_cache_shapes()
-        logger.info("Loaded %d route shapes into cache", route_count)
-    except Exception:
-        logger.exception(
-            "Failed to load GTFS shapes on startup — shapes will be unavailable "
-            "until the next scheduled refresh or manual reload"
-        )
+    traffic_service = TrafficService(settings=settings)
+    await traffic_service.start()
+    app.state.traffic_service = traffic_service
+
+    # --- 3. Refresh Static GTFS Shapes ---
+    # Keep startup fast: if Redis already has static GTFS data, serve it
+    # immediately and avoid blocking the API with a heavy parse pass.
+    gtfs_load_task: asyncio.Task[None] | None = None
+    cached_routes = await gtfs_service.get_all_routes()
+    if cached_routes:
+        logger.info("Using %d cached GTFS routes", len(cached_routes))
+    else:
+        gtfs_load_task = asyncio.create_task(_refresh_gtfs_cache(gtfs_service))
+    app.state.gtfs_load_task = gtfs_load_task
 
     # --- 4. Background Workers ---
     atm_rt_worker = ATMRTWorker(
@@ -121,9 +142,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # --- Stop workers ---
     await atm_rt_worker.stop()
 
+    # --- Stop cache refresh ---
+    if gtfs_load_task:
+        gtfs_load_task.cancel()
+        try:
+            await gtfs_load_task
+        except asyncio.CancelledError:
+            pass
+
     # --- Close services ---
     await atm_rt_service.close()
     await gtfs_service.close()
+    await traffic_service.close()
 
     # --- Close Redis ---
     await cache.close()

@@ -5,10 +5,10 @@ Provides a persistent WebSocket connection per tablet that pushes updates
 whenever the background workers refresh the cache.  Clients subscribe to
 topics and receive JSON messages when new data arrives.
 
-    WS /api/v1/ws/live?token=<API_KEY> → real-time data stream
+    WS /api/v1/ws/live → real-time data stream
 
 Security:
-    - Requires valid ``token`` query parameter (same as BFF_API_KEY)
+    - Requires a valid ``X-API-Key`` handshake header
     - Enforces connection cap (MAX_WS_CONNECTIONS)
     - Rate-limits incoming messages (RATE_LIMIT_WS_MPM)
     - Validates topic names and caps subscriptions per client
@@ -35,7 +35,7 @@ import orjson
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
-from app.core.auth import verify_ws_token
+from app.core.auth import verify_ws_api_key
 from app.core.logging import get_logger
 from app.core.rate_limiter import check_ws_rate_limit
 
@@ -239,12 +239,12 @@ async def websocket_live(websocket: WebSocket) -> None:
     """Main WebSocket endpoint for real-time data push to tablets.
 
     Security flow:
-    1. Validate ``token`` query parameter before accepting
+    1. Validate the ``X-API-Key`` handshake header before accepting
     2. Check connection cap
     3. Rate-limit incoming messages
     4. Handle subscribe/unsubscribe/ping actions
 
-    Connect with: ``ws://host/api/v1/ws/live?token=<BFF_API_KEY>``
+    React Native clients connect with an ``X-API-Key`` handshake header.
     """
     # --- 0. Read settings ---
     app_settings = getattr(websocket.app.state, "settings", None)
@@ -258,7 +258,7 @@ async def websocket_live(websocket: WebSocket) -> None:
         ws_manager._max_topics_per_client = app_settings.MAX_WS_TOPICS_PER_CLIENT
 
     # --- 1. Authentication ---
-    if not api_key or not verify_ws_token(websocket, api_key):
+    if not api_key or not verify_ws_api_key(websocket, api_key):
         await websocket.close(code=4401, reason="Authentication required")
         return
 

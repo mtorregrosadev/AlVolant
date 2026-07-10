@@ -66,6 +66,13 @@ class Settings(BaseSettings):
     ATM_GTFS_REFRESH_HOURS: int = 24
 
     # -------------------------------------------------------------------------
+    # Road Traffic Provider
+    # -------------------------------------------------------------------------
+    TOMTOM_API_KEY: str = ""
+    TOMTOM_TRAFFIC_BASE_URL: str = "https://api.tomtom.com/traffic/services/4"
+    TRAFFIC_CACHE_TTL_SECONDS: int = 60
+
+    # -------------------------------------------------------------------------
     # Redis
     # -------------------------------------------------------------------------
     REDIS_URL: str = "redis://localhost:6379/0"

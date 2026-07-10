@@ -184,7 +184,7 @@ class ATMRTService:
         logger.debug("Fetching %s from %s", name, url)
         try:
             proc = await asyncio.create_subprocess_exec(
-                "curl", "-sL", "-A", "curl/8.20.0",
+                "curl", "-fsL", "-A", "curl/8.20.0",
                 "--max-filesize", str(_MAX_RESPONSE_BYTES),
                 url,
                 stdout=asyncio.subprocess.PIPE,
@@ -207,9 +207,11 @@ class ATMRTService:
             if proc.returncode != 0:
                 raise ExternalAPIError("ATM", f"curl failed for {name}: {stderr.decode()}")
 
-            # Check if we got an HTML response instead of binary
+            # Check if we got an error document instead of binary protobuf.
             if stdout.startswith(b"<html") or stdout.startswith(b"<!DOC"):
                 raise ExternalAPIError("ATM", f"Received HTML instead of protobuf for {name}")
+            if stdout.lstrip().startswith((b"{", b"[")):
+                raise ExternalAPIError("ATM", f"Received JSON instead of protobuf for {name}")
 
             # Size check (belt and suspenders — curl --max-filesize should catch this)
             if len(stdout) > _MAX_RESPONSE_BYTES:

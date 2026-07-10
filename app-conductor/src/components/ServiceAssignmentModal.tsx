@@ -13,7 +13,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import type { EdgeInsets } from 'react-native-safe-area-context';
 import type { RouteInfo, UpcomingTrip } from '../services/api';
 import { formatDirectionLabel } from '../services/directionLabel';
-import { cardShadow, colors, fonts, radii, safeHexColor, spacing } from '../theme';
+import { cardShadow, colors, fonts, radii, safeHexColor, spacing, typography } from '../theme';
 
 type ServiceAssignmentModalProps = {
   visible: boolean;
@@ -224,14 +224,10 @@ const styles = StyleSheet.create({
   sheetHeaderAccent: { width: 7, height: 44, borderRadius: 4, backgroundColor: colors.transit },
   sheetHeaderCopy: { flex: 1, minWidth: 0 },
   kicker: {
+    ...typography.eyebrow,
     color: colors.transitDark,
-    fontFamily: fonts.mono,
-    fontSize: 9,
-    lineHeight: 12,
-    fontWeight: '700',
-    letterSpacing: 1.1,
   },
-  title: { color: colors.ink, fontFamily: fonts.display, fontSize: 24, lineHeight: 30, fontWeight: '600' },
+  title: { ...typography.screenTitle, color: colors.ink },
   selectedRouteBadge: {
     minWidth: 48,
     height: 31,
@@ -240,7 +236,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  selectedRouteBadgeText: { fontFamily: fonts.body, fontSize: 13, fontWeight: '800' },
+  selectedRouteBadgeText: { ...typography.badge, fontSize: 13 },
   closeButton: {
     width: 40,
     height: 40,
@@ -251,7 +247,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  subtitle: { color: colors.muted, fontFamily: fonts.body, fontSize: 12, lineHeight: 17, marginTop: spacing.md },
+  subtitle: { ...typography.body, color: colors.muted, marginTop: spacing.md },
   loadingState: { minHeight: 190, alignItems: 'center', justifyContent: 'center' },
   loadingIcon: {
     width: 48,
@@ -261,7 +257,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  loadingText: { color: colors.muted, fontFamily: fonts.body, fontSize: 12, marginTop: spacing.md },
+  loadingText: { ...typography.body, color: colors.muted, marginTop: spacing.md },
   listContent: { gap: spacing.sm, paddingTop: spacing.md, paddingBottom: spacing.xs },
   noticeCard: {
     padding: spacing.md,
@@ -272,11 +268,11 @@ const styles = StyleSheet.create({
     gap: spacing.md,
   },
   noticeCopy: { flex: 1 },
-  noticeTitle: { color: '#815414', fontFamily: fonts.body, fontSize: 13, fontWeight: '700' },
-  noticeText: { color: '#8D6A32', fontFamily: fonts.body, fontSize: 11, marginTop: 2 },
+  noticeTitle: { ...typography.cardTitle, color: '#815414' },
+  noticeText: { ...typography.body, color: '#8D6A32', fontSize: 11, marginTop: 2 },
   emptyState: { minHeight: 125, alignItems: 'center', justifyContent: 'center' },
-  emptyTitle: { color: colors.ink, fontFamily: fonts.body, fontSize: 13, fontWeight: '700', marginTop: spacing.sm },
-  emptyText: { color: colors.muted, fontFamily: fonts.body, fontSize: 11, marginTop: 2 },
+  emptyTitle: { ...typography.cardTitle, color: colors.ink, marginTop: spacing.sm },
+  emptyText: { ...typography.body, color: colors.muted, fontSize: 11, marginTop: 2 },
   tripRow: {
     minHeight: 72,
     padding: spacing.sm,
@@ -296,18 +292,18 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  timeText: { color: colors.transitDark, fontFamily: fonts.mono, fontSize: 15, fontWeight: '700' },
-  timeCaption: { color: colors.transitDark, fontFamily: fonts.body, fontSize: 8, marginTop: 1 },
+  timeText: { ...typography.button, color: colors.transitDark, fontSize: 15 },
+  timeCaption: { ...typography.meta, color: colors.transitDark, fontSize: 8, marginTop: 1 },
   tripCopy: { flex: 1, minWidth: 0 },
-  tripTitle: { color: colors.ink, fontFamily: fonts.body, fontSize: 12, fontWeight: '700' },
-  tripOrigin: { color: colors.muted, fontFamily: fonts.body, fontSize: 9, marginTop: 2 },
+  tripTitle: { ...typography.cardTitle, color: colors.ink, fontSize: 12 },
+  tripOrigin: { ...typography.meta, color: colors.muted, marginTop: 2 },
   statusBadge: { paddingHorizontal: spacing.sm, paddingVertical: 4, borderRadius: radii.pill, backgroundColor: '#E4F5EA' },
   statusBadgeDelayed: { backgroundColor: colors.primarySoft },
-  statusText: { color: '#167545', fontFamily: fonts.body, fontSize: 9, fontWeight: '700' },
+  statusText: { ...typography.meta, color: '#167545', fontWeight: '700' },
   statusTextDelayed: { color: colors.primaryPressed },
   manualCard: { padding: spacing.md, borderRadius: radii.lg, backgroundColor: colors.transitWash, marginTop: spacing.xs },
   manualHeading: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.sm },
-  manualLabel: { color: colors.ink, fontFamily: fonts.body, fontSize: 11, fontWeight: '700' },
+  manualLabel: { ...typography.control, color: colors.ink },
   manualRow: { flexDirection: 'row', gap: spacing.sm },
   manualInput: {
     flex: 1,
@@ -317,7 +313,7 @@ const styles = StyleSheet.create({
     borderRadius: radii.md,
     backgroundColor: colors.white,
     color: colors.ink,
-    fontFamily: fonts.mono,
+    fontFamily: fonts.body,
     fontSize: 14,
   },
   syncButton: {
@@ -329,7 +325,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   syncButtonDisabled: { opacity: 0.42 },
-  syncText: { color: colors.white, fontFamily: fonts.body, fontSize: 11, fontWeight: '700' },
+  syncText: { ...typography.control, color: colors.white },
   skipButton: {
     height: 44,
     alignSelf: 'center',
@@ -338,5 +334,5 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: spacing.sm,
   },
-  skipText: { color: colors.primary, fontFamily: fonts.body, fontSize: 12, fontWeight: '700' },
+  skipText: { ...typography.control, color: colors.primary, fontSize: 12 },
 });

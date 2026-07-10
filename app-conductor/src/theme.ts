@@ -53,9 +53,70 @@ export const cardShadow = {
 } as const;
 
 export const fonts = {
-  display: Platform.select({ ios: 'Noteworthy', android: 'sans-serif-medium', default: 'System' }),
-  body: Platform.select({ ios: 'Avenir Next', android: 'sans-serif', default: 'System' }),
-  mono: Platform.select({ ios: 'Courier', android: 'monospace', default: 'monospace' }),
+  hero: Platform.select({ ios: 'Noteworthy', android: 'sans-serif-medium', default: 'System' }),
+  display: Platform.select({ ios: 'System', android: 'sans-serif', default: 'System' }),
+  body: Platform.select({ ios: 'System', android: 'sans-serif', default: 'System' }),
+  label: Platform.select({ ios: 'System', android: 'sans-serif-medium', default: 'System' }),
+} as const;
+
+export const typography = {
+  eyebrow: {
+    fontFamily: fonts.label,
+    fontSize: 9,
+    lineHeight: 12,
+    fontWeight: '700',
+    letterSpacing: 1.1,
+  },
+  screenTitle: {
+    fontFamily: fonts.display,
+    fontSize: 24,
+    lineHeight: 29,
+    fontWeight: '700',
+    letterSpacing: -0.25,
+  },
+  sectionTitle: {
+    fontFamily: fonts.display,
+    fontSize: 20,
+    lineHeight: 24,
+    fontWeight: '700',
+    letterSpacing: -0.2,
+  },
+  cardTitle: {
+    fontFamily: fonts.body,
+    fontSize: 13,
+    lineHeight: 17,
+    fontWeight: '600',
+  },
+  body: {
+    fontFamily: fonts.body,
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: '400',
+  },
+  control: {
+    fontFamily: fonts.body,
+    fontSize: 11,
+    lineHeight: 15,
+    fontWeight: '600',
+  },
+  meta: {
+    fontFamily: fonts.body,
+    fontSize: 10,
+    lineHeight: 13,
+    fontWeight: '400',
+  },
+  badge: {
+    fontFamily: fonts.body,
+    fontSize: 12,
+    lineHeight: 15,
+    fontWeight: '700',
+  },
+  button: {
+    fontFamily: fonts.body,
+    fontSize: 14,
+    lineHeight: 18,
+    fontWeight: '700',
+  },
 } as const;
 
 const HEX_COLOR = /^[0-9A-F]{6}$/i;

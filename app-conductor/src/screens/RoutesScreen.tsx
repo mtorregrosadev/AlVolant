@@ -32,7 +32,7 @@ import {
   withToggledFavorite,
   type UserPreferences,
 } from '../services/userPreferences';
-import { cardShadow, colors, fonts, radii, safeHexColor, spacing } from '../theme';
+import { cardShadow, colors, fonts, radii, safeHexColor, spacing, typography } from '../theme';
 
 type RoutesScreenProps = NativeStackScreenProps<RootStackParamList, 'Routes'>;
 type ChipVisual = {
@@ -331,19 +331,12 @@ const styles = StyleSheet.create({
   },
   headerCopy: { flex: 1, minWidth: 0 },
   headerKicker: {
+    ...typography.eyebrow,
     color: 'rgba(255,255,255,0.82)',
-    fontFamily: fonts.mono,
-    fontSize: 9,
-    lineHeight: 12,
-    fontWeight: '700',
-    letterSpacing: 1.2,
   },
   headerTitle: {
+    ...typography.screenTitle,
     color: colors.white,
-    fontFamily: fonts.display,
-    fontSize: 25,
-    lineHeight: 31,
-    fontWeight: '600',
   },
   countBadge: {
     minWidth: 50,
@@ -354,14 +347,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  countBadgeText: { color: colors.white, fontFamily: fonts.mono, fontSize: 12, fontWeight: '700' },
+  countBadgeText: { ...typography.badge, color: colors.white },
   catalog: { flex: 1, paddingHorizontal: spacing.lg },
   catalogLandscape: { paddingHorizontal: Math.max(spacing.xl, 34) },
   searchShell: {
     height: 52,
     marginTop: -13,
     paddingHorizontal: spacing.lg,
-    borderRadius: radii.lg,
+    borderRadius: radii.md,
     backgroundColor: colors.white,
     flexDirection: 'row',
     alignItems: 'center',
@@ -375,6 +368,7 @@ const styles = StyleSheet.create({
     color: colors.ink,
     fontFamily: fonts.body,
     fontSize: 14,
+    lineHeight: 18,
     fontWeight: '600',
   },
   listContent: { paddingBottom: spacing.xl },
@@ -383,7 +377,7 @@ const styles = StyleSheet.create({
     height: 38,
     minWidth: 90,
     paddingHorizontal: spacing.md,
-    borderRadius: radii.pill,
+    borderRadius: radii.md,
     borderWidth: 1,
     borderColor: colors.borderStrong,
     backgroundColor: colors.canvas,
@@ -394,17 +388,17 @@ const styles = StyleSheet.create({
   },
   agencyChipActive: { backgroundColor: colors.transitDark, borderColor: colors.transitDark },
   agencyLogo: { width: 22, height: 18 },
-  agencyText: { color: colors.inkSoft, fontFamily: fonts.body, fontSize: 11, fontWeight: '700' },
+  agencyText: { ...typography.control, color: colors.inkSoft },
   agencyTextActive: { color: colors.white },
   listHeading: { marginBottom: spacing.md },
-  listHeadingTitle: { color: colors.ink, fontFamily: fonts.display, fontSize: 20, fontWeight: '600' },
-  listHeadingMeta: { color: colors.muted, fontFamily: fonts.body, fontSize: 10, marginTop: 1 },
+  listHeadingTitle: { ...typography.sectionTitle, color: colors.ink },
+  listHeadingMeta: { ...typography.meta, color: colors.muted, marginTop: 1 },
   columnWrapper: { gap: spacing.md },
   routeRow: {
     flex: 1,
     minHeight: 70,
     marginBottom: spacing.sm,
-    borderRadius: radii.lg,
+    borderRadius: radii.md,
     backgroundColor: colors.white,
     borderWidth: 1,
     borderColor: colors.border,
@@ -428,10 +422,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  routeBadgeText: { fontFamily: fonts.body, fontSize: 13, fontWeight: '800' },
+  routeBadgeText: { ...typography.badge, fontSize: 13 },
   routeCopy: { flex: 1, minWidth: 0 },
-  routeName: { color: colors.ink, fontFamily: fonts.body, fontSize: 13, fontWeight: '700' },
-  routeMeta: { color: colors.muted, fontFamily: fonts.body, fontSize: 9, marginTop: 2 },
+  routeName: { ...typography.cardTitle, color: colors.ink },
+  routeMeta: { ...typography.meta, color: colors.muted, marginTop: 2 },
   starButton: {
     width: 38,
     height: 38,
@@ -442,8 +436,8 @@ const styles = StyleSheet.create({
   },
   starButtonActive: { backgroundColor: colors.primarySoft },
   emptyState: { minHeight: 220, alignItems: 'center', justifyContent: 'center', padding: spacing.xl },
-  emptyTitle: { color: colors.ink, fontFamily: fonts.body, fontSize: 14, fontWeight: '700', marginTop: spacing.sm },
-  emptyText: { color: colors.muted, fontFamily: fonts.body, fontSize: 12, marginTop: spacing.sm },
+  emptyTitle: { ...typography.button, color: colors.ink, marginTop: spacing.sm },
+  emptyText: { ...typography.body, color: colors.muted, marginTop: spacing.sm },
   retryButton: {
     marginTop: spacing.md,
     paddingHorizontal: spacing.lg,
@@ -453,5 +447,5 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  retryText: { color: colors.white, fontFamily: fonts.body, fontSize: 12, fontWeight: '700' },
+  retryText: { ...typography.control, color: colors.white, fontSize: 12 },
 });

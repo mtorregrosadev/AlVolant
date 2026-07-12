@@ -75,10 +75,9 @@ async def require_api_key(
 
     if api_key is None:
         logger.warning(
-            "Unauthenticated request: %s %s from %s",
+            "Unauthenticated request: %s %s",
             request.method,
             request.url.path,
-            request.client.host if request.client else "unknown",
         )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -88,8 +87,7 @@ async def require_api_key(
 
     if not hmac.compare_digest(api_key, expected):
         logger.warning(
-            "Invalid API key from %s on %s %s",
-            request.client.host if request.client else "unknown",
+            "Invalid API key on %s %s",
             request.method,
             request.url.path,
         )
@@ -118,8 +116,7 @@ def verify_ws_api_key(websocket: WebSocket, expected_key: str) -> bool:
     api_key = websocket.headers.get("x-api-key", "")
     if not api_key or not hmac.compare_digest(api_key, expected_key):
         logger.warning(
-            "WebSocket auth failed from %s",
-            websocket.client.host if websocket.client else "unknown",
+            "WebSocket authentication failed",
         )
         return False
     return True

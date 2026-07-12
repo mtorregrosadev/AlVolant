@@ -21,10 +21,15 @@ logger = get_logger(__name__)
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]+")
 _EMAIL_RE = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
 _SECRET_RE = re.compile(
-    r"(?i)\b(api[_-]?key|authorization|password|secret|token)\b\s*[:=]\s*[^\s,;]+"
+    r"(?i)(\b(?:x[_-]?)?(?:api[_-]?key|authorization|password|secret|token)\b"
+    r"[\"']?\s*[:=]\s*)[\"']?(?:(?:bearer|basic)\s+)?[^\"'\s,;}\]]+[\"']?"
 )
 _USER_PATH_RE = re.compile(r"/(?:Users|home)/[^/\s]+/")
 _COORDINATE_PAIR_RE = re.compile(r"(?<!\d)-?\d{1,3}\.\d{4,}\s*[,;]\s*-?\d{1,3}\.\d{4,}(?!\d)")
+_COORDINATE_FIELD_RE = re.compile(
+    r"(?i)\b(lat(?:itude)?|lon(?:gitude)?)\b[\"']?\s*[:=]\s*"
+    r"[\"']?-?\d{1,3}(?:\.\d+)?[\"']?"
+)
 _URL_QUERY_RE = re.compile(r"(https?://[^\s?#]+)(?:[?#][^\s]*)?", re.IGNORECASE)
 
 _ERROR_EVENTS = frozenset({"api_error", "render_error", "unhandled_error"})
@@ -50,8 +55,8 @@ class TelemetryService:
         cache: CacheManager,
         *,
         enabled: bool = True,
-        retention_days: int = 7,
-        max_events_per_day: int = 20_000,
+        retention_days: int = 3,
+        max_events_per_day: int = 5_000,
         max_errors_per_day: int = 500,
         queue_size: int = 2_048,
     ) -> None:
@@ -243,9 +248,10 @@ class TelemetryService:
     def _sanitize_text(value: str, limit: int) -> str:
         text = _CONTROL_RE.sub(" ", value)
         text = _EMAIL_RE.sub("[redacted-email]", text)
-        text = _SECRET_RE.sub(r"\1=[redacted]", text)
+        text = _SECRET_RE.sub(r"\1[redacted]", text)
         text = _USER_PATH_RE.sub("/Users/[redacted]/", text)
         text = _COORDINATE_PAIR_RE.sub("[redacted-coordinates]", text)
+        text = _COORDINATE_FIELD_RE.sub(r"\1=[redacted]", text)
         text = _URL_QUERY_RE.sub(r"\1", text)
         return " ".join(text.split())[:limit]
 

@@ -80,9 +80,10 @@ function sanitizeText(value: string) {
   return value
     .replace(/[\u0000-\u001F\u007F]+/g, ' ')
     .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[redacted-email]')
-    .replace(/\b(api[_-]?key|authorization|password|secret|token)\b\s*[:=]\s*[^\s,;]+/gi, '$1=[redacted]')
+    .replace(/(\b(?:x[_-]?)?(?:api[_-]?key|authorization|password|secret|token)\b["']?\s*[:=]\s*)["']?(?:(?:bearer|basic)\s+)?[^"'\s,;}\]]+["']?/gi, '$1[redacted]')
     .replace(/\/(?:Users|home)\/[^/\s]+\//g, '/Users/[redacted]/')
     .replace(/-?\d{1,3}\.\d{4,}\s*[,;]\s*-?\d{1,3}\.\d{4,}/g, '[redacted-coordinates]')
+    .replace(/\b(lat(?:itude)?|lon(?:gitude)?)\b["']?\s*[:=]\s*["']?-?\d{1,3}(?:\.\d+)?["']?/gi, '$1=[redacted]')
     .replace(/(https?:\/\/[^\s?#]+)(?:[?#][^\s]*)?/gi, '$1')
     .replace(/\s+/g, ' ')
     .trim()

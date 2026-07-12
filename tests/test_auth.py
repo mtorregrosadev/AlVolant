@@ -5,7 +5,10 @@ from types import SimpleNamespace
 from app.core.auth import verify_ws_api_key
 
 
-def _websocket(headers: dict[str, str], query: dict[str, str] | None = None):
+def _websocket(
+    headers: dict[str, str],
+    query: dict[str, str] | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         headers=headers,
         query_params=query or {},

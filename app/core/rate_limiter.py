@@ -23,7 +23,10 @@ Usage::
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import time
+from typing import Literal
 
 import redis.asyncio as aioredis
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -34,16 +37,12 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Paths exempt from rate limiting (health probes, docs)
-_EXEMPT_PATHS = frozenset({
-    "/health",
-    "/health/ready",
-    "/docs",
-    "/redoc",
-    "/openapi.json",
-})
+# Only the cheap process-liveness probe bypasses Redis. Readiness and docs are
+# rate-limited because they perform dependency work and must not be amplifiers.
+_EXEMPT_PATHS = frozenset({"/health"})
 
 _KEY_PREFIX = "rl:"
+RateLimitDecision = Literal["allowed", "limited", "unavailable"]
 
 
 class RateLimiterMiddleware(BaseHTTPMiddleware):
@@ -73,14 +72,23 @@ class RateLimiterMiddleware(BaseHTTPMiddleware):
         if request.headers.get("upgrade", "").lower() == "websocket":
             return await call_next(request)
 
-        # Extract client IP (support X-Forwarded-For for proxied setups)
+        # The ASGI server is the trust boundary for proxy handling.  Reading
+        # X-Forwarded-For here would let direct clients choose their own rate
+        # limit bucket unless every deployment had a correctly configured
+        # trusted-proxy allowlist.
         client_ip = _get_client_ip(request)
+        client_bucket = _hash_client_identifier(
+            client_ip,
+            getattr(request.app.state, "rate_limit_hash_key", ""),
+        )
 
         # Build the per-minute key
         current_minute = int(time.time()) // self._window
-        key = f"{_KEY_PREFIX}{client_ip}:{current_minute}"
+        key = f"{_KEY_PREFIX}{client_bucket}:{current_minute}"
 
-        # Try to check/increment the counter in Redis
+        # Check/increment the counter in Redis.  Keep the downstream request
+        # outside this try block so an application exception is never mistaken
+        # for a Redis outage and executed a second time.
         try:
             cache = request.app.state.cache
             redis_client = cache.client
@@ -95,8 +103,7 @@ class RateLimiterMiddleware(BaseHTTPMiddleware):
             if count > self.rpm:
                 retry_after = self._window - (int(time.time()) % self._window)
                 logger.warning(
-                    "Rate limit exceeded: %s (%d/%d) on %s %s",
-                    client_ip,
+                    "Rate limit exceeded (%d/%d) on %s %s",
                     count,
                     self.rpm,
                     request.method,
@@ -112,39 +119,58 @@ class RateLimiterMiddleware(BaseHTTPMiddleware):
                     headers={"Retry-After": str(retry_after)},
                 )
 
-            # Add rate limit headers to successful responses
-            response = await call_next(request)
-            response.headers["X-RateLimit-Limit"] = str(self.rpm)
-            response.headers["X-RateLimit-Remaining"] = str(max(0, self.rpm - count))
-            return response
-
         except Exception:
-            # Fail open — if Redis is down, allow the request through
-            # rather than causing a complete outage.
-            logger.warning("Rate limiter Redis error — failing open for %s", client_ip)
+            settings = getattr(request.app.state, "settings", None)
+            if getattr(settings, "ENVIRONMENT", "development") == "production":
+                logger.error("Rate limiter unavailable — rejecting production request")
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "error": "rate_limiter_unavailable",
+                        "detail": "Request protection is temporarily unavailable.",
+                    },
+                    headers={"Retry-After": "5"},
+                )
+            # Local development remains usable if its optional Redis process
+            # is briefly restarting.
+            logger.warning("Rate limiter unavailable — development request allowed")
             return await call_next(request)
+
+        # Add rate limit headers to successful responses.
+        response = await call_next(request)
+        response.headers["X-RateLimit-Limit"] = str(self.rpm)
+        response.headers["X-RateLimit-Remaining"] = str(max(0, self.rpm - count))
+        return response
 
 
 def _get_client_ip(request: Request) -> str:
-    """Extract the real client IP, respecting reverse proxy headers.
+    """Return the peer IP supplied by the ASGI server.
 
-    Checks ``X-Forwarded-For`` first (common in Docker/K8s setups),
-    then falls back to the direct connection IP.
+    Proxy headers are intentionally not parsed here.  A deployment that sits
+    behind a reverse proxy must configure its ASGI server's trusted-proxy
+    policy; after that validation, ``request.client.host`` is the appropriate
+    source of truth.
     """
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        # X-Forwarded-For: client, proxy1, proxy2 — take the first
-        return forwarded.split(",")[0].strip()
     if request.client:
         return request.client.host
     return "unknown"
 
 
+def _hash_client_identifier(client_ip: str, secret: str) -> str:
+    """Create a daily-rotating, non-reversible bucket without persisting an IP."""
+    key = (secret or "development-rate-limit-salt").encode("utf-8")
+    epoch_day = int(time.time()) // 86_400
+    message = f"{epoch_day}:{client_ip}".encode()
+    return hmac.new(key, message, hashlib.sha256).hexdigest()[:24]
+
+
 async def check_ws_rate_limit(
     redis_client: aioredis.Redis,
-    client_ip: str,
+    client_bucket: str,
     mpm: int = 120,
-) -> bool:
+    *,
+    fail_closed: bool = False,
+) -> RateLimitDecision:
     """Check WebSocket message rate limit (called per message).
 
     Args:
@@ -156,13 +182,12 @@ async def check_ws_rate_limit(
         ``True`` if the message is allowed, ``False`` if rate limited.
     """
     current_minute = int(time.time()) // 60
-    key = f"{_KEY_PREFIX}ws:{client_ip}:{current_minute}"
+    key = f"{_KEY_PREFIX}ws:{client_bucket}:{current_minute}"
 
     try:
         count = await redis_client.incr(key)
         if count == 1:
             await redis_client.expire(key, 65)
-        return count <= mpm
+        return "allowed" if count <= mpm else "limited"
     except Exception:
-        # Fail open on Redis errors
-        return True
+        return "unavailable" if fail_closed else "allowed"

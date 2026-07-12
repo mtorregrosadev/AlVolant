@@ -3,20 +3,27 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from fastapi.responses import ORJSONResponse
 
 from app.core.auth import require_api_key
 from app.core.logging import get_logger
 from app.models.gtfs import (
-    GTFSShapesResponse,
     NearbyRoute,
     NearbyRoutesRequest,
     RouteInfo,
     RouteShape,
     RouteStopsResponse,
 )
+
+_MAX_GTFS_ID_LENGTH = 128
+# ATM identifiers legitimately contain spaces and pipes.  Reject only path
+# separators and control characters, which have no valid role in an ID and can
+# corrupt logs or cache-key diagnostics.
+_PATH_ID_PATTERN = r"^[^\x00-\x1f\x7f/]+$"
+_QUERY_ID_PATTERN = r"^[^\x00-\x1f\x7f]+$"
 
 logger = get_logger(__name__)
 
@@ -28,33 +35,30 @@ router = APIRouter(
 
 
 @router.get(
-    "/shapes",
-    summary="Get all route shapes (GeoJSON FeatureCollection)",
-    response_model=GTFSShapesResponse,
-    response_class=ORJSONResponse,
-)
-async def get_all_shapes(request: Request) -> GTFSShapesResponse:
-    gtfs_service = request.app.state.gtfs_service
-    shapes = await gtfs_service.get_all_shapes()
-    if shapes is None:
-        raise HTTPException(
-            status_code=503,
-            detail="GTFS shapes not yet loaded. Server may still be initializing.",
-        )
-    return shapes
-
-
-@router.get(
     "/shapes/{route_id}",
     summary="Get shape for a single route",
     response_model=RouteShape,
     response_class=ORJSONResponse,
 )
 async def get_route_shape(
-    route_id: str,
+    route_id: Annotated[
+        str,
+        Path(
+            min_length=1,
+            max_length=_MAX_GTFS_ID_LENGTH,
+            pattern=_PATH_ID_PATTERN,
+        ),
+    ],
     request: Request,
-    direction_id: int | None = None,
-    trip_id: str | None = None,
+    direction_id: Annotated[int | None, Query(ge=0, le=1)] = None,
+    trip_id: Annotated[
+        str | None,
+        Query(
+            min_length=1,
+            max_length=_MAX_GTFS_ID_LENGTH,
+            pattern=_QUERY_ID_PATTERN,
+        ),
+    ] = None,
 ) -> RouteShape:
     """Return route shape, optionally resolved for a specific trip variant."""
     gtfs_service = request.app.state.gtfs_service
@@ -81,10 +85,24 @@ async def get_route_shape(
     response_class=ORJSONResponse,
 )
 async def get_route_stops(
-    route_id: str,
+    route_id: Annotated[
+        str,
+        Path(
+            min_length=1,
+            max_length=_MAX_GTFS_ID_LENGTH,
+            pattern=_PATH_ID_PATTERN,
+        ),
+    ],
     request: Request,
-    direction_id: int | None = None,
-    trip_id: str | None = None,
+    direction_id: Annotated[int | None, Query(ge=0, le=1)] = None,
+    trip_id: Annotated[
+        str | None,
+        Query(
+            min_length=1,
+            max_length=_MAX_GTFS_ID_LENGTH,
+            pattern=_QUERY_ID_PATTERN,
+        ),
+    ] = None,
 ) -> RouteStopsResponse:
     """Return route stops, optionally resolved for a specific trip variant."""
     gtfs_service = request.app.state.gtfs_service
@@ -139,7 +157,12 @@ def _get_first_stop_delay_seconds(rt_trip: object) -> int | None:
     if not updates:
         return None
 
-    first_stop_candidates = [u for u in updates if getattr(u, "stop_sequence", None) is not None and u.stop_sequence <= 1]
+    first_stop_candidates = [
+        update
+        for update in updates
+        if getattr(update, "stop_sequence", None) is not None
+        and update.stop_sequence <= 1
+    ]
     if not first_stop_candidates:
         return None
 
@@ -160,10 +183,17 @@ def _get_first_stop_delay_seconds(rt_trip: object) -> int | None:
     response_class=ORJSONResponse,
 )
 async def get_upcoming_trips(
-    route_id: str,
-    direction_id: int,
+    route_id: Annotated[
+        str,
+        Path(
+            min_length=1,
+            max_length=_MAX_GTFS_ID_LENGTH,
+            pattern=_PATH_ID_PATTERN,
+        ),
+    ],
+    direction_id: Annotated[int, Query(ge=0, le=1)],
     request: Request,
-    limit: int = 4,
+    limit: Annotated[int, Query(ge=1, le=20)] = 4,
 ) -> list[dict]:
     """Return enriched upcoming trips with origin, destination label, and status."""
     gtfs_service = request.app.state.gtfs_service
@@ -203,7 +233,13 @@ async def get_upcoming_trips(
     )
 
     try:
-        rt_trips = await request.app.state.atm_rt_service.get_cached_trips()
+        rt_trips = []
+        for candidate_route_id in await gtfs_service._resolve_group_route_ids(route_id):
+            rt_trips.extend(
+                await request.app.state.atm_rt_service.get_cached_trips_for_route(
+                    candidate_route_id
+                )
+            )
     except Exception:
         rt_trips = []
 
@@ -241,7 +277,10 @@ async def get_upcoming_trips(
             trip_status = "scheduled"
 
         destination_name = (trip.get("destination_name") or trip.get("trip_headsign") or "").strip()
-        towards_label = (trip.get("towards_label") or (f"Towards {destination_name}" if destination_name else "")).strip()
+        towards_label = (
+            trip.get("towards_label")
+            or (f"Towards {destination_name}" if destination_name else "")
+        ).strip()
 
         enriched.append(
             {

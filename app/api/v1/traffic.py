@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import ORJSONResponse
 
 from app.core.auth import require_api_key
-from app.models.traffic import TrafficSummary
+from app.models.traffic import TrafficLookupRequest, TrafficSummary
 
 router = APIRouter(
     prefix="/traffic",
@@ -15,7 +15,7 @@ router = APIRouter(
 )
 
 
-@router.get(
+@router.post(
     "/summary",
     summary="Get road traffic near a coordinate",
     response_model=TrafficSummary,
@@ -23,8 +23,11 @@ router = APIRouter(
 )
 async def get_traffic_summary(
     request: Request,
-    latitude: float = Query(..., ge=-90, le=90),
-    longitude: float = Query(..., ge=-180, le=180),
+    payload: TrafficLookupRequest,
 ) -> TrafficSummary:
+    """Keep exact coordinates out of URLs/access logs and quantize in the service."""
     traffic_service = request.app.state.traffic_service
-    return await traffic_service.get_summary(latitude=latitude, longitude=longitude)
+    return await traffic_service.get_summary(
+        latitude=payload.latitude,
+        longitude=payload.longitude,
+    )

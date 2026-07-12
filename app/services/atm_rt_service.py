@@ -9,7 +9,7 @@ Fetches the three unified ATM production feeds:
 Parses the binary protobuf payloads and stores normalized entities in Redis.
 
 Enhanced with:
-- Subprocess timeout to prevent zombie curl processes
+- Streamed HTTP reads with response limits
 - Response size limits to prevent OOM
 - Auto-classification of alerts (detour, stop cancellation, schedule info)
 - Alternative stop extraction from description text
@@ -18,12 +18,15 @@ Enhanced with:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from urllib.parse import urljoin, urlsplit
 
 import httpx
-from google.transit import gtfs_realtime_pb2
 from google.protobuf.message import DecodeError
+from google.transit import gtfs_realtime_pb2
+from pydantic import ValidationError
 
 from app.cache.redis_manager import CacheManager
 from app.config import Settings
@@ -52,13 +55,30 @@ _KEY_VEHICLES = "atm_rt:vehicles:all"
 _KEY_TRIPS = "atm_rt:trips:all"
 _KEY_ALERTS = "atm_rt:alerts:all"
 _KEY_LAST_UPDATED = "atm_rt:meta:last_updated"
+_KEY_COMPONENT_UPDATED_PREFIX = "atm_rt:meta:component"
+_KEY_COMPONENT_PROVIDER_TIMESTAMP_PREFIX = "atm_rt:meta:provider_timestamp"
+_KEY_VEHICLES_ROUTE_PREFIX = "atm_rt:vehicles:route"
+_KEY_TRIPS_ROUTE_PREFIX = "atm_rt:trips:route"
+_KEY_VEHICLE_ROUTES = "atm_rt:vehicles:route_ids"
+_KEY_TRIP_ROUTES = "atm_rt:trips:route_ids"
 
 # ATM language priority mapping (ca = Catalan, es = Spanish, en = English)
 _LANG_PRIORITY = ("ca", "es", "en", "")
 
 # Safety limits
-_MAX_RESPONSE_BYTES = 50 * 1024 * 1024  # 50 MB
-_CURL_TIMEOUT_SECONDS = 30
+_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+_MAX_PROTOBUF_ENTITIES = 50_000
+_MAX_STOP_UPDATES_PER_TRIP = 500
+_MAX_TOTAL_STOP_UPDATES = 50_000
+_MAX_ID_LENGTH = 160
+_MAX_ALERT_SELECTORS = 1_000
+_MAX_TOTAL_ALERT_SELECTORS = 20_000
+_MAX_TRANSLATIONS = 20
+_SAFE_ID_PATTERN = re.compile(r"^[^\x00-\x1f\x7f]{1,160}$")
+_MAX_REDIRECTS = 3
+_MAX_PROVIDER_FUTURE_SKEW_SECONDS = 30
+_ROUTE_INDEX_VERSION = 2
+_ALLOWED_ATM_RT_HOSTS = frozenset({"t-mobilitat.atm.cat", "t-mobilitat.cat"})
 
 # Regex pattern to extract stop codes and names from Catalan alert descriptions
 # Matches patterns like "009463 Jumilla, 53" or "105958 Metro Can Peixauet"
@@ -66,6 +86,17 @@ _STOP_CODE_PATTERN = re.compile(
     r"(\d{5,6})\s+([A-ZÀ-Ü][^-\n\d]{2,60}?)(?:\s*-\s*|\s*$)",
     re.MULTILINE,
 )
+
+
+def _is_safe_id(value: str) -> bool:
+    return _SAFE_ID_PATTERN.fullmatch(value) is not None
+
+
+def _safe_timestamp_iso(value: int) -> str | None:
+    try:
+        return datetime.fromtimestamp(value, tz=UTC).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 class ATMRTService:
@@ -93,12 +124,15 @@ class ATMRTService:
 
     async def start(self) -> None:
         """Initialize the HTTP client for polling."""
+        for name, url in self._urls.items():
+            if url:
+                self._validate_feed_url(url, name)
         self._http = httpx.AsyncClient(
             timeout=httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=10.0),
             limits=httpx.Limits(max_connections=5, max_keepalive_connections=2),
             headers={"User-Agent": "curl/8.20.0"},
-            http2=True,
-            follow_redirects=True,
+            follow_redirects=False,
+            trust_env=False,
         )
         logger.info("ATM GTFS-RT client initialized")
 
@@ -134,38 +168,73 @@ class ATMRTService:
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        raw_tu = results[0] if not isinstance(results[0], Exception) else b""
-        raw_vp = results[1] if not isinstance(results[1], Exception) else b""
-        raw_al = results[2] if not isinstance(results[2], Exception) else b""
+        successful_results = [result for result in results if isinstance(result, bytes) and result]
+        if not successful_results:
+            raise ExternalAPIError("ATM", "All realtime feeds are unavailable")
 
-        if isinstance(results[0], Exception):
-            logger.warning(f"Failed to fetch TripUpdates: {results[0]}")
-        if isinstance(results[1], Exception):
-            logger.warning(f"Failed to fetch VehiclePositions: {results[1]}")
-        if isinstance(results[2], Exception):
-            logger.warning(f"Failed to fetch Alerts: {results[2]}")
+        component_names = ("trip_updates", "vehicle_positions", "alerts")
+        display_names = ("TripUpdates", "VehiclePositions", "Alerts")
+        parsed_components: dict[str, ATMRealtimeFeed] = {}
+        provider_timestamps: dict[str, int] = {}
+        unchanged_components: set[str] = set()
+        for component, name, result in zip(
+            component_names,
+            display_names,
+            results,
+            strict=True,
+        ):
+            if isinstance(result, Exception):
+                logger.warning("ATM %s feed unavailable (%s)", name, type(result).__name__)
+            elif isinstance(result, bytes) and result:
+                try:
+                    parsed_result = await self._parse_component_payload(
+                        result,
+                        component,
+                    )
+                except GTFSParseError as exc:
+                    logger.warning("ATM %s feed rejected (%s)", name, type(exc).__name__)
+                    continue
+                if parsed_result is None:
+                    unchanged_components.add(component)
+                    continue
+                parsed, provider_timestamp = parsed_result
+                parsed_components[component] = parsed
+                provider_timestamps[component] = provider_timestamp
 
-        feed = ATMRealtimeFeed()
+        if not parsed_components and not unchanged_components:
+            raise GTFSParseError("feed.pb", "All available ATM realtime components were rejected")
 
-        # Parse each feed if data exists
-        if raw_tu:
-            feed = self._parse_protobuf(raw_tu, feed)
-        if raw_vp:
-            feed = self._parse_protobuf(raw_vp, feed)
-        if raw_al:
-            feed = self._parse_protobuf(raw_al, feed)
+        successful_components = set(parsed_components)
 
-        feed.entity_count = (
-            len(feed.vehicle_positions)
-            + len(feed.trip_updates)
-            + len(feed.service_alerts)
+        # Start from the still-valid last-good component keys. A failed feed is
+        # never overwritten with an empty list, while each successful feed gets
+        # its own TTL refreshed below.
+        feed = ATMRealtimeFeed(
+            trip_updates=await self.get_cached_trips(),
+            vehicle_positions=await self.get_cached_vehicles(),
+            service_alerts=await self.get_cached_alerts(),
         )
 
-        await self._cache_feed(feed)
+        if parsed := parsed_components.get("trip_updates"):
+            feed.trip_updates = parsed.trip_updates
+        if parsed := parsed_components.get("vehicle_positions"):
+            feed.vehicle_positions = parsed.vehicle_positions
+        if parsed := parsed_components.get("alerts"):
+            feed.service_alerts = parsed.service_alerts
+
+        feed.entity_count = (
+            len(feed.vehicle_positions) + len(feed.trip_updates) + len(feed.service_alerts)
+        )
+
+        if successful_components:
+            await self._cache_feed(
+                feed,
+                successful_components,
+                provider_timestamps=provider_timestamps,
+            )
 
         logger.info(
-            "Parsed and cached ATM GTFS-RT feeds: "
-            "%d vehicles, %d trips, %d alerts",
+            "Processed ATM GTFS-RT feeds: %d vehicles, %d trips, %d alerts",
             len(feed.vehicle_positions),
             len(feed.trip_updates),
             len(feed.service_alerts),
@@ -173,59 +242,109 @@ class ATMRTService:
         return feed
 
     async def _fetch_feed(self, url: str, name: str) -> bytes | None:
-        """Fetch a GTFS-RT protobuf feed using curl to bypass WAF.
-
-        Includes a subprocess timeout to prevent zombie processes and
-        a response size limit to prevent OOM.
-        """
+        """Stream a GTFS-RT protobuf feed with a hard response limit."""
         if not url:
             return None
 
-        logger.debug("Fetching %s from %s", name, url)
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "curl", "-fsL", "-A", "curl/8.20.0",
-                "--max-filesize", str(_MAX_RESPONSE_BYTES),
-                url,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
+        current_url = self._validate_feed_url(url, name)
+        logger.debug("Fetching ATM %s feed", name)
 
+        for redirect_count in range(_MAX_REDIRECTS + 1):
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(),
-                    timeout=_CURL_TIMEOUT_SECONDS,
-                )
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
+                payload = bytearray()
+                async with self.http.stream(
+                    "GET",
+                    current_url,
+                    follow_redirects=False,
+                ) as response:
+                    if response.is_redirect:
+                        if redirect_count >= _MAX_REDIRECTS:
+                            raise ExternalAPIError("ATM", f"Too many redirects fetching {name}")
+                        location = response.headers.get("location")
+                        if not location:
+                            raise ExternalAPIError("ATM", f"Invalid redirect fetching {name}")
+                        current_url = self._validate_feed_url(
+                            urljoin(str(response.url), location),
+                            name,
+                        )
+                        continue
+
+                    response.raise_for_status()
+                    content_length = response.headers.get("content-length")
+                    if content_length:
+                        try:
+                            declared_size = int(content_length)
+                        except ValueError:
+                            raise ExternalAPIError(
+                                "ATM",
+                                f"Invalid response metadata for {name}",
+                            ) from None
+                        if declared_size < 0 or declared_size > _MAX_RESPONSE_BYTES:
+                            raise ExternalAPIError(
+                                "ATM",
+                                f"{name} response exceeds size limit",
+                            )
+
+                    async for chunk in response.aiter_bytes():
+                        payload.extend(chunk)
+                        if len(payload) > _MAX_RESPONSE_BYTES:
+                            raise ExternalAPIError(
+                                "ATM",
+                                f"{name} response exceeds size limit",
+                            )
+
+                content = bytes(payload)
+                stripped = content.lstrip()
+                if not content:
+                    raise ExternalAPIError("ATM", f"Empty response fetching {name}")
+                if stripped.startswith(b"<"):
+                    raise ExternalAPIError("ATM", f"Received HTML instead of protobuf for {name}")
+                if stripped.startswith((b"{", b"[")):
+                    raise ExternalAPIError("ATM", f"Received JSON instead of protobuf for {name}")
+                return content
+            except ExternalAPIError:
+                raise
+            except httpx.TimeoutException as exc:
+                raise ExternalAPIError("ATM", f"Timeout fetching {name}") from exc
+            except httpx.HTTPStatusError as exc:
                 raise ExternalAPIError(
                     "ATM",
-                    f"Timeout fetching {name} (>{_CURL_TIMEOUT_SECONDS}s)",
-                )
+                    f"HTTP {exc.response.status_code} fetching {name}",
+                ) from exc
+            except httpx.HTTPError as exc:
+                raise ExternalAPIError("ATM", f"Connection failure fetching {name}") from exc
+            except Exception as exc:
+                raise ExternalAPIError("ATM", f"Invalid response fetching {name}") from exc
 
-            if proc.returncode != 0:
-                raise ExternalAPIError("ATM", f"curl failed for {name}: {stderr.decode()}")
+        raise ExternalAPIError("ATM", f"Redirect resolution failed for {name}")
 
-            # Check if we got an error document instead of binary protobuf.
-            if stdout.startswith(b"<html") or stdout.startswith(b"<!DOC"):
-                raise ExternalAPIError("ATM", f"Received HTML instead of protobuf for {name}")
-            if stdout.lstrip().startswith((b"{", b"[")):
-                raise ExternalAPIError("ATM", f"Received JSON instead of protobuf for {name}")
+    def _validate_feed_url(self, raw_url: str, name: str) -> str:
+        """Accept only the official HTTPS Open Data origins and paths."""
+        try:
+            parsed = urlsplit(raw_url)
+            port = parsed.port
+        except (TypeError, ValueError):
+            raise ExternalAPIError("ATM", f"Invalid endpoint configured for {name}") from None
 
-            # Size check (belt and suspenders — curl --max-filesize should catch this)
-            if len(stdout) > _MAX_RESPONSE_BYTES:
-                raise ExternalAPIError(
-                    "ATM",
-                    f"Response for {name} exceeds size limit "
-                    f"({len(stdout)} > {_MAX_RESPONSE_BYTES} bytes)",
-                )
-
-            return stdout
-        except ExternalAPIError:
-            raise
-        except Exception as exc:
-            raise ExternalAPIError("ATM", f"Failed to fetch {name}: {exc}") from exc
+        configured_hosts = {
+            host.strip().lower()
+            for host in self._settings.OUTBOUND_ALLOWED_HOSTS.split(",")
+            if host.strip()
+        }
+        hostname = (parsed.hostname or "").lower()
+        if (
+            parsed.scheme != "https"
+            or hostname not in _ALLOWED_ATM_RT_HOSTS
+            or hostname not in configured_hosts
+            or parsed.username is not None
+            or parsed.password is not None
+            or port not in (None, 443)
+            or not parsed.path.startswith("/opendata/")
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ExternalAPIError("ATM", f"Unsafe endpoint configured for {name}")
+        return raw_url
 
     # ------------------------------------------------------------------
     # Protobuf Parsing
@@ -233,36 +352,153 @@ class ATMRTService:
 
     def _parse_protobuf(self, raw_bytes: bytes, feed: ATMRealtimeFeed) -> ATMRealtimeFeed:
         """Parse binary protobuf into normalized pydantic models."""
+        feed_message = self._decode_protobuf(raw_bytes)
+        self._validate_feed_header(feed_message)
+        self._validate_message_budget(feed_message)
+        return self._model_feed_message(feed_message, feed)
+
+    async def _parse_component_payload(
+        self,
+        raw_bytes: bytes,
+        component: str,
+    ) -> tuple[ATMRealtimeFeed, int] | None:
+        """Validate one component fully before creating application models."""
+        feed_message = self._decode_protobuf(raw_bytes)
+        provider_timestamp = self._validate_feed_header(feed_message)
+        if not await self._provider_timestamp_is_new(component, provider_timestamp):
+            return None
+        self._validate_component_entities(feed_message, component)
+        self._validate_message_budget(feed_message)
+        parsed = self._model_feed_message(feed_message, ATMRealtimeFeed())
+        return parsed, provider_timestamp
+
+    @staticmethod
+    def _decode_protobuf(raw_bytes: bytes) -> gtfs_realtime_pb2.FeedMessage:
+        """Decode one bounded protobuf payload without creating Pydantic models."""
         feed_message = gtfs_realtime_pb2.FeedMessage()
         try:
             feed_message.ParseFromString(raw_bytes)
         except DecodeError as exc:
             raise GTFSParseError("feed.pb", f"Failed to parse protobuf: {exc}") from exc
 
+        if len(feed_message.entity) > _MAX_PROTOBUF_ENTITIES:
+            raise GTFSParseError("feed.pb", "Feed entity limit exceeded")
+
+        return feed_message
+
+    def _validate_feed_header(self, feed_message: gtfs_realtime_pb2.FeedMessage) -> int:
+        """Accept only current, full-snapshot feeds with a trustworthy timestamp."""
+        header = feed_message.header
+        if header.incrementality != gtfs_realtime_pb2.FeedHeader.FULL_DATASET:
+            raise GTFSParseError("feed.pb", "Differential realtime feeds are unsupported")
+        if not header.HasField("timestamp") or header.timestamp <= 0:
+            raise GTFSParseError("feed.pb", "Feed header timestamp is required")
+
+        provider_timestamp = int(header.timestamp)
+        now_timestamp = int(datetime.now(tz=UTC).timestamp())
+        if provider_timestamp < now_timestamp - self._freshness_window_seconds():
+            raise GTFSParseError("feed.pb", "Provider feed is stale")
+        if provider_timestamp > now_timestamp + _MAX_PROVIDER_FUTURE_SKEW_SECONDS:
+            raise GTFSParseError("feed.pb", "Provider feed timestamp is in the future")
+        return provider_timestamp
+
+    async def _provider_timestamp_is_new(self, component: str, timestamp: int) -> bool:
+        """Return false for an unchanged snapshot; reject older component replays."""
+        raw_previous = await self._cache.get(
+            f"{_KEY_COMPONENT_PROVIDER_TIMESTAMP_PREFIX}:{component}"
+        )
+        if not raw_previous:
+            return True
+        try:
+            previous = int(raw_previous.decode("ascii"))
+        except (UnicodeDecodeError, ValueError):
+            logger.warning("Ignoring invalid ATM provider timestamp marker for %s", component)
+            return True
+        if timestamp < previous:
+            raise GTFSParseError("feed.pb", f"{component} provider feed did not advance")
+        return timestamp > previous
+
+    @staticmethod
+    def _validate_component_entities(
+        feed_message: gtfs_realtime_pb2.FeedMessage,
+        component: str,
+    ) -> None:
+        """Prevent a valid protobuf from replacing the wrong component snapshot."""
+        expected_field = {
+            "trip_updates": "trip_update",
+            "vehicle_positions": "vehicle",
+            "alerts": "alert",
+        }[component]
+        payload_fields = ("trip_update", "vehicle", "alert")
         for entity in feed_message.entity:
-            if entity.HasField("vehicle"):
-                vp = self._parse_vehicle(entity.vehicle)
-                if vp:
-                    feed.vehicle_positions.append(vp)
-            elif entity.HasField("trip_update"):
-                tu = self._parse_trip_update(entity.trip_update)
-                if tu:
-                    feed.trip_updates.append(tu)
+            if any(
+                entity.HasField(field)
+                for field in payload_fields
+                if field != expected_field
+            ):
+                raise GTFSParseError("feed.pb", f"Unexpected entity in {component} feed")
+
+    @staticmethod
+    def _validate_message_budget(feed_message: gtfs_realtime_pb2.FeedMessage) -> None:
+        """Bound nested repeated fields before any Pydantic object is allocated."""
+        total_stop_updates = 0
+        total_alert_selectors = 0
+        for entity in feed_message.entity:
+            if entity.HasField("trip_update"):
+                stop_updates = len(entity.trip_update.stop_time_update)
+                if stop_updates > _MAX_STOP_UPDATES_PER_TRIP:
+                    raise GTFSParseError("feed.pb", "Trip stop-time update limit exceeded")
+                total_stop_updates += stop_updates
+                if total_stop_updates > _MAX_TOTAL_STOP_UPDATES:
+                    raise GTFSParseError("feed.pb", "Feed stop-time update budget exceeded")
             elif entity.HasField("alert"):
-                al = self._parse_alert(entity.id, entity.alert)
-                if al:
-                    feed.service_alerts.append(al)
+                selectors = len(entity.alert.informed_entity)
+                if selectors > _MAX_ALERT_SELECTORS:
+                    raise GTFSParseError("feed.pb", "Alert selector limit exceeded")
+                total_alert_selectors += selectors
+                if total_alert_selectors > _MAX_TOTAL_ALERT_SELECTORS:
+                    raise GTFSParseError("feed.pb", "Feed alert selector budget exceeded")
+
+    def _model_feed_message(
+        self,
+        feed_message: gtfs_realtime_pb2.FeedMessage,
+        feed: ATMRealtimeFeed,
+    ) -> ATMRealtimeFeed:
+        """Create normalized models after all whole-message limits pass."""
+
+        invalid_entities = 0
+        for entity in feed_message.entity:
+            try:
+                if entity.HasField("vehicle"):
+                    vp = self._parse_vehicle(entity.vehicle)
+                    if vp:
+                        feed.vehicle_positions.append(vp)
+                elif entity.HasField("trip_update"):
+                    tu = self._parse_trip_update(entity.trip_update)
+                    if tu:
+                        feed.trip_updates.append(tu)
+                elif entity.HasField("alert"):
+                    al = self._parse_alert(entity.id, entity.alert)
+                    if al:
+                        feed.service_alerts.append(al)
+            except (ValidationError, ValueError, OverflowError):
+                invalid_entities += 1
+
+        if invalid_entities:
+            logger.warning("Dropped %d invalid ATM realtime entities", invalid_entities)
 
         return feed
 
     def _parse_vehicle(self, v: gtfs_realtime_pb2.VehiclePosition) -> VehiclePosition | None:
         """Extract a VehiclePosition entity."""
         vid = v.vehicle.id if v.HasField("vehicle") else ""
-        if not vid:
+        if not _is_safe_id(vid):
             return None
 
         route_id = v.trip.route_id if v.HasField("trip") else ""
         trip_id = v.trip.trip_id if v.HasField("trip") else ""
+        if (route_id and not _is_safe_id(route_id)) or (trip_id and not _is_safe_id(trip_id)):
+            return None
         lat = v.position.latitude if v.HasField("position") else 0.0
         lon = v.position.longitude if v.HasField("position") else 0.0
         bearing = v.position.bearing if v.position.HasField("bearing") else None
@@ -287,18 +523,20 @@ class ATMRTService:
     def _parse_trip_update(self, tu: gtfs_realtime_pb2.TripUpdate) -> TripUpdate | None:
         """Extract a TripUpdate entity."""
         trip_id = tu.trip.trip_id if tu.HasField("trip") else ""
-        if not trip_id:
+        if not _is_safe_id(trip_id):
             return None
 
         route_id = tu.trip.route_id if tu.HasField("trip") else ""
         start_date = tu.trip.start_date if tu.trip.HasField("start_date") else ""
         vid = tu.vehicle.id if tu.HasField("vehicle") else ""
+        if any(value and not _is_safe_id(value) for value in (route_id, vid, start_date)):
+            return None
         timestamp = tu.timestamp if tu.HasField("timestamp") else 0
 
         updates = []
-        for stu in tu.stop_time_update:
+        for stu in tu.stop_time_update[:_MAX_STOP_UPDATES_PER_TRIP]:
             stop_id = stu.stop_id
-            if not stop_id:
+            if not _is_safe_id(stop_id):
                 continue
 
             arr_delay = stu.arrival.delay if stu.HasField("arrival") else 0
@@ -332,12 +570,12 @@ class ATMRTService:
         - ``affected_stop_details``: Per-stop status
         - ``detour_description``: Extracted from description
         """
-        if not entity_id:
+        if not _is_safe_id(entity_id):
             return None
 
-        header = self._extract_translated_string(al.header_text)
-        desc = self._extract_translated_string(al.description_text)
-        url = self._extract_translated_string(al.url)
+        header = self._extract_translated_string(al.header_text)[:1_000]
+        desc = self._extract_translated_string(al.description_text)[:10_000]
+        url = self._extract_translated_string(al.url)[:2_048]
 
         # Fallback enums if standard parsing fails
         try:
@@ -355,17 +593,17 @@ class ATMRTService:
         if al.active_period:
             period = al.active_period[0]
             if period.HasField("start"):
-                start_iso = datetime.fromtimestamp(period.start, tz=timezone.utc).isoformat()
+                start_iso = _safe_timestamp_iso(period.start)
             if period.HasField("end"):
-                end_iso = datetime.fromtimestamp(period.end, tz=timezone.utc).isoformat()
+                end_iso = _safe_timestamp_iso(period.end)
 
         # Extract affected routes/stops
         routes = []
         stops = []
-        for entity_selector in al.informed_entity:
-            if entity_selector.HasField("route_id"):
+        for entity_selector in al.informed_entity[:_MAX_ALERT_SELECTORS]:
+            if entity_selector.HasField("route_id") and _is_safe_id(entity_selector.route_id):
                 routes.append(entity_selector.route_id)
-            if entity_selector.HasField("stop_id"):
+            if entity_selector.HasField("stop_id") and _is_safe_id(entity_selector.stop_id):
                 stops.append(entity_selector.stop_id)
 
         # --- Auto-classification ---
@@ -373,7 +611,9 @@ class ATMRTService:
         severity = self._classify_severity(effect_str, alert_type)
         alternative_stops = self._extract_alternative_stops(desc)
         affected_details = self._build_affected_stop_details(stops, alert_type, header)
-        detour_desc = self._extract_detour_description(desc) if alert_type == AlertType.DETOUR else ""
+        detour_desc = (
+            self._extract_detour_description(desc) if alert_type == AlertType.DETOUR else ""
+        )
 
         return ServiceAlert(
             alert_id=entity_id,
@@ -525,7 +765,9 @@ class ATMRTService:
         if not ts.translation:
             return ""
 
-        translations = {t.language.lower(): t.text for t in ts.translation}
+        translations = {
+            t.language.lower()[:16]: t.text[:10_000] for t in ts.translation[:_MAX_TRANSLATIONS]
+        }
 
         for lang in _LANG_PRIORITY:
             if lang in translations:
@@ -536,37 +778,172 @@ class ATMRTService:
                 return translations["cat"]
 
         # If none of our priorities match, return the first one available
-        return ts.translation[0].text
+        return ts.translation[0].text[:10_000]
 
     # ------------------------------------------------------------------
     # Caching / Retrieval
     # ------------------------------------------------------------------
 
-    async def _cache_feed(self, feed: ATMRealtimeFeed) -> None:
-        """Cache the parsed feed and its collections in Redis."""
+    async def _cache_feed(
+        self,
+        feed: ATMRealtimeFeed,
+        components: set[str],
+        *,
+        provider_timestamps: dict[str, int] | None = None,
+    ) -> None:
+        """Refresh only successful components so failures retain last-good data."""
         ttl = self._settings.CACHE_TTL_ATM_REALTIME
+        provider_timestamps = provider_timestamps or {}
 
-        # Pipeline dictionary for batched saving
-        pipeline_data = {
-            _KEY_FEED_FULL: feed.model_dump(mode="json"),
-            _KEY_VEHICLES: [v.model_dump(mode="json") for v in feed.vehicle_positions],
-            _KEY_TRIPS: [t.model_dump(mode="json") for t in feed.trip_updates],
-            _KEY_ALERTS: [a.model_dump(mode="json") for a in feed.service_alerts],
-        }
-
-        await self._cache.mset_json(pipeline_data, ttl=ttl)
+        pipeline_data: dict[str, object] = {}
+        if "vehicle_positions" in components:
+            pipeline_data[_KEY_VEHICLES] = [
+                item.model_dump(mode="json") for item in feed.vehicle_positions
+            ]
+        if "trip_updates" in components:
+            pipeline_data[_KEY_TRIPS] = [item.model_dump(mode="json") for item in feed.trip_updates]
+        if "alerts" in components:
+            pipeline_data[_KEY_ALERTS] = [
+                item.model_dump(mode="json") for item in feed.service_alerts
+            ]
+        if pipeline_data:
+            await self._cache.mset_json(pipeline_data, ttl=ttl)
+        if "vehicle_positions" in components:
+            await self._replace_route_index(
+                items=feed.vehicle_positions,
+                prefix=_KEY_VEHICLES_ROUTE_PREFIX,
+                route_list_key=_KEY_VEHICLE_ROUTES,
+                ttl=ttl,
+            )
+        if "trip_updates" in components:
+            await self._replace_route_index(
+                items=feed.trip_updates,
+                prefix=_KEY_TRIPS_ROUTE_PREFIX,
+                route_list_key=_KEY_TRIP_ROUTES,
+                ttl=ttl,
+            )
+        updated_at = feed.feed_timestamp.isoformat()
         await self._cache.set(
             _KEY_LAST_UPDATED,
-            feed.feed_timestamp.isoformat(),
+            updated_at,
             ttl=ttl,
         )
+        for component in components:
+            await self._cache.set(
+                f"{_KEY_COMPONENT_UPDATED_PREFIX}:{component}",
+                updated_at,
+                ttl=ttl,
+            )
+            if provider_timestamp := provider_timestamps.get(component):
+                await self._cache.set(
+                    f"{_KEY_COMPONENT_PROVIDER_TIMESTAMP_PREFIX}:{component}",
+                    str(provider_timestamp),
+                    ttl=ttl,
+                )
+
+    async def _replace_route_index(
+        self,
+        *,
+        items: list[VehiclePosition] | list[TripUpdate],
+        prefix: str,
+        route_list_key: str,
+        ttl: int,
+    ) -> None:
+        """Replace one bounded per-route index while stale generations expire."""
+        grouped: dict[str, list[dict]] = {}
+        for item in items:
+            if not item.route_id:
+                continue
+            grouped.setdefault(item.route_id, []).append(item.model_dump(mode="json"))
+
+        previous = await self._cache.get_json(route_list_key)
+        previous_routes = self._route_ids_from_v2_marker(previous)
+        if previous_routes is None:
+            previous_routes = {
+                route_id
+                for route_id in (previous if isinstance(previous, list) else [])
+                if isinstance(route_id, str) and route_id
+            }
+        current_routes = set(grouped)
+        mapping: dict[str, object] = {
+            self._route_cache_key(prefix, route_id): values for route_id, values in grouped.items()
+        }
+        mapping[route_list_key] = {
+            "version": _ROUTE_INDEX_VERSION,
+            "route_ids": sorted(current_routes),
+        }
+        await self._cache.mset_json(mapping, ttl=ttl)
+
+        stale_keys = [
+            self._route_cache_key(prefix, route_id) for route_id in previous_routes - current_routes
+        ]
+        for start in range(0, len(stale_keys), 100):
+            await asyncio.gather(
+                *(self._cache.delete(key) for key in stale_keys[start : start + 100])
+            )
+
+    @staticmethod
+    def _route_cache_key(prefix: str, route_id: str) -> str:
+        digest = hashlib.sha256(route_id.encode("utf-8")).hexdigest()[:24]
+        return f"{prefix}:{digest}"
+
+    @staticmethod
+    def _route_ids_from_v2_marker(marker: object) -> set[str] | None:
+        """Return indexed routes, or ``None`` for a pre-v2 migration marker."""
+        if not isinstance(marker, dict) or marker.get("version") != _ROUTE_INDEX_VERSION:
+            return None
+        route_ids = marker.get("route_ids")
+        if not isinstance(route_ids, list):
+            return set()
+        return {
+            route_id for route_id in route_ids if isinstance(route_id, str) and route_id
+        }
+
+    def _freshness_window_seconds(self) -> int:
+        return max(30, min(self._settings.ATM_RT_FRESHNESS_SECONDS, 600))
+
+    async def _component_is_fresh(self, component: str) -> bool:
+        raw = await self._cache.get(f"{_KEY_COMPONENT_PROVIDER_TIMESTAMP_PREFIX}:{component}")
+        if not raw:
+            return False
+        try:
+            provider_timestamp = int(raw.decode("ascii"))
+        except (UnicodeDecodeError, ValueError):
+            return False
+        now_timestamp = int(datetime.now(tz=UTC).timestamp())
+        return (
+            now_timestamp - self._freshness_window_seconds()
+            <= provider_timestamp
+            <= now_timestamp
+        )
+
+    async def get_component_freshness(self) -> dict[str, bool]:
+        """Report provider-time freshness without trusting local receipt time."""
+        components = ("trip_updates", "vehicle_positions", "alerts")
+        states = await asyncio.gather(
+            *(self._component_is_fresh(component) for component in components)
+        )
+        return dict(zip(components, states, strict=True))
 
     async def get_cached_feed(self) -> ATMRealtimeFeed | None:
-        """Retrieve the full feed snapshot from cache."""
-        data = await self._cache.get_json(_KEY_FEED_FULL)
-        if not data:
+        """Assemble a snapshot from independently expiring component caches."""
+        vehicles, trips, alerts = await asyncio.gather(
+            self.get_cached_vehicles(),
+            self.get_cached_trips(),
+            self.get_cached_alerts(),
+        )
+        if not vehicles and not trips and not alerts:
+            # Rolling fallback for cache data written by older releases.
+            data = await self._cache.get_json(_KEY_FEED_FULL)
+            if data:
+                return ATMRealtimeFeed(**data)
             return None
-        return ATMRealtimeFeed(**data)
+        return ATMRealtimeFeed(
+            vehicle_positions=vehicles,
+            trip_updates=trips,
+            service_alerts=alerts,
+            entity_count=len(vehicles) + len(trips) + len(alerts),
+        )
 
     async def get_cached_vehicles(self) -> list[VehiclePosition]:
         data = await self._cache.get_json(_KEY_VEHICLES)
@@ -574,11 +951,37 @@ class ATMRTService:
             return []
         return [VehiclePosition(**v) for v in data]
 
+    async def get_cached_vehicles_for_route(self, route_id: str) -> list[VehiclePosition]:
+        if not await self._component_is_fresh("vehicle_positions"):
+            return []
+        data = await self._cache.get_json(
+            self._route_cache_key(_KEY_VEHICLES_ROUTE_PREFIX, route_id)
+        )
+        if data is None:
+            marker = await self._cache.get_json(_KEY_VEHICLE_ROUTES)
+            if self._route_ids_from_v2_marker(marker) is not None:
+                return []
+            # Migration fallback for cache snapshots written before route-index v2.
+            return [item for item in await self.get_cached_vehicles() if item.route_id == route_id]
+        return [VehiclePosition(**item) for item in data[:2_000]]
+
     async def get_cached_trips(self) -> list[TripUpdate]:
         data = await self._cache.get_json(_KEY_TRIPS)
         if not data:
             return []
         return [TripUpdate(**t) for t in data]
+
+    async def get_cached_trips_for_route(self, route_id: str) -> list[TripUpdate]:
+        if not await self._component_is_fresh("trip_updates"):
+            return []
+        data = await self._cache.get_json(self._route_cache_key(_KEY_TRIPS_ROUTE_PREFIX, route_id))
+        if data is None:
+            marker = await self._cache.get_json(_KEY_TRIP_ROUTES)
+            if self._route_ids_from_v2_marker(marker) is not None:
+                return []
+            # Migration fallback for cache snapshots written before route-index v2.
+            return [item for item in await self.get_cached_trips() if item.route_id == route_id]
+        return [TripUpdate(**item) for item in data[:2_000]]
 
     async def get_cached_alerts(self) -> list[ServiceAlert]:
         data = await self._cache.get_json(_KEY_ALERTS)

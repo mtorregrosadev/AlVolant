@@ -13,6 +13,8 @@ orchestrators can probe without credentials.
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse
 
@@ -45,9 +47,12 @@ async def liveness() -> dict:
 async def readiness(request: Request) -> dict:
     """Check whether all backend dependencies are healthy.
 
-    Verifies:
-    - Redis connectivity (PING) and key count
-    - Background worker status (ATM RT)
+    Verifies core readiness with O(1) checks:
+    - Redis connectivity
+    - Presence of the active GTFS route index
+
+    Realtime freshness is reported as a degraded feature, but an external ATM
+    outage does not force the healthy BFF into an orchestrator restart loop.
 
     Returns 200 with a detailed status object if all checks pass,
     or 503 with degraded status if any dependency is unhealthy.
@@ -56,12 +61,13 @@ async def readiness(request: Request) -> dict:
 
     # --- Redis health ---
     redis_ok = False
-    redis_keys = -1
     try:
         cache = app.state.cache
-        redis_ok = await cache.health_check()
-        if redis_ok:
-            redis_keys = await cache.key_count()
+        redis_ok, redis_writable = await asyncio.gather(
+            cache.health_check(),
+            cache.writable_health_check(),
+        )
+        redis_ok = redis_ok and redis_writable
     except Exception:
         logger.warning("Redis health check failed during readiness probe")
 
@@ -71,22 +77,49 @@ async def readiness(request: Request) -> dict:
     if atm_rt_worker:
         workers_status["atm_rt"] = atm_rt_worker.status()
 
+    # --- Data freshness ---
+    gtfs_ready = False
+    try:
+        gtfs_ready = await app.state.gtfs_service.has_complete_cache()
+    except Exception:
+        logger.warning("GTFS readiness check failed")
+
+    component_freshness: dict[str, bool] = {}
+    try:
+        component_freshness = await app.state.atm_rt_service.get_component_freshness()
+    except Exception:
+        logger.warning("Realtime freshness check failed")
+    worker_running = bool(
+        atm_rt_worker
+        and workers_status.get("atm_rt", {}).get("running")
+    )
+    realtime_fresh = (
+        worker_running
+        and component_freshness.get("trip_updates", False)
+        and component_freshness.get("vehicle_positions", False)
+    )
+
     # --- Overall status ---
-    all_healthy = redis_ok
-    status = "ready" if all_healthy else "degraded"
+    core_ready = redis_ok and gtfs_ready
+    status = "ready" if core_ready else "not_ready"
 
     response_data = {
         "status": status,
         "checks": {
-            "redis": {
-                "connected": redis_ok,
-                "key_count": redis_keys,
+            "redis": {"connected": redis_ok},
+            "gtfs": {"loaded": gtfs_ready},
+            "realtime": {
+                "running": worker_running,
+                "fresh": realtime_fresh,
+                "partial": any(component_freshness.values()) and not realtime_fresh,
             },
-            "workers": workers_status,
         },
+        "degraded_features": [] if realtime_fresh else ["realtime"],
     }
 
-    if not all_healthy:
+    # An external ATM outage degrades live positions but must not cause a
+    # restart loop while cached GTFS routes remain fully usable.
+    if not core_ready:
         return ORJSONResponse(content=response_data, status_code=503)
 
     return response_data

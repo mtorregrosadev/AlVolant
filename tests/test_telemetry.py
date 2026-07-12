@@ -67,13 +67,17 @@ async def test_service_hashes_session_redacts_secrets_and_sets_ttl(
     dirty = (
         "token=top-secret at /Users/alice/project "
         "41.403812, 2.174532 user@example.com "
-        "https://example.com/path?api_key=secret"
+        "https://example.com/path?api_key=secret "
+        "headers={'X-API-Key': 'quoted-secret'} "
+        "payload={'password': 'quoted-password', 'longitude': '2.174532'}"
     )
     scrubbed = service._sanitize_text(dirty, 500)
     assert "top-secret" not in scrubbed
     assert "alice" not in scrubbed
     assert "41.403812" not in scrubbed
     assert "user@example.com" not in scrubbed
+    assert "quoted-secret" not in scrubbed
+    assert "quoted-password" not in scrubbed
 
     await service.close()
 

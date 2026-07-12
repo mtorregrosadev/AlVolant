@@ -89,13 +89,13 @@ def register_exception_handlers(app: FastAPI) -> None:
         request: Request,
         exc: ExternalAPIError,
     ) -> JSONResponse:
-        logger.error("External API error: %s", exc.message)
+        logger.error("External provider failure: %s", exc.source)
         return JSONResponse(
             status_code=502,
             content={
                 "error": "external_api_error",
                 "source": exc.source,
-                "detail": exc.detail,
+                "detail": "The upstream provider could not complete the request.",
             },
         )
 
@@ -104,12 +104,12 @@ def register_exception_handlers(app: FastAPI) -> None:
         request: Request,
         exc: CacheError,
     ) -> JSONResponse:
-        logger.error("Cache error: %s", exc.message)
+        logger.error("Cache operation failed: %s", exc.operation)
         return JSONResponse(
             status_code=503,
             content={
                 "error": "cache_error",
-                "detail": exc.message,
+                "detail": "The cache service is temporarily unavailable.",
             },
         )
 

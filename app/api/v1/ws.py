@@ -29,15 +29,18 @@ Protocol:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+import re
+from datetime import UTC, datetime
+from typing import Literal
 
 import orjson
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from starlette.websockets import WebSocketState
 
 from app.core.auth import verify_ws_api_key
 from app.core.logging import get_logger
-from app.core.rate_limiter import check_ws_rate_limit
+from app.core.rate_limiter import _hash_client_identifier, check_ws_rate_limit
 
 logger = get_logger(__name__)
 
@@ -45,6 +48,47 @@ router = APIRouter(prefix="/ws", tags=["WebSocket"])
 
 # Allowed topic prefixes — clients can only subscribe to known namespaces
 _ALLOWED_TOPIC_PREFIXES = ("atm_rt:", "gtfs:")
+_TOPIC_PATTERN = re.compile(r"^(?:atm_rt|gtfs):[A-Za-z0-9_.:-]+$")
+_MAX_TOPIC_LENGTH = 128
+_MAX_TOPICS_PER_MESSAGE = 20
+_MAX_CONNECTIONS_PER_IP = 20
+
+
+class ClientMessage(BaseModel):
+    """Strictly validated client-to-server WebSocket command."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    action: Literal["subscribe", "unsubscribe", "ping"]
+    topics: list[str] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=_MAX_TOPICS_PER_MESSAGE,
+    )
+
+    @model_validator(mode="after")
+    def validate_topics(self) -> ClientMessage:
+        """Require bounded topics only for subscription commands."""
+        if self.action == "ping":
+            if self.topics is not None:
+                raise ValueError("ping does not accept topics")
+            return self
+
+        if self.topics is None:
+            raise ValueError("topics are required")
+        if any(not _is_allowed_topic(topic) for topic in self.topics):
+            raise ValueError("invalid topic")
+        return self
+
+
+def _is_allowed_topic(topic: object) -> bool:
+    """Return whether *topic* is a bounded, known-namespace string."""
+    return (
+        isinstance(topic, str)
+        and len(topic) <= _MAX_TOPIC_LENGTH
+        and _TOPIC_PATTERN.fullmatch(topic) is not None
+        and topic.startswith(_ALLOWED_TOPIC_PREFIXES)
+    )
 
 
 class ConnectionManager:
@@ -65,27 +109,33 @@ class ConnectionManager:
         self,
         max_connections: int = 200,
         max_topics_per_client: int = 20,
+        max_connections_per_ip: int = _MAX_CONNECTIONS_PER_IP,
     ) -> None:
         # Map of websocket → set of subscribed topics
         self._connections: dict[WebSocket, set[str]] = {}
         # Map of topic → set of subscribed websockets (reverse index)
         self._topic_subscribers: dict[str, set[WebSocket]] = {}
+        # Track peer IP separately so disconnect can release the per-IP slot.
+        self._connection_ips: dict[WebSocket, str] = {}
+        self._ip_connection_counts: dict[str, int] = {}
         self._lock = asyncio.Lock()
         self._max_connections = max_connections
         self._max_topics_per_client = max_topics_per_client
+        self._max_connections_per_ip = max_connections_per_ip
 
     @property
     def connection_count(self) -> int:
         """Number of active WebSocket connections."""
         return len(self._connections)
 
-    async def connect(self, websocket: WebSocket) -> bool:
+    async def connect(self, websocket: WebSocket, client_ip: str | None = None) -> bool:
         """Accept and register a new WebSocket connection.
 
         Returns:
             ``True`` if the connection was accepted, ``False`` if the
             server has reached its connection cap.
         """
+        peer_ip = client_ip or (websocket.client.host if websocket.client else "unknown")
         async with self._lock:
             if len(self._connections) >= self._max_connections:
                 logger.warning(
@@ -95,8 +145,19 @@ class ConnectionManager:
                 )
                 return False
 
+            ip_count = self._ip_connection_counts.get(peer_ip, 0)
+            if ip_count >= self._max_connections_per_ip:
+                logger.warning(
+                    "WebSocket connection rejected — per-IP cap reached (%d/%d)",
+                    ip_count,
+                    self._max_connections_per_ip,
+                )
+                return False
+
             await websocket.accept()
             self._connections[websocket] = set()
+            self._connection_ips[websocket] = peer_ip
+            self._ip_connection_counts[peer_ip] = ip_count + 1
 
         logger.info(
             "WebSocket connected (%d total)",
@@ -108,6 +169,13 @@ class ConnectionManager:
         """Remove a WebSocket connection and all its subscriptions."""
         async with self._lock:
             topics = self._connections.pop(websocket, set())
+            peer_ip = self._connection_ips.pop(websocket, None)
+            if peer_ip is not None:
+                remaining = self._ip_connection_counts.get(peer_ip, 1) - 1
+                if remaining > 0:
+                    self._ip_connection_counts[peer_ip] = remaining
+                else:
+                    self._ip_connection_counts.pop(peer_ip, None)
             for topic in topics:
                 subs = self._topic_subscribers.get(topic)
                 if subs:
@@ -144,9 +212,10 @@ class ConnectionManager:
             current_count = len(self._connections[websocket])
 
             for topic in topics:
-                # Validate topic prefix
-                if not any(topic.startswith(p) for p in _ALLOWED_TOPIC_PREFIXES):
-                    logger.warning("Rejected invalid topic: %s", topic)
+                # Validate defensively even though endpoint messages use the
+                # strict Pydantic protocol model.
+                if not _is_allowed_topic(topic):
+                    logger.warning("Rejected invalid WebSocket topic")
                     continue
 
                 # Enforce per-client cap
@@ -203,7 +272,7 @@ class ConnectionManager:
         message = orjson.dumps({
             "topic": topic,
             "data": data,
-            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "timestamp": datetime.now(tz=UTC).isoformat(),
         })
 
         stale: list[WebSocket] = []
@@ -222,6 +291,7 @@ class ConnectionManager:
         return {
             "active_connections": self.connection_count,
             "max_connections": self._max_connections,
+            "max_connections_per_ip": self._max_connections_per_ip,
             "topics": {
                 topic: len(subs)
                 for topic, subs in self._topic_subscribers.items()
@@ -256,6 +326,12 @@ async def websocket_live(websocket: WebSocket) -> None:
     if app_settings:
         ws_manager._max_connections = app_settings.MAX_WS_CONNECTIONS
         ws_manager._max_topics_per_client = app_settings.MAX_WS_TOPICS_PER_CLIENT
+        ws_manager._max_connections_per_ip = app_settings.MAX_WS_CONNECTIONS_PER_IP
+
+    client_ip = websocket.client.host if websocket.client else "unknown"
+    rate_limit_hash_key = getattr(websocket.app.state, "rate_limit_hash_key", "")
+    client_bucket = _hash_client_identifier(client_ip, rate_limit_hash_key)
+    production = getattr(app_settings, "ENVIRONMENT", "development") == "production"
 
     # --- 1. Authentication ---
     if not api_key or not verify_ws_api_key(websocket, api_key):
@@ -263,7 +339,7 @@ async def websocket_live(websocket: WebSocket) -> None:
         return
 
     # --- 2. Connection cap ---
-    if not await ws_manager.connect(websocket):
+    if not await ws_manager.connect(websocket, client_ip):
         # connect() already logged the rejection; close with policy violation
         await websocket.close(code=1008, reason="Connection limit reached")
         return
@@ -271,7 +347,6 @@ async def websocket_live(websocket: WebSocket) -> None:
     # --- 3. Get Redis client for rate limiting ---
     cache = getattr(websocket.app.state, "cache", None)
     redis_client = cache.client if cache else None
-    client_ip = websocket.client.host if websocket.client else "unknown"
 
     try:
         while True:
@@ -290,8 +365,22 @@ async def websocket_live(websocket: WebSocket) -> None:
 
             # --- Rate limit check ---
             if redis_client:
-                allowed = await check_ws_rate_limit(redis_client, client_ip, ws_mpm)
-                if not allowed:
+                decision = await check_ws_rate_limit(
+                    redis_client,
+                    client_bucket,
+                    ws_mpm,
+                    fail_closed=production,
+                )
+                if decision == "unavailable":
+                    await websocket.send_text(
+                        orjson.dumps({
+                            "type": "error",
+                            "message": "Request protection is temporarily unavailable.",
+                        }).decode()
+                    )
+                    await websocket.close(code=1013, reason="Try again later")
+                    return
+                if decision == "limited":
                     await websocket.send_text(
                         orjson.dumps({
                             "type": "error",
@@ -309,45 +398,45 @@ async def websocket_live(websocket: WebSocket) -> None:
                 )
                 continue
 
-            action = message.get("action", "")
+            try:
+                command = ClientMessage.model_validate(message)
+            except ValidationError:
+                await websocket.send_text(
+                    orjson.dumps({
+                        "type": "error",
+                        "message": "Invalid message",
+                    }).decode()
+                )
+                continue
 
-            if action == "subscribe":
-                topics = message.get("topics", [])
-                if isinstance(topics, list) and topics:
-                    accepted = await ws_manager.subscribe(websocket, topics)
-                    await websocket.send_text(
-                        orjson.dumps({
-                            "type": "subscribed",
-                            "topics": accepted,
-                        }).decode()
-                    )
+            if command.action == "subscribe":
+                topics = command.topics or []
+                accepted = await ws_manager.subscribe(websocket, topics)
+                await websocket.send_text(
+                    orjson.dumps({
+                        "type": "subscribed",
+                        "topics": accepted,
+                    }).decode()
+                )
 
-            elif action == "unsubscribe":
-                topics = message.get("topics", [])
-                if isinstance(topics, list) and topics:
-                    await ws_manager.unsubscribe(websocket, topics)
-                    await websocket.send_text(
-                        orjson.dumps({
-                            "type": "unsubscribed",
-                            "topics": topics,
-                        }).decode()
-                    )
+            elif command.action == "unsubscribe":
+                topics = command.topics or []
+                await ws_manager.unsubscribe(websocket, topics)
+                await websocket.send_text(
+                    orjson.dumps({
+                        "type": "unsubscribed",
+                        "topics": topics,
+                    }).decode()
+                )
 
-            elif action == "ping":
+            else:  # ping
                 await websocket.send_text(
                     orjson.dumps({"type": "pong"}).decode()
                 )
 
-            else:
-                await websocket.send_text(
-                    orjson.dumps({
-                        "type": "error",
-                        "message": f"Unknown action: {action}",
-                    }).decode()
-                )
-
     except WebSocketDisconnect:
-        await ws_manager.disconnect(websocket)
+        pass
     except Exception:
         logger.exception("WebSocket error")
+    finally:
         await ws_manager.disconnect(websocket)

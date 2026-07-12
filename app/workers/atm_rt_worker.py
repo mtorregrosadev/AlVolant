@@ -15,7 +15,8 @@ Resilience features:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from contextlib import suppress
+from datetime import UTC, datetime
 from typing import Any
 
 from app.cache.redis_manager import CacheManager
@@ -78,10 +79,8 @@ class ATMRTWorker:
         self._running = False
         if self._task:
             self._task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
             self._task = None
 
         logger.info("ATM RT worker stopped")
@@ -124,7 +123,7 @@ class ATMRTWorker:
                 self.cycles_completed += 1
                 self._consecutive_errors = 0
                 self._current_backoff = _MIN_BACKOFF_SECONDS
-                self.last_success = datetime.now(tz=timezone.utc).isoformat()
+                self.last_success = datetime.now(tz=UTC).isoformat()
 
                 # 2. Broadcast the update event to WebSocket clients
                 await self._cache.client.publish(

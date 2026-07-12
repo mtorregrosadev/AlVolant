@@ -373,10 +373,11 @@ export const apiService = {
       return Promise.reject(new ApiError('Coordenades no vàlides.'));
     }
 
-    return requestJson<TrafficSummary>(
-      `/api/v1/traffic/summary${createQuery({ latitude, longitude })}`,
-      { endpoint: 'traffic_summary' },
-    );
+    return requestJson<TrafficSummary>('/api/v1/traffic/summary', {
+      method: 'POST',
+      endpoint: 'traffic_summary',
+      body: { latitude, longitude },
+    });
   },
 
   connectWebSocket(onMessage?: (data: unknown) => void) {

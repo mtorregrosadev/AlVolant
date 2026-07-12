@@ -132,6 +132,13 @@ def register_exception_handlers(app: FastAPI) -> None:
         request: Request,
         exc: Exception,
     ) -> JSONResponse:
+        telemetry = getattr(request.app.state, "telemetry", None)
+        if telemetry is not None:
+            route = request.scope.get("route")
+            telemetry.record_server_error(
+                endpoint=getattr(route, "path", None) or "unmatched",
+                error_type=type(exc).__name__,
+            )
         logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
         return JSONResponse(
             status_code=500,

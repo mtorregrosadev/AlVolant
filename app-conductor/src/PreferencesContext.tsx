@@ -18,6 +18,7 @@ import {
   type UserPreferences,
   type VehicleColor,
 } from './services/userPreferences';
+import { telemetry } from './services/telemetry';
 
 type PreferencesContextValue = {
   ready: boolean;
@@ -65,10 +66,12 @@ export function PreferencesProvider({ children }: PropsWithChildren) {
   }, [updatePreferences]);
 
   const setLanguage = useCallback((language: AppLanguage) => {
+    telemetry.capture('preference_changed', { setting: 'language', value: language });
     updatePreferences((current) => ({ ...current, language }));
   }, [updatePreferences]);
 
   const setVehicleColor = useCallback((vehicleColor: VehicleColor) => {
+    telemetry.capture('preference_changed', { setting: 'vehicle_color', value: vehicleColor });
     updatePreferences((current) => ({ ...current, vehicleColor }));
   }, [updatePreferences]);
 

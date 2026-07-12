@@ -34,6 +34,15 @@ class Settings(BaseSettings):
     BFF_API_KEY: str = ""  # Machine-to-machine API key (REQUIRED in production)
 
     # -------------------------------------------------------------------------
+    # Privacy-first observability
+    # -------------------------------------------------------------------------
+    TELEMETRY_ENABLED: bool = True
+    TELEMETRY_RETENTION_DAYS: int = 7
+    TELEMETRY_MAX_EVENTS_PER_DAY: int = 20_000
+    TELEMETRY_MAX_ERRORS_PER_DAY: int = 500
+    TELEMETRY_QUEUE_SIZE: int = 2_048
+
+    # -------------------------------------------------------------------------
     # Rate Limiting
     # -------------------------------------------------------------------------
     RATE_LIMIT_RPM: int = 60  # Max requests per minute per IP (REST)

@@ -29,6 +29,7 @@ import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../../App';
 import ServiceAssignmentModal from '../components/ServiceAssignmentModal';
 import { apiService, type RouteInfo, type UpcomingTrip } from '../services/api';
+import { telemetry } from '../services/telemetry';
 import {
   AGENCY_OPTIONS,
   formatRecentTime,
@@ -678,6 +679,11 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
   const navigateToMap = useCallback((vehicleId?: string, tripId?: string) => {
     if (!selectedRoute || directionId === null) return;
 
+    telemetry.capture('route_started', {
+      assigned: Boolean(vehicleId || tripId),
+      direction: directionId,
+      source: 'home',
+    });
     recordRecent(selectedRoute.route_id, directionId);
     navigation.navigate('Map', {
       routeId: selectedRoute.route_id,
@@ -691,6 +697,7 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
   const handleStartDriving = useCallback(async () => {
     if (!selectedRoute || directionId === null || isLoadingTrips) return;
 
+    telemetry.capture('route_selected', { direction: directionId, source: 'home' });
     setUpcomingTrips([]);
     setIsLoadingTrips(true);
     setShowAssignModal(true);

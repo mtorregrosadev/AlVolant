@@ -1,4 +1,9 @@
 import { NativeModules, Platform } from 'react-native';
+import {
+  telemetry,
+  type TelemetryBatch,
+  type TelemetryEndpoint,
+} from './telemetry';
 
 const BFF_PORT = 8000;
 const REQUEST_TIMEOUT_MS = 12_000;
@@ -75,6 +80,8 @@ export class ApiError extends Error {
 type JsonRequestOptions = {
   method?: 'GET' | 'POST';
   body?: unknown;
+  endpoint?: TelemetryEndpoint;
+  reportTelemetry?: boolean;
 };
 
 async function requestJson<T>(path: string, options: JsonRequestOptions = {}): Promise<T> {
@@ -83,6 +90,9 @@ async function requestJson<T>(path: string, options: JsonRequestOptions = {}): P
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   const method = options.method ?? 'GET';
+  const startedAt = Date.now();
+  const shouldReport = options.reportTelemetry !== false && Boolean(options.endpoint);
+  let reportedError = false;
 
   try {
     const response = await fetch(`${BASE_URL}${path}`, {
@@ -97,12 +107,54 @@ async function requestJson<T>(path: string, options: JsonRequestOptions = {}): P
     });
 
     if (!response.ok) {
+      if (shouldReport) {
+        telemetry.capture('api_error', {
+          endpoint: options.endpoint,
+          method,
+          status: response.status,
+          duration_ms: Date.now() - startedAt,
+          error_type: 'HttpError',
+        });
+        reportedError = true;
+      }
       throw new ApiError('El BFF no ha pogut completar la petició.', response.status);
     }
 
-    return await response.json() as T;
+    try {
+      const body = await response.json() as T;
+      if (shouldReport) {
+        telemetry.capture('api_request', {
+          endpoint: options.endpoint,
+          method,
+          status: response.status,
+          duration_ms: Date.now() - startedAt,
+        });
+      }
+      return body;
+    } catch {
+      if (shouldReport) {
+        telemetry.capture('api_error', {
+          endpoint: options.endpoint,
+          method,
+          status: 'parse',
+          duration_ms: Date.now() - startedAt,
+          error_type: 'ParseError',
+        });
+        reportedError = true;
+      }
+      throw new ApiError('El BFF ha retornat una resposta no vàlida.');
+    }
   } catch (error) {
     if (isAbortError(error)) {
+      if (shouldReport && !reportedError) {
+        telemetry.capture('api_error', {
+          endpoint: options.endpoint,
+          method,
+          status: 'timeout',
+          duration_ms: Date.now() - startedAt,
+          error_type: 'TimeoutError',
+        });
+      }
       throw new ApiError('El BFF ha trigat massa a respondre.');
     }
 
@@ -110,6 +162,15 @@ async function requestJson<T>(path: string, options: JsonRequestOptions = {}): P
       throw error;
     }
 
+    if (shouldReport && !reportedError) {
+      telemetry.capture('api_error', {
+        endpoint: options.endpoint,
+        method,
+        status: 'network',
+        duration_ms: Date.now() - startedAt,
+        error_type: error instanceof Error ? error.name : 'NetworkError',
+      });
+    }
     throw new ApiError('No s’ha pogut connectar amb el BFF.');
   } finally {
     clearTimeout(timeout);
@@ -219,18 +280,18 @@ export const apiService = {
   fetchRouteShape(routeId: string, directionId?: number, tripId?: string) {
     const route = encodePathSegment(routeId);
     const query = createQuery({ direction_id: directionId, trip_id: tripId });
-    return requestJson<any>(`/api/v1/gtfs/shapes/${route}${query}`);
+    return requestJson<any>(`/api/v1/gtfs/shapes/${route}${query}`, { endpoint: 'route_shape' });
   },
 
   fetchRouteStops(routeId: string, directionId?: number, tripId?: string) {
     const route = encodePathSegment(routeId);
     const query = createQuery({ direction_id: directionId, trip_id: tripId });
-    return requestJson<any>(`/api/v1/gtfs/stops/${route}${query}`);
+    return requestJson<any>(`/api/v1/gtfs/stops/${route}${query}`, { endpoint: 'route_stops' });
   },
 
   fetchRoutes(): Promise<RouteInfo[]> {
     if (!routesRequest) {
-      routesRequest = requestJson<RouteInfo[]>('/api/v1/gtfs/routes')
+      routesRequest = requestJson<RouteInfo[]>('/api/v1/gtfs/routes', { endpoint: 'routes' })
         .then((routes) => Array.isArray(routes) ? routes : [])
         .finally(() => {
           routesRequest = null;
@@ -261,6 +322,7 @@ export const apiService = {
       : 40;
     return requestJson<NearbyRouteDistance[]>('/api/v1/gtfs/routes/nearby', {
       method: 'POST',
+      endpoint: 'nearby_routes',
       body: {
         latitude: Math.round(latitude * 1000) / 1000,
         longitude: Math.round(longitude * 1000) / 1000,
@@ -283,18 +345,19 @@ export const apiService = {
     const route = encodePathSegment(routeId);
     return requestJson<UpcomingTrip[]>(
       `/api/v1/gtfs/routes/${route}/upcoming-trips${createQuery({ direction_id: directionId })}`,
+      { endpoint: 'upcoming_trips' },
     ).then((trips) => Array.isArray(trips) ? trips : []);
   },
 
   fetchRouteVehicles(routeId: string): Promise<VehiclePosition[]> {
     const route = encodePathSegment(routeId);
-    return requestJson<VehiclePosition[]>(`/api/v1/atm_rt/vehicles/${route}`)
+    return requestJson<VehiclePosition[]>(`/api/v1/atm_rt/vehicles/${route}`, { endpoint: 'route_vehicles' })
       .then((vehicles) => Array.isArray(vehicles) ? vehicles : []);
   },
 
   fetchRouteTripUpdates(routeId: string): Promise<RTTripUpdate[]> {
     const route = encodePathSegment(routeId);
-    return requestJson<RTTripUpdate[]>(`/api/v1/atm_rt/trips/${route}`)
+    return requestJson<RTTripUpdate[]>(`/api/v1/atm_rt/trips/${route}`, { endpoint: 'route_updates' })
       .then((updates) => Array.isArray(updates) ? updates : []);
   },
 
@@ -312,6 +375,7 @@ export const apiService = {
 
     return requestJson<TrafficSummary>(
       `/api/v1/traffic/summary${createQuery({ latitude, longitude })}`,
+      { endpoint: 'traffic_summary' },
     );
   },
 
@@ -334,10 +398,40 @@ export const apiService = {
       try {
         onMessage(JSON.parse(event.data));
       } catch {
-        // Ignore malformed push payloads; the next valid update remains usable.
+        telemetry.capture('api_error', {
+          endpoint: 'live_websocket',
+          method: 'WS',
+          status: 'parse',
+          error_type: 'ParseError',
+        });
       }
     };
 
+    ws.addEventListener('open', () => telemetry.capture('api_request', {
+      endpoint: 'live_websocket',
+      method: 'WS',
+      status: 'open',
+    }));
+    ws.addEventListener('close', () => telemetry.capture('api_request', {
+      endpoint: 'live_websocket',
+      method: 'WS',
+      status: 'close',
+    }));
+    ws.addEventListener('error', () => telemetry.capture('api_error', {
+      endpoint: 'live_websocket',
+      method: 'WS',
+      status: 'error',
+      error_type: 'WebSocketError',
+    }));
+
     return ws;
+  },
+
+  async submitTelemetryBatch(batch: TelemetryBatch) {
+    await requestJson<{ accepted: number; dropped: number }>('/api/v1/telemetry/events', {
+      method: 'POST',
+      body: batch,
+      reportTelemetry: false,
+    });
   },
 };

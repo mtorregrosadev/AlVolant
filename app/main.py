@@ -39,9 +39,11 @@ from app.config import settings
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import get_logger, setup_logging
 from app.core.rate_limiter import RateLimiterMiddleware
+from app.core.telemetry import TelemetryMiddleware
 from app.services.atm_rt_service import ATMRTService
 from app.services.gtfs_service import GTFSService
 from app.services.traffic_service import TrafficService
+from app.services.telemetry_service import TelemetryService
 from app.workers.atm_rt_worker import ATMRTWorker
 
 logger = get_logger(__name__)
@@ -91,6 +93,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     cache = CacheManager(redis_url=settings.REDIS_URL)
     await cache.connect()
     app.state.cache = cache
+
+    telemetry = TelemetryService(
+        cache,
+        enabled=settings.TELEMETRY_ENABLED,
+        retention_days=settings.TELEMETRY_RETENTION_DAYS,
+        max_events_per_day=settings.TELEMETRY_MAX_EVENTS_PER_DAY,
+        max_errors_per_day=settings.TELEMETRY_MAX_ERRORS_PER_DAY,
+        queue_size=settings.TELEMETRY_QUEUE_SIZE,
+    )
+    await telemetry.start()
+    app.state.telemetry = telemetry
 
     # --- 2. Services ---
     atm_rt_service = ATMRTService(settings=settings, cache=cache)
@@ -155,6 +168,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await gtfs_service.close()
     await traffic_service.close()
 
+    # Flush diagnostics while Redis is still available.
+    await telemetry.close()
+
     # --- Close Redis ---
     await cache.close()
 
@@ -193,8 +209,9 @@ if _cors_origins:
         CORSMiddleware,
         allow_origins=_cors_origins,
         allow_credentials=True,
-        allow_methods=["GET", "OPTIONS"],
+        allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["X-API-Key", "Content-Type", "Accept"],
+        expose_headers=["X-Request-ID"],
     )
     logger.info("CORS enabled for origins: %s", _cors_origins)
 else:
@@ -206,6 +223,10 @@ app.add_middleware(
     RateLimiterMiddleware,
     rpm=settings.RATE_LIMIT_RPM,
 )
+
+# The last middleware added is the outermost one, so this also measures 401/429
+# responses produced by inner security middleware.
+app.add_middleware(TelemetryMiddleware)
 
 # --- Exception Handlers ---
 register_exception_handlers(app)

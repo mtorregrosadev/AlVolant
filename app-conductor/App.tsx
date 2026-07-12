@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import {
   Inter_400Regular,
   Inter_500Medium,
@@ -7,7 +7,11 @@ import {
 } from '@expo-google-fonts/inter';
 import { Newsreader_500Medium } from '@expo-google-fonts/newsreader';
 import { useFonts } from 'expo-font';
-import { DefaultTheme, NavigationContainer } from '@react-navigation/native';
+import {
+  createNavigationContainerRef,
+  DefaultTheme,
+  NavigationContainer,
+} from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import HomeScreen from './src/screens/HomeScreen';
@@ -16,6 +20,9 @@ import RoutesScreen from './src/screens/RoutesScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 import { PreferencesProvider, usePreferences } from './src/PreferencesContext';
 import { colors } from './src/theme';
+import AppErrorBoundary from './src/components/AppErrorBoundary';
+import { apiService } from './src/services/api';
+import { telemetry } from './src/services/telemetry';
 
 export type RootStackParamList = {
   Home: { selectedRouteId?: string } | undefined;
@@ -31,6 +38,10 @@ export type RootStackParamList = {
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
+const navigationRef = createNavigationContainerRef<RootStackParamList>();
+const appBootStartedAt = Date.now();
+
+telemetry.setTransport(apiService.submitTelemetryBatch);
 const navigationTheme = {
   ...DefaultTheme,
   colors: {
@@ -45,7 +56,9 @@ const navigationTheme = {
 };
 
 function AppContent() {
-  const { ready } = usePreferences();
+  const { preferences, ready } = usePreferences();
+  const telemetryStartedRef = useRef(false);
+  const currentScreenRef = useRef<string | undefined>(undefined);
   const [fontsLoaded, fontError] = useFonts({
     Inter_400Regular,
     Inter_500Medium,
@@ -54,10 +67,38 @@ function AppContent() {
     Newsreader_500Medium,
   });
 
-  if ((!fontsLoaded && !fontError) || !ready) return null;
+  const appReady = (fontsLoaded || Boolean(fontError)) && ready;
+
+  useEffect(() => {
+    telemetry.setLanguage(preferences.language);
+    if (!appReady || telemetryStartedRef.current) return;
+    telemetryStartedRef.current = true;
+    telemetry.start({
+      appVersion: '1.0.0',
+      durationMs: Date.now() - appBootStartedAt,
+      language: preferences.language,
+    });
+  }, [appReady, preferences.language]);
+
+  if (!appReady) return null;
 
   return (
-    <NavigationContainer theme={navigationTheme}>
+    <NavigationContainer
+      ref={navigationRef}
+      theme={navigationTheme}
+      onReady={() => {
+        const screen = navigationRef.getCurrentRoute()?.name;
+        currentScreenRef.current = screen;
+        if (screen) telemetry.capture('screen_view', { screen });
+      }}
+      onStateChange={() => {
+        const screen = navigationRef.getCurrentRoute()?.name;
+        if (screen && screen !== currentScreenRef.current) {
+          currentScreenRef.current = screen;
+          telemetry.capture('screen_view', { screen });
+        }
+      }}
+    >
       <Stack.Navigator
         initialRouteName="Home"
         screenOptions={{
@@ -92,10 +133,12 @@ function AppContent() {
 
 export default function App() {
   return (
-    <SafeAreaProvider>
-      <PreferencesProvider>
-        <AppContent />
-      </PreferencesProvider>
-    </SafeAreaProvider>
+    <AppErrorBoundary>
+      <SafeAreaProvider>
+        <PreferencesProvider>
+          <AppContent />
+        </PreferencesProvider>
+      </SafeAreaProvider>
+    </AppErrorBoundary>
   );
 }

@@ -24,6 +24,7 @@ import {
   type TrafficSummary,
   type VehiclePosition,
 } from '../services/api';
+import { telemetry } from '../services/telemetry';
 import { formatDirectionLabel } from '../services/directionLabel';
 import { colors, safeHexColor, vehicleAccentColor } from '../theme';
 import { usePreferences } from '../PreferencesContext';
@@ -818,6 +819,8 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     let ws: WebSocket;
 
     async function loadData() {
+      const loadStartedAt = Date.now();
+      let loadSucceeded = false;
       try {
         const data = await apiService.fetchRouteShape(routeId, directionId, tripId);
         if (data) {
@@ -855,9 +858,16 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
 
         ws.addEventListener('open', () => setIsConnected(true));
         ws.addEventListener('close', () => setIsConnected(false));
-      } catch (e: any) {
-        setError(e.message);
+        loadSucceeded = true;
+      } catch (e: unknown) {
+        telemetry.captureException(e, { phase: 'map_data' });
+        setError(e instanceof Error ? e.message : t('map.error'));
       } finally {
+        telemetry.capture('map_loaded', {
+          direction: directionId,
+          duration_ms: Date.now() - loadStartedAt,
+          status: loadSucceeded ? 'success' : 'error',
+        });
         setLoading(false);
       }
     }
@@ -869,7 +879,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
         ws.close();
       }
     };
-  }, [routeId, directionId, tripId]);
+  }, [routeId, directionId, tripId, t]);
 
   const handleMapPress = async (event: any) => {
     if (!mapRef.current) return;
@@ -902,12 +912,10 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     }
 
     if (x === null || y === null) {
-      console.log('Could not extract screen coordinates from tap event:', JSON.stringify(event));
       return;
     }
 
     try {
-    console.log('Querying features at pixel point [', x, ',', y, '] with 28px bounding box hitbox...');
       const features = await mapRef.current.queryRenderedFeatures(
         [
           [x - 14, y - 14],
@@ -915,9 +923,6 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
         ],
         { layers: ['stopsCircle'] }
       );
-
-      console.log('Query results count:', Array.isArray(features) ? features.length : (features?.features?.length || 0));
-      console.log('Query features payload:', JSON.stringify(features));
 
       let selectedFeature: any = null;
 
@@ -929,7 +934,6 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
 
       if (selectedFeature?.properties) {
         const selectedFeatureProperties = selectedFeature.properties;
-        console.log('Selecting stop properties:', JSON.stringify(selectedFeatureProperties));
         setSelectedStop({
           ...selectedFeatureProperties,
           coordinates: normalizeCoordinates(selectedFeature.geometry?.coordinates),
@@ -938,7 +942,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
         setSelectedStop(null);
       }
     } catch (e) {
-      console.log('Error querying rendered features:', e);
+      telemetry.captureException(e, { phase: 'map_feature_query' });
     }
   };
 

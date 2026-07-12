@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { telemetry } from './telemetry';
 
 const STORAGE_KEY = '@alvolant/user-preferences/v1';
 const STORAGE_VERSION = 1;
@@ -118,7 +119,8 @@ export async function loadUserPreferences(): Promise<UserPreferences> {
     }
 
     return normalizePreferences(JSON.parse(serialized));
-  } catch {
+  } catch (error) {
+    telemetry.captureException(error, { phase: 'preferences_read' });
     return { ...EMPTY_USER_PREFERENCES };
   }
 }
@@ -135,7 +137,10 @@ export function saveUserPreferences(preferences: UserPreferences): Promise<void>
 
   writeQueue = writeQueue
     .catch(() => undefined)
-    .then(() => AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(payload)));
+    .then(() => AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(payload)))
+    .catch((error) => {
+      telemetry.captureException(error, { phase: 'preferences_write' });
+    });
 
   return writeQueue;
 }

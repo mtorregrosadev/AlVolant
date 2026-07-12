@@ -43,3 +43,9 @@ coverage.xml
 # Debug & Local dumps
 *.pb
 sample_route_data.json
+
+# Local trailer production (not published in the repository)
+.trailer-build/
+docs/trailer/
+scripts/render_trailer.sh
+scripts/render_trailer_assets.swift

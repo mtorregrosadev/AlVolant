@@ -1,0 +1,262 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1200" viewBox="0 0 1600 1200" role="img" aria-labelledby="title description">
+  <title id="title">Bus vehicle model — orthographic design handoff</title>
+  <desc id="description">Editable design sheet for the programmatic bus marker, with top, side, front and rear views, proportions, color tokens and accent variants.</desc>
+
+  <defs>
+    <filter id="soft-shadow" x="-30%" y="-30%" width="160%" height="180%">
+      <feDropShadow dx="0" dy="12" stdDeviation="12" flood-color="#111F38" flood-opacity="0.14"/>
+    </filter>
+    <marker id="dimension-arrow" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto-start-reverse">
+      <path d="M 0 0 L 8 4 L 0 8 Z" fill="#6C7774"/>
+    </marker>
+    <style>
+      .board { fill: #F1EFE8; }
+      .panel { fill: #FAF9F5; stroke: #D8DDD7; stroke-width: 2; }
+      .rule { stroke: #D8DDD7; stroke-width: 2; }
+      .guide { stroke: #9EB9B1; stroke-width: 2; stroke-dasharray: 7 8; fill: none; }
+      .dimension { stroke: #6C7774; stroke-width: 2; fill: none; marker-start: url(#dimension-arrow); marker-end: url(#dimension-arrow); }
+      .extension { stroke: #A7B3AE; stroke-width: 1.5; }
+      .title { fill: #111F38; font-family: Inter, Helvetica, Arial, sans-serif; font-size: 48px; font-weight: 700; letter-spacing: -1px; }
+      .eyebrow { fill: #176B5A; font-family: Inter, Helvetica, Arial, sans-serif; font-size: 16px; font-weight: 700; letter-spacing: 3px; }
+      .subtitle { fill: #65716D; font-family: Inter, Helvetica, Arial, sans-serif; font-size: 20px; font-weight: 400; }
+      .view-label { fill: #111F38; font-family: Inter, Helvetica, Arial, sans-serif; font-size: 18px; font-weight: 700; letter-spacing: 1.5px; }
+      .view-note { fill: #77817E; font-family: Inter, Helvetica, Arial, sans-serif; font-size: 14px; font-weight: 500; }
+      .token-name { fill: #65716D; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; font-weight: 600; }
+      .token-value { fill: #111F38; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; font-weight: 700; }
+      .dimension-label { fill: #65716D; font-family: Inter, Helvetica, Arial, sans-serif; font-size: 14px; font-weight: 700; }
+      .variant-label { fill: #111F38; font-family: Inter, Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 700; letter-spacing: 0.8px; }
+      .vehicle-base { fill: #FFFFFF; stroke: #111F38; stroke-width: 3; }
+      .vehicle-outline { fill: none; stroke: #111F38; stroke-width: 3; }
+      .glass { fill: #1E293B; }
+      .glass-highlight { fill: #FFFFFF; opacity: 0.18; }
+      .roof-unit { fill: #E2E8F0; stroke: #94A3B8; stroke-width: 2; }
+      .roof-detail { fill: none; stroke: #94A3B8; stroke-width: 1.5; }
+      .wheel { fill: #111F38; }
+      .wheel-hub { fill: #E2E8F0; }
+      .lamp { fill: #FFD36A; }
+      .rear-lamp { fill: #F35B64; }
+      .door-line { fill: none; stroke: #94A3B8; stroke-width: 2; }
+    </style>
+  </defs>
+
+  <!-- DESIGN TOKENS
+       vehicle-base: #FFFFFF
+       vehicle-outline: #111F38
+       vehicle-glass: #1E293B
+       vehicle-equipment: #E2E8F0
+       vehicle-equipment-outline: #94A3B8
+       accent-red: #DC2626
+       accent-yellow: #F6A800
+       accent-green: #176B5A
+       accent-route: GTFS route_color (preview #0046AD)
+       Canonical map-marker geometry: 16 × 44 units; corner radius 4; outline 1.5.
+  -->
+
+  <rect class="board" width="1600" height="1200"/>
+
+  <g id="sheet-header">
+    <text class="eyebrow" x="64" y="70">VEHICLE SYSTEM · MAP MARKER</text>
+    <text class="title" x="64" y="126">Bus vehicle model</text>
+    <text class="subtitle" x="64" y="160">Orthographic handoff · editable SVG · map marker v1</text>
+    <g transform="translate(1282 62)">
+      <rect x="0" y="0" width="254" height="74" rx="18" fill="#176B5A"/>
+      <text x="24" y="31" fill="#FFFFFF" font-family="Inter, Helvetica, Arial, sans-serif" font-size="13" font-weight="700" letter-spacing="2">CANONICAL RATIO</text>
+      <text x="24" y="57" fill="#FFFFFF" font-family="Inter, Helvetica, Arial, sans-serif" font-size="24" font-weight="700">16 × 44 · 1:2.75</text>
+    </g>
+  </g>
+
+  <!-- TOP VIEW: faithful enlargement of MapScreen's current programmatic marker -->
+  <g id="view-top">
+    <rect class="panel" x="64" y="204" width="420" height="650" rx="28"/>
+    <text class="view-label" x="92" y="246">01 · TOP</text>
+    <text class="view-note" x="92" y="271">Canonical app marker</text>
+
+    <line class="guide" x1="274" y1="294" x2="274" y2="773"/>
+    <g id="bus-top-red" filter="url(#soft-shadow)">
+      <rect class="vehicle-base" x="194" y="326" width="160" height="440" rx="40"/>
+      <path d="M234 326 H314 Q354 326 354 366 V406 H194 V366 Q194 326 234 326 Z" fill="#DC2626"/>
+      <path d="M194 686 H354 V726 Q354 766 314 766 H234 Q194 766 194 726 Z" fill="#DC2626"/>
+      <rect x="194" y="406" width="25" height="280" fill="#DC2626"/>
+      <rect x="329" y="406" width="25" height="280" fill="#DC2626"/>
+      <rect class="glass" x="214" y="356" width="120" height="30" rx="10"/>
+      <path class="glass-highlight" d="M224 361 H292 L274 381 H224 Z"/>
+      <rect class="glass" x="214" y="726" width="120" height="20" rx="8"/>
+      <rect class="roof-unit" x="224" y="476" width="100" height="80" rx="18"/>
+      <path class="roof-detail" d="M239 492 H309 M239 507 H309 M239 522 H309 M239 537 H309"/>
+      <circle cx="239" cy="591" r="11" fill="#E2E8F0" stroke="#94A3B8" stroke-width="2"/>
+      <circle cx="309" cy="591" r="11" fill="#E2E8F0" stroke="#94A3B8" stroke-width="2"/>
+    </g>
+
+    <line class="extension" x1="174" y1="326" x2="120" y2="326"/>
+    <line class="extension" x1="174" y1="766" x2="120" y2="766"/>
+    <line class="dimension" x1="136" y1="336" x2="136" y2="756"/>
+    <text class="dimension-label" x="105" y="554" transform="rotate(-90 105 554)">44 units · length</text>
+
+    <line class="extension" x1="194" y1="786" x2="194" y2="818"/>
+    <line class="extension" x1="354" y1="786" x2="354" y2="818"/>
+    <line class="dimension" x1="204" y1="806" x2="344" y2="806"/>
+    <text class="dimension-label" x="274" y="837" text-anchor="middle">16 units · width</text>
+  </g>
+
+  <!-- SIDE VIEW: orthographic extension based on the same tokens -->
+  <g id="view-side">
+    <rect class="panel" x="514" y="204" width="1022" height="304" rx="28"/>
+    <text class="view-label" x="542" y="246">02 · CURBSIDE</text>
+    <text class="view-note" x="542" y="271">Proposed orthographic extension</text>
+
+    <g id="bus-side-red" transform="translate(614 300)" filter="url(#soft-shadow)">
+      <path class="vehicle-base" d="M28 0 H720 Q760 0 774 40 L794 111 V132 Q794 160 766 160 H26 Q0 160 0 134 V28 Q0 0 28 0 Z"/>
+      <path d="M28 0 H720 Q760 0 774 40 L782 68 H0 V28 Q0 0 28 0 Z" fill="#DC2626"/>
+      <path d="M0 132 H794 V145 Q794 160 779 160 H15 Q0 160 0 145 Z" fill="#DC2626"/>
+      <path class="glass" d="M28 22 H112 V58 H28 Z M126 22 H218 V58 H126 Z M232 22 H324 V58 H232 Z M338 22 H430 V58 H338 Z M444 22 H536 V58 H444 Z M550 22 H642 V58 H550 Z M656 22 H716 Q738 22 746 44 L751 58 H656 Z"/>
+      <path class="glass-highlight" d="M38 26 H92 L69 54 H38 Z M137 26 H181 L158 54 H137 Z M243 26 H287 L264 54 H243 Z"/>
+      <path class="door-line" d="M555 70 V143 M632 70 V143 M555 70 H632"/>
+      <line class="door-line" x1="593.5" y1="70" x2="593.5" y2="143"/>
+      <rect class="roof-unit" x="318" y="-16" width="158" height="30" rx="8"/>
+      <path class="roof-detail" d="M336 -7 H458 M336 1 H458"/>
+      <rect class="lamp" x="774" y="87" width="11" height="21" rx="4"/>
+      <rect class="rear-lamp" x="7" y="88" width="9" height="22" rx="4"/>
+      <g id="side-wheels">
+        <circle class="wheel" cx="126" cy="151" r="34"/>
+        <circle class="wheel-hub" cx="126" cy="151" r="15"/>
+        <circle class="wheel" cx="657" cy="151" r="34"/>
+        <circle class="wheel-hub" cx="657" cy="151" r="15"/>
+      </g>
+    </g>
+
+    <line class="extension" x1="614" y1="474" x2="614" y2="490"/>
+    <line class="extension" x1="1408" y1="474" x2="1408" y2="490"/>
+    <line class="dimension" x1="624" y1="482" x2="1398" y2="482"/>
+    <text class="dimension-label" x="1011" y="501" text-anchor="middle">44 units · design length</text>
+  </g>
+
+  <!-- FRONT AND REAR VIEWS -->
+  <g id="view-front">
+    <rect class="panel" x="514" y="538" width="324" height="316" rx="28"/>
+    <text class="view-label" x="542" y="580">03 · FRONT</text>
+    <text class="view-note" x="542" y="605">Driver-facing end</text>
+    <g id="bus-front-red" transform="translate(586 638)" filter="url(#soft-shadow)">
+      <path class="vehicle-base" d="M26 0 H154 Q180 0 180 26 V140 Q180 166 154 166 H26 Q0 166 0 140 V26 Q0 0 26 0 Z"/>
+      <path d="M26 0 H154 Q180 0 180 26 V48 H0 V26 Q0 0 26 0 Z" fill="#DC2626"/>
+      <path d="M0 129 H180 V140 Q180 166 154 166 H26 Q0 166 0 140 Z" fill="#DC2626"/>
+      <rect class="glass" x="16" y="26" width="148" height="48" rx="12"/>
+      <path class="glass-highlight" d="M28 33 H96 L65 67 H28 Z"/>
+      <rect x="58" y="84" width="64" height="22" rx="8" fill="#F1EFE8" stroke="#D8DDD7" stroke-width="2"/>
+      <circle class="lamp" cx="24" cy="113" r="9"/>
+      <circle class="lamp" cx="156" cy="113" r="9"/>
+      <rect class="wheel" x="12" y="153" width="34" height="20" rx="8"/>
+      <rect class="wheel" x="134" y="153" width="34" height="20" rx="8"/>
+    </g>
+  </g>
+
+  <g id="view-rear">
+    <rect class="panel" x="868" y="538" width="324" height="316" rx="28"/>
+    <text class="view-label" x="896" y="580">04 · REAR</text>
+    <text class="view-note" x="896" y="605">Service-facing end</text>
+    <g id="bus-rear-red" transform="translate(940 638)" filter="url(#soft-shadow)">
+      <path class="vehicle-base" d="M26 0 H154 Q180 0 180 26 V140 Q180 166 154 166 H26 Q0 166 0 140 V26 Q0 0 26 0 Z"/>
+      <path d="M26 0 H154 Q180 0 180 26 V42 H0 V26 Q0 0 26 0 Z" fill="#DC2626"/>
+      <path d="M0 122 H180 V140 Q180 166 154 166 H26 Q0 166 0 140 Z" fill="#DC2626"/>
+      <rect class="glass" x="21" y="24" width="138" height="38" rx="10"/>
+      <path class="glass-highlight" d="M31 30 H86 L59 56 H31 Z"/>
+      <rect x="44" y="75" width="92" height="25" rx="8" fill="#F1EFE8" stroke="#D8DDD7" stroke-width="2"/>
+      <circle class="rear-lamp" cx="22" cy="110" r="9"/>
+      <circle class="rear-lamp" cx="158" cy="110" r="9"/>
+      <rect class="wheel" x="12" y="153" width="34" height="20" rx="8"/>
+      <rect class="wheel" x="134" y="153" width="34" height="20" rx="8"/>
+    </g>
+  </g>
+
+  <!-- TOKENS AND PROPORTIONS -->
+  <g id="tokens">
+    <rect class="panel" x="1222" y="538" width="314" height="316" rx="28"/>
+    <text class="view-label" x="1250" y="580">TOKENS</text>
+    <line class="rule" x1="1250" y1="599" x2="1508" y2="599"/>
+
+    <g transform="translate(1250 626)">
+      <circle cx="10" cy="-5" r="10" fill="#FFFFFF" stroke="#D8DDD7" stroke-width="2"/>
+      <text class="token-name" x="30" y="0">base</text>
+      <text class="token-value" x="258" y="0" text-anchor="end">#FFFFFF</text>
+    </g>
+    <g transform="translate(1250 666)">
+      <circle cx="10" cy="-5" r="10" fill="#111F38"/>
+      <text class="token-name" x="30" y="0">outline</text>
+      <text class="token-value" x="258" y="0" text-anchor="end">#111F38</text>
+    </g>
+    <g transform="translate(1250 706)">
+      <circle cx="10" cy="-5" r="10" fill="#1E293B"/>
+      <text class="token-name" x="30" y="0">glass</text>
+      <text class="token-value" x="258" y="0" text-anchor="end">#1E293B</text>
+    </g>
+    <g transform="translate(1250 746)">
+      <circle cx="10" cy="-5" r="10" fill="#E2E8F0" stroke="#94A3B8" stroke-width="2"/>
+      <text class="token-name" x="30" y="0">equipment</text>
+      <text class="token-value" x="258" y="0" text-anchor="end">#E2E8F0</text>
+    </g>
+    <line class="rule" x1="1250" y1="770" x2="1508" y2="770"/>
+    <text class="token-name" x="1250" y="799">corner</text>
+    <text class="token-value" x="1508" y="799" text-anchor="end">4 / 16 units</text>
+    <text class="token-name" x="1250" y="829">outline</text>
+    <text class="token-value" x="1508" y="829" text-anchor="end">1.5 / 16 units</text>
+  </g>
+
+  <!-- ACCENT VARIANTS -->
+  <g id="accent-variants">
+    <rect class="panel" x="64" y="884" width="1472" height="252" rx="28"/>
+    <text class="view-label" x="92" y="926">ACCENT VARIANTS</text>
+    <text class="view-note" x="92" y="951">Keep base, outline, glass and roof equipment fixed. Only accent surfaces change.</text>
+
+    <g id="variant-red" transform="translate(168 979)">
+      <g transform="rotate(90 32 70)">
+        <rect class="vehicle-base" x="16" y="26" width="32" height="88" rx="8"/>
+        <rect x="16" y="26" width="32" height="16" rx="6" fill="#DC2626"/>
+        <rect x="16" y="98" width="32" height="16" rx="6" fill="#DC2626"/>
+        <rect x="20" y="32" width="24" height="6" rx="2" class="glass"/>
+        <rect x="22" y="56" width="20" height="16" rx="4" class="roof-unit"/>
+      </g>
+      <circle cx="106" cy="70" r="10" fill="#DC2626"/>
+      <text class="variant-label" x="126" y="75">RED · #DC2626</text>
+    </g>
+
+    <g id="variant-yellow" transform="translate(500 979)">
+      <g transform="rotate(90 32 70)">
+        <rect class="vehicle-base" x="16" y="26" width="32" height="88" rx="8"/>
+        <rect x="16" y="26" width="32" height="16" rx="6" fill="#F6A800"/>
+        <rect x="16" y="98" width="32" height="16" rx="6" fill="#F6A800"/>
+        <rect x="20" y="32" width="24" height="6" rx="2" class="glass"/>
+        <rect x="22" y="56" width="20" height="16" rx="4" class="roof-unit"/>
+      </g>
+      <circle cx="106" cy="70" r="10" fill="#F6A800"/>
+      <text class="variant-label" x="126" y="75">YELLOW · #F6A800</text>
+    </g>
+
+    <g id="variant-green" transform="translate(852 979)">
+      <g transform="rotate(90 32 70)">
+        <rect class="vehicle-base" x="16" y="26" width="32" height="88" rx="8"/>
+        <rect x="16" y="26" width="32" height="16" rx="6" fill="#176B5A"/>
+        <rect x="16" y="98" width="32" height="16" rx="6" fill="#176B5A"/>
+        <rect x="20" y="32" width="24" height="6" rx="2" class="glass"/>
+        <rect x="22" y="56" width="20" height="16" rx="4" class="roof-unit"/>
+      </g>
+      <circle cx="106" cy="70" r="10" fill="#176B5A"/>
+      <text class="variant-label" x="126" y="75">GREEN · #176B5A</text>
+    </g>
+
+    <g id="variant-route" transform="translate(1192 979)">
+      <g transform="rotate(90 32 70)">
+        <rect class="vehicle-base" x="16" y="26" width="32" height="88" rx="8"/>
+        <rect x="16" y="26" width="32" height="16" rx="6" fill="#0046AD"/>
+        <rect x="16" y="98" width="32" height="16" rx="6" fill="#0046AD"/>
+        <rect x="20" y="32" width="24" height="6" rx="2" class="glass"/>
+        <rect x="22" y="56" width="20" height="16" rx="4" class="roof-unit"/>
+      </g>
+      <circle cx="106" cy="70" r="10" fill="#0046AD"/>
+      <text class="variant-label" x="126" y="65">ROUTE</text>
+      <text class="view-note" x="126" y="84">GTFS route_color</text>
+    </g>
+  </g>
+
+  <text class="view-note" x="64" y="1174">Top view mirrors MapScreen.tsx. Side, front and rear are design-ready orthographic extensions for production modelling.</text>
+  <text class="view-note" x="1536" y="1174" text-anchor="end">Design handoff · 2026-07-12</text>
+</svg>

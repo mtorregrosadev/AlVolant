@@ -3,23 +3,29 @@
 Aplicació mòbil per preparar i seguir serveis d’autobús sobre la xarxa integrada de transport. El repositori inclou una app Expo/React Native orientada a iPhone i un Backend-for-Frontend FastAPI que agrega GTFS estàtic, GTFS-Realtime i informació de trànsit.
 
 <p align="center">
-  <img src="docs/screenshots/home.png" width="30%" alt="Selecció de línia i preferències locals">
+  <img src="docs/screenshots/home.png" width="22%" alt="Selecció de línia i preferències locals">
   &nbsp;
-  <img src="docs/screenshots/routes.png" width="30%" alt="Catàleg complet de línies">
+  <img src="docs/screenshots/routes.png" width="22%" alt="Catàleg complet de línies">
   &nbsp;
-  <img src="docs/screenshots/map.png" width="30%" alt="Navegació sobre el mapa fosc">
+  <img src="docs/screenshots/settings.png" width="22%" alt="Configuració d’idioma i vehicle">
+  &nbsp;
+  <img src="docs/screenshots/map.png" width="22%" alt="Navegació sobre el mapa fosc">
 </p>
 
 ## Què permet fer
 
 - Cercar i filtrar 1.000+ serveis per operador, codi o destinació.
+- Entrar amb una animació de sincronització i passar a un mode de cerca dedicat.
 - Consultar un catàleg complet de línies en una pantalla independent.
-- Guardar favorites i fins a quatre rutes recents localment, sense compte d’usuari.
+- Guardar favorites en una llista scrollable i fins a quatre rutes recents localment, sense compte d’usuari.
+- Prioritzar les línies amb parades més properes quan hi ha permís d’ubicació.
+- Canviar tota la interfície entre català i castellà.
+- Personalitzar el vehicle del mapa amb quatre accents validats.
 - Seleccionar sentit, sortida programada i vehicle abans d’iniciar el servei.
 - Navegar sobre un mapa fosc amb ruta, parades, posició projectada, edificis 3D i trànsit.
 - Treballar en retrat i horitzontal respectant les safe areas de l’iPhone.
 
-Les preferències es desen amb AsyncStorage, estan versionades, validades i limitades de mida. No s’hi desa cap dada sensible ni credencial d’usuari.
+Les preferències es desen amb AsyncStorage, estan versionades, validades i limitades de mida. No s’hi desa cap dada sensible ni credencial d’usuari. La ubicació només s’utilitza en memòria per calcular proximitat: l’app l’arrodoneix abans d’enviar-la al BFF i ni el client ni Redis la persisteixen.
 
 ## Arquitectura
 
@@ -40,7 +46,7 @@ ATM GTFS / GTFS-RT          TomTom Traffic
 ### App mòbil
 
 - Expo SDK 57 i React Native 0.86.
-- React Navigation amb pantalles d’inici, catàleg i mapa.
+- React Navigation amb pantalles d’inici, catàleg, configuració i mapa.
 - MapLibre Native amb CARTO i Esri World Imagery.
 - Cache local acotada per a favorites i recents.
 - Peticions amb timeout, validació d’identificadors i HTTPS obligatori fora de desenvolupament.
@@ -57,14 +63,22 @@ ATM GTFS / GTFS-RT          TomTom Traffic
 
 ```text
 app-conductor/             App Expo / React Native
-  src/screens/             Inici, catàleg i mapa
+  src/screens/             Inici, catàleg, configuració i mapa
   src/services/            API, presentació i preferències locals
 app/                       BFF FastAPI
   api/v1/                  GTFS, GTFS-RT, trànsit i WebSocket
   services/                Ingesta, normalització i cache
 tests/                     Proves del backend
 docs/screenshots/          Captures reals de l’iPhone Simulator
+docs/design/               Handoff vectorial del vehicle
 ```
+
+## Model del vehicle
+
+El marcador del bus és programàtic i no depèn d’una malla 3D. El handoff de disseny inclou les vistes superior, lateral, frontal i posterior, les proporcions i les quatre variants d’accent:
+
+- [SVG editable](docs/design/bus-vehicle-model.svg)
+- [Previsualització PNG](docs/design/bus-vehicle-model.png)
 
 ## Requisits
 
@@ -120,6 +134,7 @@ npx expo start --dev-client --host lan --port 8081
 Tots els endpoints de dades requereixen `X-API-Key`.
 
 - `GET /api/v1/gtfs/routes`
+- `POST /api/v1/gtfs/routes/nearby`
 - `GET /api/v1/gtfs/shapes/{route_id}`
 - `GET /api/v1/gtfs/stops/{route_id}`
 - `GET /api/v1/gtfs/routes/{route_id}/upcoming-trips`

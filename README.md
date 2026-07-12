@@ -22,7 +22,7 @@ Aplicació mòbil per preparar i seguir serveis d’autobús sobre la xarxa inte
 - Canviar tota la interfície entre català i castellà.
 - Personalitzar el vehicle del mapa amb quatre accents validats.
 - Seleccionar sentit, sortida programada i vehicle abans d’iniciar el servei.
-- Navegar sobre un mapa fosc amb ruta, parades, posició projectada, edificis 3D i trànsit.
+- Navegar sobre un mapa fosc amb ruta, parades, edificis 3D i trànsit; el vehicle s’ajusta a la línia quan el GPS és coherent i mostra la posició real durant desviaments.
 - Treballar en retrat i horitzontal respectant les safe areas de l’iPhone.
 
 Les preferències es desen amb AsyncStorage, estan versionades, validades i limitades de mida. No s’hi desa cap dada sensible ni credencial d’usuari. La ubicació no forma part de les preferències ni de la telemetria: per ordenar línies properes, l’app l’arrodoneix abans d’enviar-la al BFF; per consultar el trànsit viatja dins el cos d’un `POST` i el BFF l’arrodoneix abans de consultar el proveïdor. Les coordenades exactes no es registren ni es persisteixen. Consulta la [política de privacitat](docs/PRIVACY.md) per veure els fluxos i la retenció.
@@ -51,6 +51,7 @@ ATM GTFS / GTFS-RT          TomTom Traffic
 - MapLibre Native amb CARTO i Esri World Imagery.
 - Cache local acotada per a favorites i recents.
 - Peticions amb timeout, validació d’identificadors i HTTPS obligatori fora de desenvolupament.
+- Invalidacions GTFS-Realtime per WebSocket amb reconnexió acotada, refresc coalescent i conservació de l’última dada vàlida.
 - Telemetria pròpia acotada, sense ubicació, identificadors de línia, missatges d’error ni traces.
 
 ### BFF

@@ -19,6 +19,9 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
 
+import orjson
+
+from app.api.v1.ws import ws_manager
 from app.cache.redis_manager import CacheManager
 from app.config import Settings
 from app.core.exceptions import ExternalAPIError, GTFSParseError
@@ -125,11 +128,10 @@ class ATMRTWorker:
                 self._current_backoff = _MIN_BACKOFF_SECONDS
                 self.last_success = datetime.now(tz=UTC).isoformat()
 
-                # 2. Broadcast the update event to WebSocket clients
-                await self._cache.client.publish(
-                    "channel:atm_rt:updates",
-                    f'{{"type": "update", "timestamp": "{feed.feed_timestamp.isoformat()}"}}',
-                )
+                # 2. Notify local WebSocket clients and retain Redis PubSub for
+                # a future multi-process relay. Notification failure must not
+                # invalidate a feed that was already safely cached.
+                await self._notify_live_update(feed.feed_timestamp.isoformat())
 
                 # 3. Sleep until the next cycle
                 await asyncio.sleep(self._interval)
@@ -167,3 +169,18 @@ class ATMRTWorker:
                     self._current_backoff * 2,
                     _MAX_BACKOFF_SECONDS,
                 )
+
+    async def _notify_live_update(self, timestamp: str) -> None:
+        payload = {"type": "invalidate", "timestamp": timestamp}
+        try:
+            await self._cache.client.publish(
+                "channel:atm_rt:updates",
+                orjson.dumps(payload),
+            )
+        except Exception:
+            logger.warning("ATM realtime Redis notification failed")
+
+        try:
+            await ws_manager.broadcast_to_topic("atm_rt:updates", payload)
+        except Exception:
+            logger.warning("ATM realtime WebSocket notification failed")

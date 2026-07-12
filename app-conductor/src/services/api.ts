@@ -82,6 +82,7 @@ type JsonRequestOptions = {
   body?: unknown;
   endpoint?: TelemetryEndpoint;
   reportTelemetry?: boolean;
+  signal?: AbortSignal;
 };
 
 async function requestJson<T>(path: string, options: JsonRequestOptions = {}): Promise<T> {
@@ -89,6 +90,12 @@ async function requestJson<T>(path: string, options: JsonRequestOptions = {}): P
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const abortFromCaller = () => controller.abort();
+  if (options.signal?.aborted) {
+    controller.abort();
+  } else {
+    options.signal?.addEventListener('abort', abortFromCaller, { once: true });
+  }
   const method = options.method ?? 'GET';
   const startedAt = Date.now();
   const shouldReport = options.reportTelemetry !== false && Boolean(options.endpoint);
@@ -146,6 +153,7 @@ async function requestJson<T>(path: string, options: JsonRequestOptions = {}): P
     }
   } catch (error) {
     if (isAbortError(error)) {
+      if (options.signal?.aborted) throw error;
       if (shouldReport && !reportedError) {
         telemetry.capture('api_error', {
           endpoint: options.endpoint,
@@ -174,6 +182,7 @@ async function requestJson<T>(path: string, options: JsonRequestOptions = {}): P
     throw new ApiError('No s’ha pogut connectar amb el BFF.');
   } finally {
     clearTimeout(timeout);
+    options.signal?.removeEventListener('abort', abortFromCaller);
   }
 }
 
@@ -274,6 +283,65 @@ export interface TrafficSummary {
   road_closure: boolean;
 }
 
+export type LiveWebSocketMessage =
+  | { type: 'subscribed'; topics: string[] }
+  | { type: 'unsubscribed'; topics: string[] }
+  | { type: 'pong' }
+  | { type: 'error' }
+  | {
+    topic: 'atm_rt:updates';
+    data: { type: 'invalidate'; timestamp: string };
+    timestamp: string;
+  };
+
+function parseLiveWebSocketMessage(value: unknown): LiveWebSocketMessage | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const message = value as Record<string, unknown>;
+
+  if (
+    (message.type === 'subscribed' || message.type === 'unsubscribed')
+    && Array.isArray(message.topics)
+    && message.topics.every((topic) => typeof topic === 'string')
+  ) {
+    return { type: message.type, topics: message.topics };
+  }
+  if (message.type === 'pong') return { type: 'pong' };
+  if (message.type === 'error' && typeof message.message === 'string') {
+    return { type: 'error' };
+  }
+
+  const data = message.data;
+  if (
+    message.topic === 'atm_rt:updates'
+    && typeof message.timestamp === 'string'
+    && data
+    && typeof data === 'object'
+    && !Array.isArray(data)
+    && (data as Record<string, unknown>).type === 'invalidate'
+    && typeof (data as Record<string, unknown>).timestamp === 'string'
+  ) {
+    return {
+      topic: 'atm_rt:updates',
+      data: {
+        type: 'invalidate',
+        timestamp: (data as Record<string, unknown>).timestamp as string,
+      },
+      timestamp: message.timestamp,
+    };
+  }
+
+  return null;
+}
+
+function isFreshRealtimeTimestamp(timestamp: number) {
+  if (!Number.isFinite(timestamp) || timestamp < 0) return false;
+  // GTFS-RT permits an entity without its own timestamp. In that case the BFF
+  // has already validated the containing feed and exposes the model default 0.
+  if (timestamp === 0) return true;
+  const ageSeconds = Date.now() / 1000 - timestamp;
+  return ageSeconds >= -30 && ageSeconds <= 180;
+}
+
 let routesRequest: Promise<RouteInfo[]> | null = null;
 
 export const apiService = {
@@ -352,7 +420,9 @@ export const apiService = {
   fetchRouteVehicles(routeId: string): Promise<VehiclePosition[]> {
     const route = encodePathSegment(routeId);
     return requestJson<VehiclePosition[]>(`/api/v1/atm_rt/vehicles/${route}`, { endpoint: 'route_vehicles' })
-      .then((vehicles) => Array.isArray(vehicles) ? vehicles : []);
+      .then((vehicles) => Array.isArray(vehicles)
+        ? vehicles.filter((vehicle) => isFreshRealtimeTimestamp(vehicle.timestamp)).slice(0, 2_000)
+        : []);
   },
 
   fetchRouteTripUpdates(routeId: string): Promise<RTTripUpdate[]> {
@@ -361,7 +431,11 @@ export const apiService = {
       .then((updates) => Array.isArray(updates) ? updates : []);
   },
 
-  fetchTrafficSummary(latitude: number, longitude: number): Promise<TrafficSummary> {
+  fetchTrafficSummary(
+    latitude: number,
+    longitude: number,
+    signal?: AbortSignal,
+  ): Promise<TrafficSummary> {
     if (
       !Number.isFinite(latitude)
       || !Number.isFinite(longitude)
@@ -377,10 +451,11 @@ export const apiService = {
       method: 'POST',
       endpoint: 'traffic_summary',
       body: { latitude, longitude },
+      signal,
     });
   },
 
-  connectWebSocket(onMessage?: (data: unknown) => void) {
+  connectWebSocket(onMessage?: (data: LiveWebSocketMessage) => void) {
     assertSecureConfiguration();
     const NativeWebSocket = WebSocket as unknown as new (
       url: string,
@@ -397,7 +472,8 @@ export const apiService = {
       }
 
       try {
-        onMessage(JSON.parse(event.data));
+        const message = parseLiveWebSocketMessage(JSON.parse(event.data));
+        if (message) onMessage(message);
       } catch {
         telemetry.capture('api_error', {
           endpoint: 'live_websocket',
@@ -408,11 +484,14 @@ export const apiService = {
       }
     };
 
-    ws.addEventListener('open', () => telemetry.capture('api_request', {
-      endpoint: 'live_websocket',
-      method: 'WS',
-      status: 'open',
-    }));
+    ws.addEventListener('open', () => {
+      ws.send(JSON.stringify({ action: 'subscribe', topics: ['atm_rt:updates'] }));
+      telemetry.capture('api_request', {
+        endpoint: 'live_websocket',
+        method: 'WS',
+        status: 'open',
+      });
+    });
     ws.addEventListener('close', () => telemetry.capture('api_request', {
       endpoint: 'live_websocket',
       method: 'WS',

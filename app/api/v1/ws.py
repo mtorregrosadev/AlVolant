@@ -52,6 +52,7 @@ _TOPIC_PATTERN = re.compile(r"^(?:atm_rt|gtfs):[A-Za-z0-9_.:-]+$")
 _MAX_TOPIC_LENGTH = 128
 _MAX_TOPICS_PER_MESSAGE = 20
 _MAX_CONNECTIONS_PER_IP = 20
+_SEND_TIMEOUT_SECONDS = 2.0
 
 
 class ClientMessage(BaseModel):
@@ -255,7 +256,7 @@ class ConnectionManager:
         """Push a message to all subscribers of a topic.
 
         The lock is held only to snapshot the subscriber set; the actual
-        I/O (``send_bytes``) runs outside the lock to avoid blocking
+        I/O (``send_text``) runs outside the lock to avoid blocking
         subscribe/unsubscribe operations during broadcast.
 
         Args:
@@ -273,18 +274,37 @@ class ConnectionManager:
             "topic": topic,
             "data": data,
             "timestamp": datetime.now(tz=UTC).isoformat(),
-        })
+        }).decode("utf-8")
 
-        stale: list[WebSocket] = []
-        for ws in subscribers:
+        async def send_one(ws: WebSocket) -> WebSocket | None:
             try:
-                await ws.send_bytes(message)
+                await asyncio.wait_for(
+                    ws.send_text(message),
+                    timeout=_SEND_TIMEOUT_SECONDS,
+                )
+                return None
             except Exception:
-                stale.append(ws)
+                return ws
 
-        # Clean up stale connections outside the broadcast loop
-        for ws in stale:
-            await self.disconnect(ws)
+        results = await asyncio.gather(*(send_one(ws) for ws in subscribers))
+        stale = [ws for ws in results if ws is not None]
+
+        # Clean up stale connections concurrently so one slow close cannot
+        # delay the next ATM polling cycle.
+        if stale:
+            async def disconnect_one(ws: WebSocket) -> None:
+                try:
+                    await asyncio.wait_for(
+                        self.disconnect(ws),
+                        timeout=_SEND_TIMEOUT_SECONDS,
+                    )
+                except Exception:
+                    return
+
+            await asyncio.gather(
+                *(disconnect_one(ws) for ws in stale),
+                return_exceptions=True,
+            )
 
     def get_stats(self) -> dict:
         """Return connection/subscription statistics."""

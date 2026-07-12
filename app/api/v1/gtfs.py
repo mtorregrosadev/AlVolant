@@ -9,7 +9,14 @@ from fastapi.responses import ORJSONResponse
 
 from app.core.auth import require_api_key
 from app.core.logging import get_logger
-from app.models.gtfs import GTFSShapesResponse, RouteInfo, RouteShape, RouteStopsResponse
+from app.models.gtfs import (
+    GTFSShapesResponse,
+    NearbyRoute,
+    NearbyRoutesRequest,
+    RouteInfo,
+    RouteShape,
+    RouteStopsResponse,
+)
 
 logger = get_logger(__name__)
 
@@ -106,6 +113,24 @@ async def get_route_stops(
 async def get_routes(request: Request) -> list[RouteInfo]:
     gtfs_service = request.app.state.gtfs_service
     return await gtfs_service.get_all_routes()
+
+
+@router.post(
+    "/routes/nearby",
+    summary="List routes ordered by proximity to their closest stop",
+    response_model=list[NearbyRoute],
+)
+async def get_nearby_routes(
+    payload: NearbyRoutesRequest,
+    request: Request,
+) -> list[NearbyRoute]:
+    """Calculate proximity without persisting or logging the submitted location."""
+    gtfs_service = request.app.state.gtfs_service
+    return await gtfs_service.get_nearby_routes(
+        latitude=payload.latitude,
+        longitude=payload.longitude,
+        limit=payload.limit,
+    )
 
 
 def _get_first_stop_delay_seconds(rt_trip: object) -> int | None:

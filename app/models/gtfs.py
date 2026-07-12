@@ -9,7 +9,7 @@ structures so the tablet frontend can render them directly on a map
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ShapePoint(BaseModel):
@@ -80,6 +80,23 @@ class RouteInfo(BaseModel):
     display_name: str = Field("", description="Combined route display name")
 
 
+class NearbyRoutesRequest(BaseModel):
+    """Validated, privacy-preserving input for the nearby-routes endpoint."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    latitude: float = Field(..., ge=-90, le=90, description="WGS-84 latitude")
+    longitude: float = Field(..., ge=-180, le=180, description="WGS-84 longitude")
+    limit: int = Field(20, ge=1, le=40, description="Maximum number of routes to return")
+
+
+class NearbyRoute(BaseModel):
+    """A canonical route and its distance to the closest representative stop."""
+
+    route_id: str
+    distance_meters: float = Field(..., ge=0)
+
+
 class GTFSShapesResponse(BaseModel):
     """Response containing all route shapes as a GeoJSON FeatureCollection."""
 
@@ -90,6 +107,7 @@ class GTFSShapesResponse(BaseModel):
     )
     route_count: int = Field(0, description="Total number of routes included")
     last_updated: str = Field("", description="ISO timestamp of last GTFS refresh")
+
 
 class RouteStopsResponse(BaseModel):
     """Response containing all stops for a specific route as a GeoJSON FeatureCollection."""

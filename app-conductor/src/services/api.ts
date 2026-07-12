@@ -72,19 +72,27 @@ export class ApiError extends Error {
   }
 }
 
-async function requestJson<T>(path: string): Promise<T> {
+type JsonRequestOptions = {
+  method?: 'GET' | 'POST';
+  body?: unknown;
+};
+
+async function requestJson<T>(path: string, options: JsonRequestOptions = {}): Promise<T> {
   assertSecureConfiguration();
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const method = options.method ?? 'GET';
 
   try {
     const response = await fetch(`${BASE_URL}${path}`, {
-      method: 'GET',
+      method,
       headers: {
         Accept: 'application/json',
         'X-API-Key': API_KEY,
+        ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}),
       },
+      ...(method === 'POST' ? { body: JSON.stringify(options.body ?? {}) } : {}),
       signal: controller.signal,
     });
 
@@ -143,6 +151,11 @@ export interface RouteInfo {
   route_ids?: string[];
   direction_destinations?: DirectionDestination[];
   display_name?: string;
+}
+
+export interface NearbyRouteDistance {
+  route_id: string;
+  distance_meters: number;
 }
 
 export interface UpcomingTrip {
@@ -225,6 +238,41 @@ export const apiService = {
     }
 
     return routesRequest;
+  },
+
+  fetchNearbyRoutes(
+    latitude: number,
+    longitude: number,
+    limit = 40,
+  ): Promise<NearbyRouteDistance[]> {
+    if (
+      !Number.isFinite(latitude)
+      || !Number.isFinite(longitude)
+      || latitude < -90
+      || latitude > 90
+      || longitude < -180
+      || longitude > 180
+    ) {
+      return Promise.reject(new ApiError('Ubicació no vàlida.'));
+    }
+
+    const normalizedLimit = Number.isFinite(limit)
+      ? Math.max(1, Math.min(40, Math.trunc(limit)))
+      : 40;
+    return requestJson<NearbyRouteDistance[]>('/api/v1/gtfs/routes/nearby', {
+      method: 'POST',
+      body: {
+        latitude: Math.round(latitude * 1000) / 1000,
+        longitude: Math.round(longitude * 1000) / 1000,
+        limit: normalizedLimit,
+      },
+    }).then((items) => Array.isArray(items)
+      ? items.filter((item) => (
+        typeof item?.route_id === 'string'
+        && Number.isFinite(item?.distance_meters)
+        && item.distance_meters >= 0
+      )).slice(0, normalizedLimit)
+      : []);
   },
 
   fetchUpcomingTrips(routeId: string, directionId: number): Promise<UpcomingTrip[]> {

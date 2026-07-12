@@ -10,8 +10,10 @@ indexes so clients can render exact trip variants on the map.
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
+import math
 import zipfile
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -22,7 +24,7 @@ from app.cache.redis_manager import CacheManager
 from app.config import Settings
 from app.core.exceptions import ExternalAPIError, GTFSParseError
 from app.core.logging import get_logger
-from app.models.gtfs import DirectionInfo, GTFSShapesResponse, RouteInfo, RouteShape
+from app.models.gtfs import DirectionInfo, GTFSShapesResponse, NearbyRoute, RouteInfo, RouteShape
 
 logger = get_logger(__name__)
 
@@ -38,6 +40,14 @@ _KEY_TRIPS_PREFIX = "gtfs:trips:route"
 _KEY_TRIP_META_PREFIX = "gtfs:trip:meta"
 _KEY_TRIP_STOPS_PREFIX = "gtfs:trip:stops"
 _KEY_TRIP_SHAPE_PREFIX = "gtfs:trip:shape"
+_KEY_PROXIMITY_INDEX = "gtfs:proximity:routes:v1"
+
+_PROXIMITY_INDEX_VERSION = 1
+_PROXIMITY_STOP_KEY_BATCH_SIZE = 500
+_MAX_NEARBY_ROUTES = 40
+_EARTH_RADIUS_METERS = 6_371_000.0
+
+ProximityIndex = dict[str, list[list[float]]]
 
 
 class GTFSService:
@@ -48,6 +58,7 @@ class GTFSService:
         self._cache = cache
         self._gtfs_url = settings.ATM_GTFS_URL
         self._http: httpx.AsyncClient | None = None
+        self._proximity_index_lock = asyncio.Lock()
 
     async def start(self) -> None:
         """Initialize the HTTP client for GTFS downloads."""
@@ -129,6 +140,12 @@ class GTFSService:
 
         await self._cache_shapes(route_shapes, deduped_routes)
         await self._cache_stops(route_to_trip, trip_stops_by_id)
+        proximity_index = self._build_route_proximity_index(
+            route_infos=deduped_routes,
+            route_to_trip=route_to_trip,
+            trip_stops_by_id=trip_stops_by_id,
+        )
+        await self._cache_route_proximity_index(proximity_index)
         await self._cache_calendar_and_trips(calendar, calendar_dates, trips_by_route_dir)
         await self._cache_trip_indexes(trip_meta_by_id, trip_stops_by_id, trip_shapes_by_id)
 
@@ -202,6 +219,64 @@ class GTFSService:
         if data is None:
             return []
         return [RouteInfo(**route) for route in data]
+
+    async def get_nearby_routes(
+        self,
+        latitude: float,
+        longitude: float,
+        limit: int = 20,
+    ) -> list[NearbyRoute]:
+        """Return canonical routes ordered by distance to their closest cached stop.
+
+        User coordinates are used only for this in-memory calculation. They are
+        deliberately not logged, persisted, or included in a Redis cache key.
+        """
+        if (
+            isinstance(latitude, bool)
+            or not isinstance(latitude, (int, float))
+            or not math.isfinite(latitude)
+            or latitude < -90
+            or latitude > 90
+        ):
+            raise ValueError("latitude must be a finite WGS-84 coordinate")
+        if (
+            isinstance(longitude, bool)
+            or not isinstance(longitude, (int, float))
+            or not math.isfinite(longitude)
+            or longitude < -180
+            or longitude > 180
+        ):
+            raise ValueError("longitude must be a finite WGS-84 coordinate")
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= _MAX_NEARBY_ROUTES
+        ):
+            raise ValueError(f"limit must be between 1 and {_MAX_NEARBY_ROUTES}")
+
+        proximity_index = await self._get_or_build_route_proximity_index()
+        distances: list[tuple[float, str]] = []
+
+        for route_id, stop_coordinates in proximity_index.items():
+            closest_distance = math.inf
+            for stop_longitude, stop_latitude in stop_coordinates:
+                distance = self._haversine_distance_meters(
+                    latitude,
+                    longitude,
+                    stop_latitude,
+                    stop_longitude,
+                )
+                if distance < closest_distance:
+                    closest_distance = distance
+
+            if math.isfinite(closest_distance):
+                distances.append((closest_distance, route_id))
+
+        distances.sort(key=lambda item: (item[0], item[1]))
+        return [
+            NearbyRoute(route_id=route_id, distance_meters=round(distance, 1))
+            for distance, route_id in distances[:limit]
+        ]
 
     async def get_trip_meta(self, trip_id: str) -> dict | None:
         return await self._cache.get_json(f"{_KEY_TRIP_META_PREFIX}:{trip_id}")
@@ -818,6 +893,231 @@ class GTFSService:
             trips_by_route_dir[route_key].sort(key=lambda item: item.get("departure_time", ""))
 
         return dict(trips_by_route_dir)
+
+    @staticmethod
+    def _canonical_route_groups(route_infos: list[dict]) -> dict[str, list[str]]:
+        """Map each canonical route to every underlying GTFS route identifier."""
+        groups: dict[str, list[str]] = {}
+
+        for raw_route in route_infos:
+            route = (
+                raw_route.model_dump(mode="json")
+                if isinstance(raw_route, RouteInfo)
+                else raw_route
+            )
+            if not isinstance(route, dict):
+                continue
+
+            canonical_route_id = route.get("route_id")
+            if not isinstance(canonical_route_id, str) or not canonical_route_id:
+                continue
+
+            identifiers = [canonical_route_id]
+            grouped_route_ids = route.get("route_ids")
+            if isinstance(grouped_route_ids, list):
+                identifiers.extend(
+                    route_id
+                    for route_id in grouped_route_ids
+                    if isinstance(route_id, str) and route_id
+                )
+
+            groups[canonical_route_id] = list(dict.fromkeys(identifiers))
+
+        return groups
+
+    @staticmethod
+    def _normalize_stop_coordinate(coordinate: object) -> tuple[float, float] | None:
+        if not isinstance(coordinate, (list, tuple)) or len(coordinate) < 2:
+            return None
+
+        longitude, latitude = coordinate[0], coordinate[1]
+        if (
+            isinstance(longitude, bool)
+            or isinstance(latitude, bool)
+            or not isinstance(longitude, (int, float))
+            or not isinstance(latitude, (int, float))
+        ):
+            return None
+
+        normalized_longitude = float(longitude)
+        normalized_latitude = float(latitude)
+        if (
+            not math.isfinite(normalized_longitude)
+            or not math.isfinite(normalized_latitude)
+            or normalized_longitude < -180
+            or normalized_longitude > 180
+            or normalized_latitude < -90
+            or normalized_latitude > 90
+        ):
+            return None
+
+        # Six decimal places retain sub-metre precision while keeping the index compact.
+        return round(normalized_longitude, 6), round(normalized_latitude, 6)
+
+    @classmethod
+    def _add_stop_collection(
+        cls,
+        route_points: dict[str, set[tuple[float, float]]],
+        canonical_route_id: str,
+        stop_collection: object,
+    ) -> None:
+        if not isinstance(stop_collection, dict):
+            return
+
+        features = stop_collection.get("features")
+        if not isinstance(features, list):
+            return
+
+        for feature in features:
+            if not isinstance(feature, dict):
+                continue
+            geometry = feature.get("geometry")
+            if not isinstance(geometry, dict) or geometry.get("type") != "Point":
+                continue
+            coordinate = cls._normalize_stop_coordinate(geometry.get("coordinates"))
+            if coordinate is not None:
+                route_points[canonical_route_id].add(coordinate)
+
+    @staticmethod
+    def _finalize_route_points(
+        route_points: dict[str, set[tuple[float, float]]],
+    ) -> ProximityIndex:
+        return {
+            route_id: [[longitude, latitude] for longitude, latitude in sorted(points)]
+            for route_id, points in sorted(route_points.items())
+            if points
+        }
+
+    @classmethod
+    def _build_route_proximity_index(
+        cls,
+        route_infos: list[dict],
+        route_to_trip: dict[tuple[str, int], str],
+        trip_stops_by_id: dict[str, dict],
+    ) -> ProximityIndex:
+        """Build a compact canonical route-to-stops index during a GTFS refresh."""
+        groups = cls._canonical_route_groups(route_infos)
+        canonical_by_route_id = {
+            route_id: canonical_route_id
+            for canonical_route_id, route_ids in groups.items()
+            for route_id in route_ids
+        }
+        route_points: dict[str, set[tuple[float, float]]] = defaultdict(set)
+
+        for (route_id, _direction_id), trip_id in route_to_trip.items():
+            canonical_route_id = canonical_by_route_id.get(route_id)
+            if canonical_route_id is None:
+                continue
+            cls._add_stop_collection(
+                route_points,
+                canonical_route_id,
+                trip_stops_by_id.get(trip_id),
+            )
+
+        return cls._finalize_route_points(route_points)
+
+    @classmethod
+    def _deserialize_route_proximity_index(cls, cached: object) -> ProximityIndex | None:
+        """Validate a cached index and discard malformed coordinates defensively."""
+        if not isinstance(cached, dict) or cached.get("version") != _PROXIMITY_INDEX_VERSION:
+            return None
+        cached_routes = cached.get("routes")
+        if not isinstance(cached_routes, dict):
+            return None
+
+        route_points: dict[str, set[tuple[float, float]]] = defaultdict(set)
+        for route_id, coordinates in cached_routes.items():
+            if not isinstance(route_id, str) or not route_id or not isinstance(coordinates, list):
+                continue
+            for coordinate in coordinates:
+                normalized = cls._normalize_stop_coordinate(coordinate)
+                if normalized is not None:
+                    route_points[route_id].add(normalized)
+
+        return cls._finalize_route_points(route_points)
+
+    async def _cache_route_proximity_index(self, proximity_index: ProximityIndex) -> None:
+        await self._cache.set_json(
+            _KEY_PROXIMITY_INDEX,
+            {"version": _PROXIMITY_INDEX_VERSION, "routes": proximity_index},
+            ttl=self._settings.CACHE_TTL_GTFS_SHAPES,
+        )
+
+    async def _build_route_proximity_index_from_cached_stops(
+        self,
+        route_infos: list[dict],
+    ) -> ProximityIndex:
+        """Lazily rebuild the index for Redis data written by earlier app versions."""
+        groups = self._canonical_route_groups(route_infos)
+        stop_key_owners: dict[str, str] = {}
+
+        for canonical_route_id, route_ids in groups.items():
+            for route_id in route_ids:
+                for suffix in ("", ":0", ":1"):
+                    stop_key_owners.setdefault(
+                        f"{_KEY_STOPS_PREFIX}:{route_id}{suffix}",
+                        canonical_route_id,
+                    )
+
+        route_points: dict[str, set[tuple[float, float]]] = defaultdict(set)
+        stop_key_items = list(stop_key_owners.items())
+        for start in range(0, len(stop_key_items), _PROXIMITY_STOP_KEY_BATCH_SIZE):
+            batch = stop_key_items[start : start + _PROXIMITY_STOP_KEY_BATCH_SIZE]
+            collections = await self._cache.mget_json([key for key, _owner in batch])
+            for (_key, canonical_route_id), stop_collection in zip(
+                batch,
+                collections,
+                strict=True,
+            ):
+                self._add_stop_collection(route_points, canonical_route_id, stop_collection)
+
+        return self._finalize_route_points(route_points)
+
+    async def _get_or_build_route_proximity_index(self) -> ProximityIndex:
+        cached = await self._cache.get_json(_KEY_PROXIMITY_INDEX)
+        proximity_index = self._deserialize_route_proximity_index(cached)
+        if proximity_index is not None:
+            return proximity_index
+
+        async with self._proximity_index_lock:
+            cached = await self._cache.get_json(_KEY_PROXIMITY_INDEX)
+            proximity_index = self._deserialize_route_proximity_index(cached)
+            if proximity_index is not None:
+                return proximity_index
+
+            route_infos = await self._cache.get_json(_KEY_ROUTES)
+            if not isinstance(route_infos, list):
+                return {}
+
+            proximity_index = await self._build_route_proximity_index_from_cached_stops(
+                route_infos
+            )
+            if proximity_index:
+                await self._cache_route_proximity_index(proximity_index)
+            return proximity_index
+
+    @staticmethod
+    def _haversine_distance_meters(
+        from_latitude: float,
+        from_longitude: float,
+        to_latitude: float,
+        to_longitude: float,
+    ) -> float:
+        from_latitude_radians = math.radians(from_latitude)
+        to_latitude_radians = math.radians(to_latitude)
+        latitude_delta = math.radians(to_latitude - from_latitude)
+        longitude_delta = math.radians(to_longitude - from_longitude)
+        haversine = (
+            math.sin(latitude_delta / 2) ** 2
+            + math.cos(from_latitude_radians)
+            * math.cos(to_latitude_radians)
+            * math.sin(longitude_delta / 2) ** 2
+        )
+        angular_distance = 2 * math.atan2(
+            math.sqrt(haversine),
+            math.sqrt(max(0.0, 1 - haversine)),
+        )
+        return _EARTH_RADIUS_METERS * angular_distance
 
     async def _cache_shapes(self, route_shapes: list[RouteShape], route_infos: list[dict]) -> None:
         ttl = self._settings.CACHE_TTL_GTFS_SHAPES

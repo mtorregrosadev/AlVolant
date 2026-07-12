@@ -33,7 +33,7 @@
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "AlVolant necessita la teva ubicació per mostrar la posició del bus a la ruta."
+          "locationWhenInUsePermission": "AlVolant utilitza la teva ubicació mentre fas servir l’app per ordenar les línies properes i mostrar la posició del bus a la ruta."
         }
       ],
       "expo-font"

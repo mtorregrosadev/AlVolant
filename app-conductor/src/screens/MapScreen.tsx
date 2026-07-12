@@ -20,12 +20,18 @@ import * as Location from 'expo-location';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   apiService,
+  type LiveWebSocketMessage,
   type RTTripUpdate,
   type TrafficSummary,
   type VehiclePosition,
 } from '../services/api';
 import { telemetry } from '../services/telemetry';
 import { formatDirectionLabel } from '../services/directionLabel';
+import {
+  createRouteMatchingState,
+  updateRouteMatch,
+  type RouteMatchingState,
+} from '../services/routeMatching';
 import { colors, safeHexColor, vehicleAccentColor } from '../theme';
 import { usePreferences } from '../PreferencesContext';
 import { translate, useI18n, type TranslationKey } from '../i18n';
@@ -61,6 +67,32 @@ type PaceInfo = {
   icon: IconName;
   tone: 'good' | 'warning' | 'danger' | 'neutral';
 };
+type GpsFix = {
+  coordinate: Coordinate;
+  accuracyMeters: number | null;
+  speedKmh: number | null;
+  headingDegrees: number | null;
+  timestampMs: number;
+};
+type VisualPose = {
+  coordinate: Coordinate;
+  bearing: number;
+  routeProgress: number | null;
+};
+type RoutePathSegment = {
+  start: Coordinate;
+  end: Coordinate;
+  startDistance: number;
+  length: number;
+};
+type RoutePath = {
+  segments: RoutePathSegment[];
+  totalDistance: number;
+};
+type RouteProjectionOptions = {
+  previousDistanceAlong?: number | null;
+  headingDegrees?: number | null;
+};
 
 type MapScreenProps = NativeStackScreenProps<RootStackParamList, 'Map'>;
 type MapTheme = 'dark' | 'light' | 'satellite';
@@ -73,6 +105,11 @@ type MapThemeOption = {
 const MS_TO_KMH = 3.6;
 const MIN_MOVING_SPEED_KMH = 3;
 const FALLBACK_CITY_SPEED_KMH = 18;
+const LIVE_REFRESH_MIN_INTERVAL_MS = 60_000;
+const LIVE_REFRESH_JITTER_MS = 5_000;
+const LIVE_RECONNECT_MAX_MS = 30_000;
+const LIVE_SUBSCRIPTION_TIMEOUT_MS = 10_000;
+const LIVE_DATA_STALE_AFTER_MS = 180_000;
 
 function toRadians(value: number) {
   return (value * Math.PI) / 180;
@@ -122,13 +159,81 @@ function interpolateCoordinate(from: Coordinate, to: Coordinate, ratio: number):
   ];
 }
 
-function projectPointOnRoute(point: Coordinate | null, routeCoordinates: Coordinate[]): RouteProjection | null {
+function interpolateBearing(from: number, to: number, ratio: number) {
+  const delta = ((to - from + 540) % 360) - 180;
+  return (from + delta * clamp(ratio, 0, 1) + 360) % 360;
+}
+
+function buildRoutePath(routeCoordinates: Coordinate[]): RoutePath {
+  const segments: RoutePathSegment[] = [];
+  let totalDistance = 0;
+
+  for (let index = 0; index < routeCoordinates.length - 1; index += 1) {
+    const start = routeCoordinates[index];
+    const end = routeCoordinates[index + 1];
+    const length = distanceMeters(start, end) ?? 0;
+    if (length <= 0) continue;
+    segments.push({
+      start,
+      end,
+      startDistance: totalDistance,
+      length,
+    });
+    totalDistance += length;
+  }
+
+  return { segments, totalDistance };
+}
+
+function coordinateAtRouteDistance(
+  routePath: RoutePath,
+  distanceAlong: number,
+): Coordinate | null {
+  if (!routePath.segments.length) return null;
+  const target = clamp(distanceAlong, 0, routePath.totalDistance);
+  let low = 0;
+  let high = routePath.segments.length - 1;
+
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    const segment = routePath.segments[middle];
+    if (target <= segment.startDistance + segment.length) high = middle;
+    else low = middle + 1;
+  }
+
+  const segment = routePath.segments[low];
+  const ratio = segment.length > 0
+    ? clamp((target - segment.startDistance) / segment.length, 0, 1)
+    : 0;
+  return interpolateCoordinate(segment.start, segment.end, ratio);
+}
+
+function angleDifferenceDegrees(first: number, second: number) {
+  return Math.abs(((first - second + 540) % 360) - 180);
+}
+
+function projectPointOnRoute(
+  point: Coordinate | null,
+  routeCoordinates: Coordinate[],
+  options: RouteProjectionOptions = {},
+): RouteProjection | null {
   if (!point || routeCoordinates.length < 2) {
     return null;
   }
 
   let bestProjection: RouteProjection | null = null;
+  let bestScore = Number.POSITIVE_INFINITY;
   let accumulatedDistance = 0;
+  const previousDistanceAlong = typeof options.previousDistanceAlong === 'number'
+    && Number.isFinite(options.previousDistanceAlong)
+    ? Math.max(0, options.previousDistanceAlong)
+    : null;
+  const headingDegrees = typeof options.headingDegrees === 'number'
+    && Number.isFinite(options.headingDegrees)
+    && options.headingDegrees >= 0
+    && options.headingDegrees <= 360
+    ? options.headingDegrees % 360
+    : null;
 
   for (let index = 0; index < routeCoordinates.length - 1; index += 1) {
     const start = routeCoordinates[index];
@@ -153,11 +258,25 @@ function projectPointOnRoute(point: Coordinate | null, routeCoordinates: Coordin
     const coordinate = interpolateCoordinate(start, end, ratio);
     const distanceFromRoute = distanceMeters(point, coordinate) ?? Number.POSITIVE_INFINITY;
 
-    if (!bestProjection || distanceFromRoute < bestProjection.distanceFromRoute) {
+    const distanceAlong = accumulatedDistance + segmentLength * ratio;
+    // A modest continuity/direction score prevents the matcher from jumping
+    // onto a nearby return branch while still allowing normal forward motion.
+    const continuityPenalty = previousDistanceAlong === null
+      ? 0
+      : Math.min(Math.abs(distanceAlong - previousDistanceAlong), 2_000) * 0.08;
+    const segmentBearing = bearingBetween(start, end);
+    const headingDelta = headingDegrees === null
+      ? 0
+      : angleDifferenceDegrees(headingDegrees, segmentBearing);
+    const headingPenalty = headingDelta > 100 ? 30 : headingDelta > 70 ? 12 : 0;
+    const score = distanceFromRoute + continuityPenalty + headingPenalty;
+
+    if (!bestProjection || score < bestScore) {
+      bestScore = score;
       bestProjection = {
         coordinate,
-        distanceAlong: accumulatedDistance + segmentLength * ratio,
-        bearing: bearingBetween(start, end),
+        distanceAlong,
+        bearing: segmentBearing,
         distanceFromRoute,
       };
     }
@@ -166,41 +285,6 @@ function projectPointOnRoute(point: Coordinate | null, routeCoordinates: Coordin
   }
 
   return bestProjection;
-}
-
-function coordinateAtDistance(routeCoordinates: Coordinate[], distanceAlong: number): Pick<RouteProjection, 'coordinate' | 'bearing'> | null {
-  if (routeCoordinates.length < 2) {
-    return null;
-  }
-
-  let accumulatedDistance = 0;
-  const targetDistance = Math.max(0, distanceAlong);
-
-  for (let index = 0; index < routeCoordinates.length - 1; index += 1) {
-    const start = routeCoordinates[index];
-    const end = routeCoordinates[index + 1];
-    const segmentLength = distanceMeters(start, end) ?? 0;
-
-    if (segmentLength <= 0) {
-      continue;
-    }
-
-    if (targetDistance <= accumulatedDistance + segmentLength) {
-      const ratio = (targetDistance - accumulatedDistance) / segmentLength;
-      return {
-        coordinate: interpolateCoordinate(start, end, ratio),
-        bearing: bearingBetween(start, end),
-      };
-    }
-
-    accumulatedDistance += segmentLength;
-  }
-
-  const lastIndex = routeCoordinates.length - 1;
-  return {
-    coordinate: routeCoordinates[lastIndex],
-    bearing: bearingBetween(routeCoordinates[lastIndex - 1], routeCoordinates[lastIndex]),
-  };
 }
 
 function extractRouteCoordinates(routeFeature: any): Coordinate[] {
@@ -446,13 +530,9 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const [isConnected, setIsConnected] = useState(false);
   const [locationGranted, setLocationGranted] = useState(false);
   const [trackingMode, setTrackingMode] = useState<string>('course');
-  const [userCoords, setUserCoords] = useState<Coordinate | null>(null);
-  const [userHeading, setUserHeading] = useState<number>(0);
-  const [userSpeedKmh, setUserSpeedKmh] = useState<number | null>(null);
-  const [userAccuracy, setUserAccuracy] = useState<number | null>(null);
-  const [displayCoords, setDisplayCoords] = useState<Coordinate | null>(null);
+  const [gpsFix, setGpsFix] = useState<GpsFix | null>(null);
+  const [visualPose, setVisualPose] = useState<VisualPose | null>(null);
   const [displayRouteProgress, setDisplayRouteProgress] = useState<number | null>(null);
-  const [displayRouteBearing, setDisplayRouteBearing] = useState<number>(0);
   const [mapBearing, setMapBearing] = useState<number>(0);
   const [routeInfo, setRouteInfo] = useState<any>(null);
   const [routeTripUpdates, setRouteTripUpdates] = useState<RTTripUpdate[]>([]);
@@ -461,11 +541,19 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const [mapTheme, setMapTheme] = useState<MapTheme>('dark');
   const [isMapThemePickerOpen, setIsMapThemePickerOpen] = useState(false);
   const animationFrameRef = useRef<number | null>(null);
-  const displayRouteProgressRef = useRef<number | null>(null);
+  const visualPoseRef = useRef<VisualPose | null>(null);
+  const lastSnappedProgressRef = useRef<number | null>(null);
+  const routeMatchingStateRef = useRef<RouteMatchingState>(
+    createRouteMatchingState('offRoute'),
+  );
   const lastTrafficLookupRef = useRef<{ coords: Coordinate | null; timestamp: number }>({
     coords: null,
     timestamp: 0,
   });
+  const userCoords = gpsFix?.coordinate ?? null;
+  const userSpeedKmh = gpsFix?.speedKmh ?? null;
+  const displayCoords = visualPose?.coordinate ?? null;
+  const displayRouteBearing = visualPose?.bearing ?? 0;
 
   const directionName = React.useMemo(() => {
     if (directionLabel) {
@@ -503,7 +591,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     insets.bottom + driverPanelClearance,
     driverPanelClearance,
   );
-  const buildingExtrusionPaint = {
+  const buildingExtrusionPaint = React.useMemo(() => ({
     'fill-extrusion-color': mapTheme === 'satellite'
       ? '#F8FAFC'
       : usesLightChrome ? '#94A3B8' : '#334155',
@@ -511,8 +599,15 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], 0],
     'fill-extrusion-opacity': mapTheme === 'satellite' ? 0.18 : usesLightChrome ? 0.78 : 0.68,
     'fill-extrusion-vertical-gradient': mapTheme !== 'satellite',
-  };
+  }), [mapTheme, usesLightChrome]);
   const routeCoordinates = React.useMemo(() => extractRouteCoordinates(routeFeature), [routeFeature]);
+  const routePath = React.useMemo(() => buildRoutePath(routeCoordinates), [routeCoordinates]);
+  const routeSource = React.useMemo(() => routeFeature
+    ? {
+      type: 'FeatureCollection' as const,
+      features: [routeFeature],
+    }
+    : null, [routeFeature]);
   const initialCameraCenter = displayCoords ?? routeCoordinates[0] ?? null;
   const stopsOnRoute = React.useMemo(
     () => extractStopsOnRoute(stopsFeature, routeCoordinates),
@@ -549,10 +644,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const effectiveSpeedKmh = currentSpeedKmh !== null && currentSpeedKmh > MIN_MOVING_SPEED_KMH
     ? currentSpeedKmh
     : FALLBACK_CITY_SPEED_KMH;
-  const currentRouteProgress = displayRouteProgress
-    ?? projectPointOnRoute(displayCoords, routeCoordinates)?.distanceAlong
-    ?? projectPointOnRoute(userCoords, routeCoordinates)?.distanceAlong
-    ?? null;
+  const currentRouteProgress = displayRouteProgress;
   const nextStop = React.useMemo(() => {
     if (!stopsOnRoute.length) {
       return null;
@@ -671,39 +763,47 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   // Request location permissions and start watching GPS coordinates/heading
   useEffect(() => {
     let subscription: any;
+    let active = true;
 
     async function setupLocation() {
       try {
         const { status } = await Location.requestForegroundPermissionsAsync();
+        if (!active) return;
         const granted = status === 'granted';
         setLocationGranted(granted);
 
         if (granted) {
-          subscription = await Location.watchPositionAsync(
+          const nextSubscription = await Location.watchPositionAsync(
             {
               accuracy: Location.Accuracy.BestForNavigation,
               timeInterval: 1000,
               distanceInterval: 1,
             },
             (loc) => {
-              if (loc.coords) {
-                setUserCoords([loc.coords.longitude, loc.coords.latitude]);
-                setUserAccuracy(
-                  typeof loc.coords.accuracy === 'number' && loc.coords.accuracy >= 0
-                    ? loc.coords.accuracy
-                    : null
-                );
-                setUserSpeedKmh(
-                  typeof loc.coords.speed === 'number' && loc.coords.speed >= 0
-                    ? loc.coords.speed * MS_TO_KMH
-                    : null
-                );
-                if (typeof loc.coords.heading === 'number') {
-                  setUserHeading(loc.coords.heading);
-                }
-              }
+              if (!active || !loc.coords) return;
+              setGpsFix({
+                coordinate: [loc.coords.longitude, loc.coords.latitude],
+                accuracyMeters: typeof loc.coords.accuracy === 'number'
+                  && loc.coords.accuracy >= 0
+                  ? loc.coords.accuracy
+                  : null,
+                speedKmh: typeof loc.coords.speed === 'number' && loc.coords.speed >= 0
+                  ? loc.coords.speed * MS_TO_KMH
+                  : null,
+                headingDegrees: typeof loc.coords.heading === 'number'
+                  ? loc.coords.heading
+                  : null,
+                timestampMs: typeof loc.timestamp === 'number' && Number.isFinite(loc.timestamp)
+                  ? loc.timestamp
+                  : Date.now(),
+              });
             }
           );
+          if (!active) {
+            nextSubscription.remove();
+            return;
+          }
+          subscription = nextSubscription;
         } else {
           console.warn('Location permission not granted');
         }
@@ -715,6 +815,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     setupLocation();
 
     return () => {
+      active = false;
       if (subscription) {
         subscription.remove();
       }
@@ -722,43 +823,121 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   }, []);
 
   useEffect(() => {
-    if (!userCoords) {
-      return undefined;
+    if (animationFrameRef.current !== null) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
     }
+    routeMatchingStateRef.current = createRouteMatchingState('offRoute');
+    visualPoseRef.current = null;
+    lastSnappedProgressRef.current = null;
+    setVisualPose(null);
+    setDisplayRouteProgress(null);
+  }, [routeId, directionId, tripId]);
+
+  useEffect(() => {
+    if (!gpsFix) return undefined;
 
     if (animationFrameRef.current !== null) {
       cancelAnimationFrame(animationFrameRef.current);
       animationFrameRef.current = null;
     }
 
-    const projection = projectPointOnRoute(userCoords, routeCoordinates);
+    const projection = projectPointOnRoute(gpsFix.coordinate, routeCoordinates, {
+      previousDistanceAlong: lastSnappedProgressRef.current,
+      headingDegrees: gpsFix.headingDegrees,
+    });
+    let targetPose: VisualPose;
+
     if (!projection) {
-      setDisplayCoords(userCoords);
-      setDisplayRouteBearing(userHeading);
       setDisplayRouteProgress(null);
-      displayRouteProgressRef.current = null;
+      const nativeHeading = typeof gpsFix.headingDegrees === 'number'
+        && gpsFix.headingDegrees >= 0
+        && gpsFix.headingDegrees <= 360
+        ? gpsFix.headingDegrees % 360
+        : visualPoseRef.current?.bearing ?? 0;
+      targetPose = {
+        coordinate: gpsFix.coordinate,
+        bearing: nativeHeading,
+        routeProgress: null,
+      };
+    } else {
+      const result = updateRouteMatch(routeMatchingStateRef.current, {
+        rawCoordinate: gpsFix.coordinate,
+        snappedCoordinate: projection.coordinate,
+        distanceFromRouteMeters: projection.distanceFromRoute,
+        accuracyMeters: gpsFix.accuracyMeters,
+        headingDegrees: gpsFix.headingDegrees,
+        timestampMs: gpsFix.timestampMs,
+      });
+      routeMatchingStateRef.current = result.state;
+      if (result.transition) {
+        telemetry.capture('map_match_changed', {
+          mode: result.mode === 'offRoute' ? 'off_route' : 'snapped',
+        });
+      }
+
+      if (result.mode === 'snapped') {
+        lastSnappedProgressRef.current = projection.distanceAlong;
+        setDisplayRouteProgress(projection.distanceAlong);
+      }
+      targetPose = {
+        coordinate: result.visualTarget,
+        bearing: result.mode === 'snapped'
+          ? projection.bearing
+          : result.headingDegrees ?? visualPoseRef.current?.bearing ?? projection.bearing,
+        routeProgress: result.mode === 'snapped' ? projection.distanceAlong : null,
+      };
+    }
+
+    const fromPose = visualPoseRef.current ?? targetPose;
+    const movement = distanceMeters(fromPose.coordinate, targetPose.coordinate) ?? 0;
+    const bearingDelta = Math.abs(
+      ((targetPose.bearing - fromPose.bearing + 540) % 360) - 180,
+    );
+    const followsRoute = fromPose.routeProgress !== null && targetPose.routeProgress !== null;
+    const routeProgressDelta = followsRoute
+      ? Math.abs(targetPose.routeProgress! - fromPose.routeProgress!)
+      : 0;
+    if (movement < 1 && bearingDelta < 1 && routeProgressDelta < 1) {
+      visualPoseRef.current = targetPose;
+      setVisualPose(targetPose);
       return undefined;
     }
 
-    const fromProgress = displayRouteProgressRef.current ?? projection.distanceAlong;
-    const toProgress = projection.distanceAlong;
-    const progressDelta = Math.abs(toProgress - fromProgress);
-    const duration = clamp(progressDelta * 8, 650, 1400);
+    const duration = clamp((followsRoute ? routeProgressDelta : movement) * 10, 600, 700);
     const startTime = Date.now();
-
     const step = () => {
-      const elapsed = Date.now() - startTime;
-      const ratio = clamp(elapsed / duration, 0, 1);
+      const ratio = clamp((Date.now() - startTime) / duration, 0, 1);
       const easedRatio = ratio < 1 ? ratio * ratio * (3 - 2 * ratio) : 1;
-      const nextProgress = fromProgress + (toProgress - fromProgress) * easedRatio;
-      const nextPosition = coordinateAtDistance(routeCoordinates, nextProgress);
-
-      if (nextPosition) {
-        displayRouteProgressRef.current = nextProgress;
-        setDisplayRouteProgress(nextProgress);
-        setDisplayCoords(nextPosition.coordinate);
-        setDisplayRouteBearing(nextPosition.bearing);
+      const nextRouteProgress = followsRoute
+        ? fromPose.routeProgress!
+          + (targetPose.routeProgress! - fromPose.routeProgress!) * easedRatio
+        : null;
+      const routePosition = nextRouteProgress === null
+        ? null
+        : coordinateAtRouteDistance(routePath, nextRouteProgress);
+      let nextPose: VisualPose;
+      if (ratio >= 1) {
+        nextPose = targetPose;
+      } else if (routePosition) {
+        nextPose = {
+          coordinate: routePosition,
+          bearing: interpolateBearing(fromPose.bearing, targetPose.bearing, easedRatio),
+          routeProgress: nextRouteProgress,
+        };
+      } else {
+        nextPose = {
+          coordinate: interpolateCoordinate(
+            fromPose.coordinate,
+            targetPose.coordinate,
+            easedRatio,
+          ),
+          bearing: interpolateBearing(fromPose.bearing, targetPose.bearing, easedRatio),
+          routeProgress: null,
+        };
       }
+      visualPoseRef.current = nextPose;
+      setVisualPose(nextPose);
 
       if (ratio < 1) {
         animationFrameRef.current = requestAnimationFrame(step);
@@ -766,7 +945,6 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
         animationFrameRef.current = null;
       }
     };
-
     step();
 
     return () => {
@@ -775,7 +953,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
         animationFrameRef.current = null;
       }
     };
-  }, [routeCoordinates, userCoords, userHeading]);
+  }, [gpsFix, routeCoordinates, routePath]);
 
   useEffect(() => {
     if (!userCoords) {
@@ -795,9 +973,10 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     }
 
     let cancelled = false;
+    const controller = new AbortController();
     lastTrafficLookupRef.current = { coords: userCoords, timestamp: now };
 
-    apiService.fetchTrafficSummary(userCoords[1], userCoords[0])
+    apiService.fetchTrafficSummary(userCoords[1], userCoords[0], controller.signal)
       .then((summary) => {
         if (!cancelled) {
           setTrafficState(summary.status || 'unavailable');
@@ -811,18 +990,157 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [userCoords]);
 
   // Load route data and connect WebSocket
   useEffect(() => {
-    let ws: WebSocket;
+    let active = true;
+    let liveSocket: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let liveRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+    let subscriptionTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconnectAttempt = 0;
+    let liveRefreshInFlight = false;
+    let lastLiveRefreshAt = 0;
+    let lastTripUpdatesSuccessAt = 0;
+    let lastVehiclesSuccessAt = 0;
+
+    async function refreshLiveData() {
+      if (!active) return;
+      if (liveRefreshInFlight) {
+        return;
+      }
+
+      liveRefreshInFlight = true;
+      const [tripUpdatesResult, vehiclesResult] = await Promise.allSettled([
+        apiService.fetchRouteTripUpdates(routeId),
+        apiService.fetchRouteVehicles(routeId),
+      ]);
+      lastLiveRefreshAt = Date.now();
+
+      if (active) {
+        // Preserve the last-good component independently when one endpoint is
+        // degraded; an ATM vehicle feed outage must not erase trip updates.
+        if (tripUpdatesResult.status === 'fulfilled') {
+          lastTripUpdatesSuccessAt = lastLiveRefreshAt;
+          setRouteTripUpdates(tripUpdatesResult.value);
+        } else if (lastLiveRefreshAt - lastTripUpdatesSuccessAt > LIVE_DATA_STALE_AFTER_MS) {
+          setRouteTripUpdates([]);
+        }
+        if (vehiclesResult.status === 'fulfilled') {
+          lastVehiclesSuccessAt = lastLiveRefreshAt;
+          setVehiclePositions(vehiclesResult.value);
+        } else if (lastLiveRefreshAt - lastVehiclesSuccessAt > LIVE_DATA_STALE_AFTER_MS) {
+          setVehiclePositions([]);
+        }
+      }
+
+      liveRefreshInFlight = false;
+      if (active) {
+        scheduleLiveRefresh();
+      }
+    }
+
+    function scheduleLiveRefresh() {
+      if (!active || liveRefreshTimer) return;
+      const elapsed = Date.now() - lastLiveRefreshAt;
+      const throttleDelay = Math.max(0, LIVE_REFRESH_MIN_INTERVAL_MS - elapsed);
+      const jitter = Math.round(Math.random() * LIVE_REFRESH_JITTER_MS);
+      liveRefreshTimer = setTimeout(() => {
+        liveRefreshTimer = null;
+        void refreshLiveData();
+      }, throttleDelay + jitter);
+    }
+
+    function handleLiveMessage(message: LiveWebSocketMessage) {
+      if ('type' in message && message.type === 'subscribed') {
+        if (message.topics.includes('atm_rt:updates')) {
+          if (subscriptionTimer) {
+            clearTimeout(subscriptionTimer);
+            subscriptionTimer = null;
+          }
+          reconnectAttempt = 0;
+          setIsConnected(true);
+        }
+        return;
+      }
+      if ('type' in message && message.type === 'error') {
+        setIsConnected(false);
+        liveSocket?.close();
+        return;
+      }
+      if (
+        'topic' in message
+        && message.topic === 'atm_rt:updates'
+        && message.data.type === 'invalidate'
+      ) {
+        scheduleLiveRefresh();
+      }
+    }
+
+    function scheduleReconnect() {
+      if (!active || reconnectTimer) return;
+      const baseDelay = Math.min(
+        LIVE_RECONNECT_MAX_MS,
+        1_000 * (2 ** Math.min(reconnectAttempt, 5)),
+      );
+      reconnectAttempt += 1;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connectLiveSocket();
+      }, baseDelay + Math.round(Math.random() * 500));
+    }
+
+    function connectLiveSocket() {
+      if (!active) return;
+      const socket = apiService.connectWebSocket(handleLiveMessage);
+      liveSocket = socket;
+      if (subscriptionTimer) clearTimeout(subscriptionTimer);
+      subscriptionTimer = setTimeout(() => {
+        subscriptionTimer = null;
+        if (active && liveSocket === socket) socket.close();
+      }, LIVE_SUBSCRIPTION_TIMEOUT_MS);
+      socket.addEventListener('close', () => {
+        if (liveSocket === socket) liveSocket = null;
+        if (subscriptionTimer) {
+          clearTimeout(subscriptionTimer);
+          subscriptionTimer = null;
+        }
+        if (!active) return;
+        setIsConnected(false);
+        scheduleReconnect();
+      });
+      socket.addEventListener('error', () => {
+        if (!active) return;
+        setIsConnected(false);
+        try {
+          socket.close();
+        } catch {
+          // The close event or connect timeout will drive bounded reconnect.
+        }
+      });
+    }
 
     async function loadData() {
       const loadStartedAt = Date.now();
       let loadSucceeded = false;
+      setLoading(true);
+      setError(null);
+      setIsConnected(false);
+      setRouteFeature(null);
+      setStopsFeature(null);
+      setSelectedStop(null);
+      setRouteInfo(null);
+      setRouteTripUpdates([]);
+      setVehiclePositions([]);
       try {
-        const data = await apiService.fetchRouteShape(routeId, directionId, tripId);
+        const [data, stopsData] = await Promise.all([
+          apiService.fetchRouteShape(routeId, directionId, tripId),
+          apiService.fetchRouteStops(routeId, directionId, tripId),
+        ]);
+        if (!active) return;
         if (data) {
           setRouteInfo(data);
           if (data.geojson) {
@@ -830,56 +1148,41 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
           }
         }
 
-        const stopsData = await apiService.fetchRouteStops(routeId, directionId, tripId);
         if (stopsData && stopsData.features) {
           setStopsFeature(stopsData);
         }
 
-        const [tripUpdatesResult, vehiclesResult] = await Promise.allSettled([
-          apiService.fetchRouteTripUpdates(routeId),
-          apiService.fetchRouteVehicles(routeId),
-        ]);
-
-        if (tripUpdatesResult.status === 'fulfilled') {
-          setRouteTripUpdates(tripUpdatesResult.value);
-        } else {
-          setRouteTripUpdates([]);
-        }
-
-        if (vehiclesResult.status === 'fulfilled') {
-          setVehiclePositions(vehiclesResult.value);
-        } else {
-          setVehiclePositions([]);
-        }
-
-        ws = apiService.connectWebSocket((msg) => {
-          // Live updates for future phases
-        });
-
-        ws.addEventListener('open', () => setIsConnected(true));
-        ws.addEventListener('close', () => setIsConnected(false));
+        await refreshLiveData();
+        if (!active) return;
+        connectLiveSocket();
         loadSucceeded = true;
       } catch (e: unknown) {
-        telemetry.captureException(e, { phase: 'map_data' });
-        setError(e instanceof Error ? e.message : t('map.error'));
+        if (active) {
+          telemetry.captureException(e, { phase: 'map_data' });
+          setError('map_data');
+        }
       } finally {
-        telemetry.capture('map_loaded', {
-          direction: directionId,
-          duration_ms: Date.now() - loadStartedAt,
-          status: loadSucceeded ? 'success' : 'error',
-        });
-        setLoading(false);
+        if (active) {
+          telemetry.capture('map_loaded', {
+            direction: directionId,
+            duration_ms: Date.now() - loadStartedAt,
+            status: loadSucceeded ? 'success' : 'error',
+          });
+          setLoading(false);
+        }
       }
     }
 
-    loadData();
+    void loadData();
 
     return () => {
-      if (ws) {
-        ws.close();
-      }
+      active = false;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (liveRefreshTimer) clearTimeout(liveRefreshTimer);
+      if (subscriptionTimer) clearTimeout(subscriptionTimer);
+      liveSocket?.close();
     };
-  }, [routeId, directionId, tripId, t]);
+  }, [routeId, directionId, tripId]);
 
   const handleMapPress = async (event: any) => {
     if (!mapRef.current) return;
@@ -969,16 +1272,14 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     );
   }
 
-  const routeSource = routeFeature
-    ? {
-      type: 'FeatureCollection' as const,
-      features: [routeFeature],
-    }
-    : null;
-
   const handleRegionChange = (event: any) => {
     if (event?.properties && typeof event.properties.bearing === 'number') {
-      setMapBearing(event.properties.bearing);
+      const nextBearing = (event.properties.bearing + 360) % 360;
+      setMapBearing((current) => (
+        Math.abs(((nextBearing - current + 540) % 360) - 180) >= 0.5
+          ? nextBearing
+          : current
+      ));
     }
   };
 
@@ -1015,7 +1316,6 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
         mapStyle={activeMapTheme.style}
         onPress={handleMapPress}
         onRegionDidChange={handleRegionChange}
-        onRegionIsChanging={handleRegionChange}
         attributionPosition={{ bottom: mapOrnamentBottom, left: mapSafeLeft }}
         logoPosition={{ bottom: mapOrnamentBottom, left: mapSafeLeft }}
       >
@@ -1028,9 +1328,9 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
               zoom: 14,
               pitch: mapPitch,
             }}
-            center={trackingMode === 'course' && displayRouteProgress !== null ? displayCoords ?? undefined : undefined}
+            center={trackingMode === 'course' ? displayCoords ?? undefined : undefined}
             bearing={trackingMode === 'course' ? displayRouteBearing : undefined}
-            duration={trackingMode === 'course' ? 700 : undefined}
+            duration={trackingMode === 'course' ? 0 : undefined}
             easing="linear"
             pitch={mapPitch}
             zoom={mapZoom}
@@ -1053,7 +1353,11 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
             lngLat={displayCoords}
             anchor="center"
           >
-            <View style={{ transform: [{ rotate: `${displayRouteBearing - mapBearing}deg` }] }}>
+            <View style={{
+              transform: [{
+                rotate: `${trackingMode === 'course' ? 0 : displayRouteBearing - mapBearing}deg`,
+              }],
+            }}>
               <View style={styles.busContainer}>
                 <View style={styles.busBody}>
                   <View style={[styles.busRedFront, { backgroundColor: vehicleAccent }]} />

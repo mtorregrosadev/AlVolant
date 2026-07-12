@@ -21,17 +21,13 @@ import { apiService, type RouteInfo } from '../services/api';
 import {
   AGENCY_OPTIONS,
   getAgencyFilter,
+  getAgencyLabel,
   getRouteTitle,
   routeMatchesSearch,
   type AgencyFilter,
 } from '../services/routePresentation';
-import {
-  EMPTY_USER_PREFERENCES,
-  loadUserPreferences,
-  saveUserPreferences,
-  withToggledFavorite,
-  type UserPreferences,
-} from '../services/userPreferences';
+import { usePreferences } from '../PreferencesContext';
+import { useI18n } from '../i18n';
 import {
   colors,
   fonts,
@@ -74,7 +70,8 @@ export default function RoutesScreen({ navigation }: RoutesScreenProps) {
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
   const [routes, setRoutes] = useState<RouteInfo[]>([]);
-  const [preferences, setPreferences] = useState<UserPreferences>({ ...EMPTY_USER_PREFERENCES });
+  const { preferences, toggleFavorite } = usePreferences();
+  const { language, locale, t } = useI18n();
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedAgency, setSelectedAgency] = useState<AgencyFilter>('Tots');
   const [loading, setLoading] = useState(true);
@@ -83,12 +80,8 @@ export default function RoutesScreen({ navigation }: RoutesScreenProps) {
   const loadData = useCallback(async () => {
     setLoading(true);
     setLoadFailed(false);
-    const [storedPreferences, routeResult] = await Promise.all([
-      loadUserPreferences(),
-      apiService.fetchRoutes().catch(() => null),
-    ]);
+    const routeResult = await apiService.fetchRoutes().catch(() => null);
 
-    setPreferences(storedPreferences);
     if (routeResult) {
       setRoutes(routeResult);
     } else {
@@ -118,16 +111,8 @@ export default function RoutesScreen({ navigation }: RoutesScreenProps) {
     .sort((a, b) => {
       const favoriteOrder = Number(favoriteIds.has(b.route_id)) - Number(favoriteIds.has(a.route_id));
       if (favoriteOrder) return favoriteOrder;
-      return (a.route_short_name || '').localeCompare(b.route_short_name || '', 'ca', { numeric: true });
-    }), [favoriteIds, routes, searchQuery, selectedAgency]);
-
-  const toggleFavorite = useCallback((routeId: string) => {
-    setPreferences((current) => {
-      const next = withToggledFavorite(current, routeId);
-      void saveUserPreferences(next);
-      return next;
-    });
-  }, []);
+      return (a.route_short_name || '').localeCompare(b.route_short_name || '', locale, { numeric: true });
+    }), [favoriteIds, locale, routes, searchQuery, selectedAgency]);
 
   const renderAgencyVisual = (agency: AgencyFilter, active: boolean) => {
     const visual = AGENCY_VISUALS[agency];
@@ -148,27 +133,32 @@ export default function RoutesScreen({ navigation }: RoutesScreenProps) {
     <SafeAreaView style={styles.container} edges={['top', 'right', 'bottom', 'left']}>
       <StatusBar style="dark" />
       <View style={styles.header}>
-        <View style={styles.routeSketch} pointerEvents="none">
-          <View style={[styles.sketchLine, styles.sketchLineOne]} />
-          <View style={[styles.sketchLine, styles.sketchLineTwo]} />
-          <View style={[styles.sketchStop, styles.sketchStopOne]} />
-          <View style={[styles.sketchStop, styles.sketchStopTwo]} />
-          <HeaderBus />
-          <HeaderBus reverse />
-        </View>
         <TouchableOpacity
           style={styles.backButton}
           onPress={() => navigation.goBack()}
           accessibilityRole="button"
-          accessibilityLabel="Tornar a l’inici"
+          accessibilityLabel={t('routes.back')}
         >
           <MaterialCommunityIcons name="arrow-left" size={21} color={colors.primary} />
         </TouchableOpacity>
         <View style={styles.headerCopy}>
-          <Text style={styles.headerTitle}>Totes les línies</Text>
+          <Text
+            style={styles.headerTitle}
+            numberOfLines={1}
+          >{t('routes.title')}</Text>
         </View>
-        <View style={styles.countBadge}>
-          <Text style={styles.countBadgeText}>{filteredRoutes.length}</Text>
+        <View style={styles.routeSketch} pointerEvents="none">
+          <View style={styles.trackGroup}>
+            <View style={[styles.sketchLine, styles.sketchLineOne]} />
+            <View style={[styles.sketchLine, styles.sketchLineTwo]} />
+            <View style={[styles.sketchStop, styles.sketchStopOne]} />
+            <View style={[styles.sketchStop, styles.sketchStopTwo]} />
+            <HeaderBus />
+            <HeaderBus reverse />
+          </View>
+          <View style={styles.countBadge}>
+            <Text style={styles.countBadgeText}>{filteredRoutes.length}</Text>
+          </View>
         </View>
       </View>
 
@@ -179,19 +169,19 @@ export default function RoutesScreen({ navigation }: RoutesScreenProps) {
             style={styles.searchInput}
             value={searchQuery}
             onChangeText={setSearchQuery}
-            placeholder="Línia, destinació o codi"
+            placeholder={t('routes.searchPlaceholder')}
             placeholderTextColor={colors.subtle}
             maxLength={80}
             returnKeyType="search"
             autoCorrect={false}
-            accessibilityLabel="Cercar al catàleg de línies"
+            accessibilityLabel={t('routes.searchA11y')}
           />
           {searchQuery ? (
             <TouchableOpacity
               onPress={() => setSearchQuery('')}
               hitSlop={8}
               accessibilityRole="button"
-              accessibilityLabel="Esborrar cerca"
+              accessibilityLabel={t('routes.clearSearch')}
             >
               <MaterialCommunityIcons name="close-circle" size={19} color={colors.subtle} />
             </TouchableOpacity>
@@ -227,23 +217,25 @@ export default function RoutesScreen({ navigation }: RoutesScreenProps) {
                       accessibilityState={{ selected: active }}
                     >
                       {renderAgencyVisual(agency, active)}
-                      <Text style={[styles.agencyText, active && styles.agencyTextActive]}>{agency}</Text>
+                      <Text style={[styles.agencyText, active && styles.agencyTextActive]}>
+                        {getAgencyLabel(agency, language)}
+                      </Text>
                     </TouchableOpacity>
                   );
                 }}
               />
               <View style={styles.listHeading}>
                 <Text style={styles.listHeadingTitle}>
-                  {searchQuery || selectedAgency !== 'Tots' ? 'Resultats' : 'Línies disponibles'}
+                  {t(searchQuery || selectedAgency !== 'Tots' ? 'common.results' : 'routes.available')}
                 </Text>
-                <Text style={styles.listHeadingMeta}>Toca una línia per seleccionar-la</Text>
+                <Text style={styles.listHeadingMeta}>{t('routes.selectHint')}</Text>
               </View>
             </View>
           )}
           ListEmptyComponent={loading ? (
             <View style={styles.emptyState}>
               <ActivityIndicator color={colors.primary} />
-              <Text style={styles.emptyText}>Carregant el catàleg…</Text>
+              <Text style={styles.emptyText}>{t('routes.loading')}</Text>
             </View>
           ) : (
             <View style={styles.emptyState}>
@@ -253,11 +245,11 @@ export default function RoutesScreen({ navigation }: RoutesScreenProps) {
                 color={colors.muted}
               />
               <Text style={styles.emptyTitle}>
-                {loadFailed ? 'No hem pogut carregar les línies' : 'No hi ha coincidències'}
+                {t(loadFailed ? 'routes.loadFailed' : 'home.noMatches')}
               </Text>
               {loadFailed ? (
                 <TouchableOpacity style={styles.retryButton} onPress={() => void loadData()}>
-                  <Text style={styles.retryText}>Tornar-ho a provar</Text>
+                  <Text style={styles.retryText}>{t('routes.retry')}</Text>
                 </TouchableOpacity>
               ) : null}
             </View>
@@ -265,46 +257,55 @@ export default function RoutesScreen({ navigation }: RoutesScreenProps) {
           renderItem={({ item }) => {
             const favorite = favoriteIds.has(item.route_id);
             return (
-              <View style={[
-                styles.routeRow,
-                { backgroundColor: routePastelColor(item.route_color, 0.1) },
-              ]}>
-                <TouchableOpacity
-                  style={styles.routeMain}
-                  onPress={() => navigation.popTo('Home', { selectedRouteId: item.route_id })}
-                  activeOpacity={0.82}
-                  accessibilityRole="button"
-                  accessibilityLabel={`Seleccionar línia ${item.route_short_name}, ${getRouteTitle(item)}`}
-                >
-                  <View style={[
-                    styles.routeBadge,
-                    { backgroundColor: safeHexColor(item.route_color, colors.primary) },
-                  ]}>
-                    <Text style={[
-                      styles.routeBadgeText,
-                      { color: safeHexColor(item.route_text_color, colors.white) },
-                    ]}>{item.route_short_name || 'Bus'}</Text>
-                  </View>
-                  <View style={styles.routeCopy}>
-                    <Text style={styles.routeName} numberOfLines={1}>{getRouteTitle(item)}</Text>
-                    <Text style={styles.routeMeta}>{getAgencyFilter(item)} · servei disponible</Text>
-                  </View>
-                  <MaterialCommunityIcons name="chevron-right" size={21} color={colors.borderStrong} />
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.starButton, favorite && styles.starButtonActive]}
-                  onPress={() => toggleFavorite(item.route_id)}
-                  hitSlop={6}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected: favorite }}
-                  accessibilityLabel={`${favorite ? 'Treure' : 'Afegir'} ${item.route_short_name} ${favorite ? 'de' : 'a'} favorites`}
-                >
-                  <MaterialCommunityIcons
-                    name={favorite ? 'star' : 'star-outline'}
-                    size={21}
-                    color={favorite ? colors.primary : colors.transitDark}
-                  />
-                </TouchableOpacity>
+              <View style={styles.routeCard}>
+                <View style={[
+                  styles.routeRow,
+                  { backgroundColor: routePastelColor(item.route_color, 0.075) },
+                ]}>
+                  <TouchableOpacity
+                    style={styles.routeMain}
+                    onPress={() => navigation.popTo('Home', { selectedRouteId: item.route_id })}
+                    activeOpacity={0.82}
+                    accessibilityRole="button"
+                    accessibilityLabel={t('routes.selectA11y', {
+                      line: item.route_short_name,
+                      name: getRouteTitle(item, language),
+                    })}
+                  >
+                    <View style={[
+                      styles.routeBadge,
+                      { backgroundColor: safeHexColor(item.route_color, colors.primary) },
+                    ]}>
+                      <Text style={[
+                        styles.routeBadgeText,
+                        { color: safeHexColor(item.route_text_color, colors.white) },
+                      ]}>{item.route_short_name || 'Bus'}</Text>
+                    </View>
+                    <View style={styles.routeCopy}>
+                      <Text style={styles.routeName} numberOfLines={1}>{getRouteTitle(item, language)}</Text>
+                      <Text style={styles.routeMeta}>
+                        {getAgencyLabel(getAgencyFilter(item), language)} · {t('routes.availableService')}
+                      </Text>
+                    </View>
+                    <MaterialCommunityIcons name="chevron-right" size={21} color={colors.borderStrong} />
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.starButton, favorite && styles.starButtonActive]}
+                    onPress={() => toggleFavorite(item.route_id)}
+                    hitSlop={6}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: favorite }}
+                    accessibilityLabel={t(favorite ? 'home.removeFavorite' : 'home.addFavorite', {
+                      line: item.route_short_name,
+                    })}
+                  >
+                    <MaterialCommunityIcons
+                      name={favorite ? 'star' : 'star-outline'}
+                      size={21}
+                      color={favorite ? colors.primary : colors.transitDark}
+                    />
+                  </TouchableOpacity>
+                </View>
               </View>
             );
           }}
@@ -318,17 +319,34 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   header: {
     minHeight: 76,
-    paddingHorizontal: spacing.xl,
+    paddingHorizontal: spacing.lg,
+    paddingRight: 132,
     paddingVertical: spacing.sm,
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
     backgroundColor: colors.background,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.md,
+    gap: 10,
     overflow: 'hidden',
   },
-  routeSketch: { position: 'absolute', top: 0, right: 0, bottom: 0, width: 184 },
+  routeSketch: {
+    position: 'absolute',
+    top: 10,
+    right: 10,
+    width: 112,
+    height: 56,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  trackGroup: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    transform: [{ rotate: '-4deg' }],
+  },
   sketchLine: {
     position: 'absolute',
     height: 1.5,
@@ -336,8 +354,8 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primary,
     opacity: 0.42,
   },
-  sketchLineOne: { width: 174, right: -18, top: 22, transform: [{ rotate: '-4deg' }] },
-  sketchLineTwo: { width: 174, right: -18, top: 51, transform: [{ rotate: '-4deg' }] },
+  sketchLineOne: { left: 0, right: 0, top: 14 },
+  sketchLineTwo: { left: 0, right: 0, top: 40 },
   sketchStop: {
     position: 'absolute',
     width: 8,
@@ -348,8 +366,8 @@ const styles = StyleSheet.create({
     borderColor: colors.primary,
     opacity: 0.54,
   },
-  sketchStopOne: { right: 126, top: 16 },
-  sketchStopTwo: { right: 36, top: 45 },
+  sketchStopOne: { left: 16, top: 10 },
+  sketchStopTwo: { right: 11, top: 36 },
   headerBus: {
     position: 'absolute',
     width: 11,
@@ -360,8 +378,8 @@ const styles = StyleSheet.create({
     shadowRadius: 3,
     elevation: 4,
   },
-  headerBusForward: { top: 8, right: 73, transform: [{ rotate: '86deg' }] },
-  headerBusReverse: { top: 37, right: 124, transform: [{ rotate: '-94deg' }] },
+  headerBusForward: { top: 0, right: 27, transform: [{ rotate: '90deg' }] },
+  headerBusReverse: { top: 26, left: 27, transform: [{ rotate: '-90deg' }] },
   headerBusBody: {
     width: 11,
     height: 29,
@@ -426,16 +444,19 @@ const styles = StyleSheet.create({
     letterSpacing: -0.7,
   },
   countBadge: {
-    minWidth: 44,
-    height: 30,
+    position: 'absolute',
+    top: 18,
+    left: 35,
+    minWidth: 42,
+    height: 21,
     paddingHorizontal: spacing.xs,
     borderRadius: radii.pill,
-    backgroundColor: colors.background,
+    backgroundColor: 'rgba(241,239,232,0.94)',
     alignItems: 'center',
     justifyContent: 'center',
     zIndex: 2,
   },
-  countBadgeText: { fontFamily: fonts.label, color: colors.primary, fontSize: 11, lineHeight: 14 },
+  countBadgeText: { fontFamily: fonts.label, color: colors.primary, fontSize: 9.5, lineHeight: 12 },
   catalog: { flex: 1, paddingHorizontal: spacing.xl },
   catalogLandscape: { paddingHorizontal: Math.max(spacing.xl, 34) },
   searchShell: {
@@ -457,19 +478,21 @@ const styles = StyleSheet.create({
     lineHeight: 15,
   },
   listContent: { paddingBottom: spacing.xl },
-  agencyRow: { gap: 2, paddingVertical: spacing.sm, paddingRight: spacing.xl },
+  agencyRow: { gap: 6, paddingVertical: spacing.sm, paddingRight: spacing.xl },
   agencyChip: {
     height: 32,
     minWidth: 62,
     paddingHorizontal: spacing.sm,
     borderRadius: 6,
-    backgroundColor: 'transparent',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 5,
   },
-  agencyChipActive: { backgroundColor: colors.transitDark },
+  agencyChipActive: { backgroundColor: colors.transitDark, borderColor: colors.transitDark },
   agencyLogo: { width: 20, height: 14 },
   agencyText: { fontFamily: fonts.medium, color: colors.inkSoft, fontSize: 9.5, lineHeight: 12 },
   agencyTextActive: { fontFamily: fonts.label, color: colors.white },
@@ -477,14 +500,23 @@ const styles = StyleSheet.create({
   listHeadingTitle: { fontFamily: fonts.display, color: colors.ink, fontSize: 15, lineHeight: 19 },
   listHeadingMeta: { fontFamily: fonts.body, color: colors.muted, fontSize: 9.5, lineHeight: 13, marginTop: 1 },
   columnWrapper: { gap: spacing.xl },
+  routeCard: {
+    flex: 1,
+    marginBottom: spacing.xs,
+    padding: 2,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    borderRadius: 10,
+    backgroundColor: colors.surface,
+    overflow: 'hidden',
+  },
   routeRow: {
     flex: 1,
-    minHeight: 57,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
+    minHeight: 50,
+    borderRadius: 8,
     backgroundColor: colors.background,
-    paddingHorizontal: 2,
-    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 1,
     flexDirection: 'row',
     alignItems: 'center',
   },

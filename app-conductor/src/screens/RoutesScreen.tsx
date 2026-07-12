@@ -32,7 +32,15 @@ import {
   withToggledFavorite,
   type UserPreferences,
 } from '../services/userPreferences';
-import { cardShadow, colors, fonts, radii, safeHexColor, spacing, typography } from '../theme';
+import {
+  colors,
+  fonts,
+  radii,
+  routePastelColor,
+  safeHexColor,
+  spacing,
+  typography,
+} from '../theme';
 
 type RoutesScreenProps = NativeStackScreenProps<RootStackParamList, 'Routes'>;
 type ChipVisual = {
@@ -48,6 +56,19 @@ const AGENCY_VISUALS: Record<AgencyFilter, ChipVisual> = {
   Rodalies: { image: require('../../assets/logo_rodalies.png') },
   Altres: { icon: 'bus-multiple' },
 };
+
+function HeaderBus({ reverse = false }: { reverse?: boolean }) {
+  return (
+    <View style={[styles.headerBus, reverse ? styles.headerBusReverse : styles.headerBusForward]}>
+      <View style={styles.headerBusBody}>
+        <View style={styles.headerBusFront} />
+        <View style={styles.headerBusBack} />
+        <View style={styles.headerBusWindshield} />
+        <View style={styles.headerBusRoofUnit} />
+      </View>
+    </View>
+  );
+}
 
 export default function RoutesScreen({ navigation }: RoutesScreenProps) {
   const { width, height } = useWindowDimensions();
@@ -125,13 +146,15 @@ export default function RoutesScreen({ navigation }: RoutesScreenProps) {
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'right', 'bottom', 'left']}>
-      <StatusBar style="light" />
+      <StatusBar style="dark" />
       <View style={styles.header}>
         <View style={styles.routeSketch} pointerEvents="none">
           <View style={[styles.sketchLine, styles.sketchLineOne]} />
           <View style={[styles.sketchLine, styles.sketchLineTwo]} />
           <View style={[styles.sketchStop, styles.sketchStopOne]} />
           <View style={[styles.sketchStop, styles.sketchStopTwo]} />
+          <HeaderBus />
+          <HeaderBus reverse />
         </View>
         <TouchableOpacity
           style={styles.backButton}
@@ -139,10 +162,9 @@ export default function RoutesScreen({ navigation }: RoutesScreenProps) {
           accessibilityRole="button"
           accessibilityLabel="Tornar a l’inici"
         >
-          <MaterialCommunityIcons name="arrow-left" size={22} color={colors.transitDark} />
+          <MaterialCommunityIcons name="arrow-left" size={21} color={colors.primary} />
         </TouchableOpacity>
         <View style={styles.headerCopy}>
-          <Text style={styles.headerKicker}>CATÀLEG DE SERVEI</Text>
           <Text style={styles.headerTitle}>Totes les línies</Text>
         </View>
         <View style={styles.countBadge}>
@@ -243,7 +265,10 @@ export default function RoutesScreen({ navigation }: RoutesScreenProps) {
           renderItem={({ item }) => {
             const favorite = favoriteIds.has(item.route_id);
             return (
-              <View style={styles.routeRow}>
+              <View style={[
+                styles.routeRow,
+                { backgroundColor: routePastelColor(item.route_color, 0.1) },
+              ]}>
                 <TouchableOpacity
                   style={styles.routeMain}
                   onPress={() => navigation.popTo('Home', { selectedRouteId: item.route_id })}
@@ -292,74 +317,135 @@ export default function RoutesScreen({ navigation }: RoutesScreenProps) {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   header: {
-    minHeight: 106,
+    minHeight: 76,
     paddingHorizontal: spacing.xl,
-    paddingVertical: spacing.lg,
-    backgroundColor: colors.transit,
+    paddingVertical: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+    backgroundColor: colors.background,
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.md,
     overflow: 'hidden',
   },
-  routeSketch: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, opacity: 0.22 },
+  routeSketch: { position: 'absolute', top: 0, right: 0, bottom: 0, width: 184 },
   sketchLine: {
     position: 'absolute',
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: colors.white,
+    height: 1.5,
+    borderRadius: 1,
+    backgroundColor: colors.primary,
+    opacity: 0.42,
   },
-  sketchLineOne: { width: 190, right: -28, top: 23, transform: [{ rotate: '-10deg' }] },
-  sketchLineTwo: { width: 150, right: 42, bottom: 15, transform: [{ rotate: '18deg' }] },
+  sketchLineOne: { width: 174, right: -18, top: 22, transform: [{ rotate: '-4deg' }] },
+  sketchLineTwo: { width: 174, right: -18, top: 51, transform: [{ rotate: '-4deg' }] },
   sketchStop: {
     position: 'absolute',
-    width: 13,
-    height: 13,
-    borderRadius: 7,
-    backgroundColor: colors.sun,
-    borderWidth: 3,
-    borderColor: colors.white,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: colors.background,
+    borderWidth: 1.5,
+    borderColor: colors.primary,
+    opacity: 0.54,
   },
-  sketchStopOne: { right: 79, top: 15 },
-  sketchStopTwo: { right: 28, bottom: 10 },
+  sketchStopOne: { right: 126, top: 16 },
+  sketchStopTwo: { right: 36, top: 45 },
+  headerBus: {
+    position: 'absolute',
+    width: 11,
+    height: 29,
+    shadowColor: colors.ink,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.24,
+    shadowRadius: 3,
+    elevation: 4,
+  },
+  headerBusForward: { top: 8, right: 73, transform: [{ rotate: '86deg' }] },
+  headerBusReverse: { top: 37, right: 124, transform: [{ rotate: '-94deg' }] },
+  headerBusBody: {
+    width: 11,
+    height: 29,
+    borderRadius: 3,
+    borderWidth: 1,
+    borderColor: colors.ink,
+    backgroundColor: colors.surface,
+    overflow: 'hidden',
+  },
+  headerBusFront: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 6,
+    backgroundColor: '#D52B36',
+  },
+  headerBusBack: {
+    position: 'absolute',
+    right: 0,
+    bottom: 0,
+    left: 0,
+    height: 5,
+    backgroundColor: '#D52B36',
+  },
+  headerBusWindshield: {
+    position: 'absolute',
+    top: 2,
+    right: 2,
+    left: 2,
+    height: 2,
+    borderRadius: 1,
+    backgroundColor: '#263A42',
+  },
+  headerBusRoofUnit: {
+    position: 'absolute',
+    top: 11,
+    right: 2,
+    left: 2,
+    height: 7,
+    borderRadius: 1.5,
+    borderWidth: 0.5,
+    borderColor: '#A7B3AE',
+    backgroundColor: '#E6E8E3',
+  },
   backButton: {
-    width: 42,
-    height: 42,
-    borderRadius: radii.md,
-    backgroundColor: colors.white,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    backgroundColor: colors.surface,
     alignItems: 'center',
     justifyContent: 'center',
   },
   headerCopy: { flex: 1, minWidth: 0 },
-  headerKicker: {
-    ...typography.eyebrow,
-    color: 'rgba(255,255,255,0.82)',
-  },
   headerTitle: {
-    ...typography.screenTitle,
-    color: colors.white,
+    color: colors.ink,
+    fontFamily: fonts.hero,
+    fontSize: 29,
+    lineHeight: 32,
+    letterSpacing: -0.7,
   },
   countBadge: {
-    minWidth: 50,
-    height: 34,
-    paddingHorizontal: spacing.sm,
+    minWidth: 44,
+    height: 30,
+    paddingHorizontal: spacing.xs,
     borderRadius: radii.pill,
-    backgroundColor: colors.primary,
+    backgroundColor: colors.background,
     alignItems: 'center',
     justifyContent: 'center',
+    zIndex: 2,
   },
-  countBadgeText: { ...typography.badge, color: colors.white },
-  catalog: { flex: 1, paddingHorizontal: spacing.lg },
+  countBadgeText: { fontFamily: fonts.label, color: colors.primary, fontSize: 11, lineHeight: 14 },
+  catalog: { flex: 1, paddingHorizontal: spacing.xl },
   catalogLandscape: { paddingHorizontal: Math.max(spacing.xl, 34) },
   searchShell: {
-    height: 52,
-    marginTop: -13,
-    paddingHorizontal: spacing.lg,
-    borderRadius: radii.md,
-    backgroundColor: colors.white,
+    height: 44,
+    paddingHorizontal: 2,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.borderStrong,
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
-    ...cardShadow,
   },
   searchInput: {
     flex: 1,
@@ -367,70 +453,65 @@ const styles = StyleSheet.create({
     paddingVertical: 0,
     color: colors.ink,
     fontFamily: fonts.body,
-    fontSize: 14,
-    lineHeight: 18,
-    fontWeight: '600',
+    fontSize: 11.5,
+    lineHeight: 15,
   },
   listContent: { paddingBottom: spacing.xl },
-  agencyRow: { gap: spacing.sm, paddingVertical: spacing.lg, paddingRight: spacing.xl },
+  agencyRow: { gap: 2, paddingVertical: spacing.sm, paddingRight: spacing.xl },
   agencyChip: {
-    height: 38,
-    minWidth: 90,
-    paddingHorizontal: spacing.md,
-    borderRadius: radii.md,
-    borderWidth: 1,
-    borderColor: colors.borderStrong,
-    backgroundColor: colors.canvas,
+    height: 32,
+    minWidth: 62,
+    paddingHorizontal: spacing.sm,
+    borderRadius: 6,
+    backgroundColor: 'transparent',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: spacing.sm,
+    gap: 5,
   },
-  agencyChipActive: { backgroundColor: colors.transitDark, borderColor: colors.transitDark },
-  agencyLogo: { width: 22, height: 18 },
-  agencyText: { ...typography.control, color: colors.inkSoft },
-  agencyTextActive: { color: colors.white },
-  listHeading: { marginBottom: spacing.md },
-  listHeadingTitle: { ...typography.sectionTitle, color: colors.ink },
-  listHeadingMeta: { ...typography.meta, color: colors.muted, marginTop: 1 },
-  columnWrapper: { gap: spacing.md },
+  agencyChipActive: { backgroundColor: colors.transitDark },
+  agencyLogo: { width: 20, height: 14 },
+  agencyText: { fontFamily: fonts.medium, color: colors.inkSoft, fontSize: 9.5, lineHeight: 12 },
+  agencyTextActive: { fontFamily: fonts.label, color: colors.white },
+  listHeading: { marginTop: spacing.xs, marginBottom: spacing.sm },
+  listHeadingTitle: { fontFamily: fonts.display, color: colors.ink, fontSize: 15, lineHeight: 19 },
+  listHeadingMeta: { fontFamily: fonts.body, color: colors.muted, fontSize: 9.5, lineHeight: 13, marginTop: 1 },
+  columnWrapper: { gap: spacing.xl },
   routeRow: {
     flex: 1,
-    minHeight: 70,
-    marginBottom: spacing.sm,
-    borderRadius: radii.md,
-    backgroundColor: colors.white,
-    borderWidth: 1,
-    borderColor: colors.border,
-    padding: spacing.sm,
+    minHeight: 57,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+    backgroundColor: colors.background,
+    paddingHorizontal: 2,
+    paddingVertical: spacing.xs,
     flexDirection: 'row',
     alignItems: 'center',
   },
   routeMain: {
     flex: 1,
     minWidth: 0,
-    minHeight: 52,
+    minHeight: 48,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.md,
+    gap: spacing.sm,
   },
   routeBadge: {
-    minWidth: 48,
-    height: 31,
-    paddingHorizontal: spacing.sm,
-    borderRadius: radii.sm,
+    minWidth: 42,
+    height: 27,
+    paddingHorizontal: 6,
+    borderRadius: 5,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  routeBadgeText: { ...typography.badge, fontSize: 13 },
+  routeBadgeText: { ...typography.badge, fontSize: 10, lineHeight: 12 },
   routeCopy: { flex: 1, minWidth: 0 },
-  routeName: { ...typography.cardTitle, color: colors.ink },
-  routeMeta: { ...typography.meta, color: colors.muted, marginTop: 2 },
+  routeName: { fontFamily: fonts.label, color: colors.ink, fontSize: 10.5, lineHeight: 14 },
+  routeMeta: { fontFamily: fonts.body, color: colors.muted, fontSize: 8.5, lineHeight: 11, marginTop: 1 },
   starButton: {
-    width: 38,
-    height: 38,
-    borderRadius: radii.md,
-    backgroundColor: colors.transitWash,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     alignItems: 'center',
     justifyContent: 'center',
   },

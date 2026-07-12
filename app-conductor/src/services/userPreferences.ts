@@ -3,7 +3,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 const STORAGE_KEY = '@alvolant/user-preferences/v1';
 const STORAGE_VERSION = 1;
 const MAX_FAVORITES = 24;
-const MAX_RECENTS = 8;
+const MAX_RECENTS = 4;
 const MAX_ROUTE_ID_LENGTH = 160;
 const MAX_STORED_BYTES = 32_000;
 

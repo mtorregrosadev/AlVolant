@@ -1,28 +1,26 @@
-import { Platform } from 'react-native';
-
 export const colors = {
-  background: '#F6F3EC',
-  canvas: '#FBF9F4',
-  surface: '#FFFFFF',
-  surfaceMuted: '#F0EDE6',
-  ink: '#202431',
-  inkSoft: '#4E5668',
-  muted: '#747D90',
-  subtle: '#9AA2B2',
-  border: '#E1E4EA',
-  borderStrong: '#CDD2DC',
-  primary: '#D93545',
-  primaryPressed: '#B92737',
-  primarySoft: '#FCE8E8',
-  primaryWash: '#FFF5F5',
-  transit: '#D93545',
-  transitDark: '#202431',
-  transitSoft: '#FCE8E8',
-  transitWash: '#F0EDE6',
-  sun: '#FFFFFF',
-  success: '#20B768',
-  warning: '#D97706',
-  danger: '#DC3545',
+  background: '#F1EFE8',
+  canvas: '#F6F4EE',
+  surface: '#FBFAF6',
+  surfaceMuted: '#E7E6DE',
+  ink: '#202520',
+  inkSoft: '#434B45',
+  muted: '#70756D',
+  subtle: '#8A9087',
+  border: '#D7D4C9',
+  borderStrong: '#BDC2B8',
+  primary: '#176B5A',
+  primaryPressed: '#0F5144',
+  primarySoft: '#E0EAE4',
+  primaryWash: '#F2F6F3',
+  transit: '#176B5A',
+  transitDark: '#202520',
+  transitSoft: '#E0EAE4',
+  transitWash: '#EAE8E1',
+  sun: '#FBFAF6',
+  success: '#178A5B',
+  warning: '#B86B10',
+  danger: '#C74646',
   mapBackground: '#0A1628',
   white: '#FFFFFF',
 } as const;
@@ -53,10 +51,12 @@ export const cardShadow = {
 } as const;
 
 export const fonts = {
-  hero: Platform.select({ ios: 'Noteworthy', android: 'sans-serif-medium', default: 'System' }),
-  display: Platform.select({ ios: 'System', android: 'sans-serif', default: 'System' }),
-  body: Platform.select({ ios: 'System', android: 'sans-serif', default: 'System' }),
-  label: Platform.select({ ios: 'System', android: 'sans-serif-medium', default: 'System' }),
+  hero: 'Newsreader_500Medium',
+  display: 'Inter_700Bold',
+  body: 'Inter_400Regular',
+  medium: 'Inter_500Medium',
+  label: 'Inter_600SemiBold',
+  strong: 'Inter_700Bold',
 } as const;
 
 export const typography = {
@@ -64,28 +64,28 @@ export const typography = {
     fontFamily: fonts.label,
     fontSize: 9,
     lineHeight: 12,
-    fontWeight: '700',
+    fontWeight: '400',
     letterSpacing: 1.1,
   },
   screenTitle: {
     fontFamily: fonts.display,
     fontSize: 24,
     lineHeight: 29,
-    fontWeight: '700',
+    fontWeight: '400',
     letterSpacing: -0.25,
   },
   sectionTitle: {
     fontFamily: fonts.display,
     fontSize: 20,
     lineHeight: 24,
-    fontWeight: '700',
+    fontWeight: '400',
     letterSpacing: -0.2,
   },
   cardTitle: {
-    fontFamily: fonts.body,
+    fontFamily: fonts.label,
     fontSize: 13,
     lineHeight: 17,
-    fontWeight: '600',
+    fontWeight: '400',
   },
   body: {
     fontFamily: fonts.body,
@@ -94,10 +94,10 @@ export const typography = {
     fontWeight: '400',
   },
   control: {
-    fontFamily: fonts.body,
+    fontFamily: fonts.label,
     fontSize: 11,
     lineHeight: 15,
-    fontWeight: '600',
+    fontWeight: '400',
   },
   meta: {
     fontFamily: fonts.body,
@@ -106,16 +106,16 @@ export const typography = {
     fontWeight: '400',
   },
   badge: {
-    fontFamily: fonts.body,
+    fontFamily: fonts.strong,
     fontSize: 12,
     lineHeight: 15,
-    fontWeight: '700',
+    fontWeight: '400',
   },
   button: {
-    fontFamily: fonts.body,
+    fontFamily: fonts.strong,
     fontSize: 14,
     lineHeight: 18,
-    fontWeight: '700',
+    fontWeight: '400',
   },
 } as const;
 
@@ -124,4 +124,25 @@ const HEX_COLOR = /^[0-9A-F]{6}$/i;
 export function safeHexColor(value: string | null | undefined, fallback: string) {
   const normalized = value?.trim().replace(/^#/, '') ?? '';
   return HEX_COLOR.test(normalized) ? `#${normalized.toUpperCase()}` : fallback;
+}
+
+function hexChannels(value: string) {
+  return [1, 3, 5].map((index) => Number.parseInt(value.slice(index, index + 2), 16));
+}
+
+export function routePastelColor(
+  value: string | null | undefined,
+  strength = 0.1,
+) {
+  const routeChannels = hexChannels(safeHexColor(value, colors.primary));
+  const surfaceChannels = hexChannels(colors.surface);
+  const mix = Math.max(0, Math.min(0.2, strength));
+
+  const channels = routeChannels.map((channel, index) =>
+    Math.round(surfaceChannels[index] + (channel - surfaceChannels[index]) * mix));
+
+  return `#${channels
+    .map((channel) => channel.toString(16).padStart(2, '0'))
+    .join('')
+    .toUpperCase()}`;
 }

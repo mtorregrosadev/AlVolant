@@ -1208,14 +1208,16 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
             })}
           </View>
         ) : null}
-        <TouchableOpacity
-          style={[styles.mapThemeTrigger, usesLightChrome && styles.mapChromeLight]}
-          onPress={() => setIsMapThemePickerOpen((isOpen) => !isOpen)}
-          accessibilityRole="button"
-          accessibilityLabel="Canviar el tipus de mapa"
-        >
-          <MaterialCommunityIcons name="layers-outline" size={21} color={chromeTextColor} />
-        </TouchableOpacity>
+        {!isMapThemePickerOpen ? (
+          <TouchableOpacity
+            style={[styles.mapThemeTrigger, usesLightChrome && styles.mapChromeLight]}
+            onPress={() => setIsMapThemePickerOpen(true)}
+            accessibilityRole="button"
+            accessibilityLabel="Canviar el tipus de mapa"
+          >
+            <MaterialCommunityIcons name="layers-outline" size={21} color={chromeTextColor} />
+          </TouchableOpacity>
+        ) : null}
         <TouchableOpacity
           style={[
             styles.mapRecenterTrigger,
@@ -1245,7 +1247,6 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
               <MaterialCommunityIcons name="bus-stop" size={18} color="#FFFFFF" />
             </View>
             <View style={styles.driverStopInfo}>
-              <Text style={[styles.driverEyebrow, { color: chromeMutedTextColor }]}>PROPERA PARADA</Text>
               <Text style={[styles.driverStopName, { color: chromeTextColor }]} numberOfLines={1}>
                 {nextStop?.stop_name || 'Calculant parada'}
               </Text>
@@ -1499,12 +1500,6 @@ const styles = StyleSheet.create({
   driverStopInfo: {
     flex: 1,
     minWidth: 0,
-  },
-  driverEyebrow: {
-    fontSize: 9,
-    lineHeight: 11,
-    fontWeight: '900',
-    letterSpacing: 1,
   },
   driverStopName: {
     fontSize: 14,

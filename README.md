@@ -1,8 +1,144 @@
-# Route-TMB BFF
+# App de conducció i BFF de mobilitat
 
-Backend-For-Frontend (BFF) service for the Barcelona Bus Driver Situational Awareness application. This service acts as a centralized gateway to ingest static and real-time transit data from the ATM (T-mobilitat) API, normalize it, and serve it to frontend clients.
+Aplicació mòbil per preparar i seguir serveis d’autobús sobre la xarxa integrada de transport. El repositori inclou una app Expo/React Native orientada a iPhone i un Backend-for-Frontend FastAPI que agrega GTFS estàtic, GTFS-Realtime i informació de trànsit.
 
-## Architecture
+<p align="center">
+  <img src="docs/screenshots/home.png" width="30%" alt="Selecció de línia i preferències locals">
+  &nbsp;
+  <img src="docs/screenshots/routes.png" width="30%" alt="Catàleg complet de línies">
+  &nbsp;
+  <img src="docs/screenshots/map.png" width="30%" alt="Navegació sobre el mapa fosc">
+</p>
+
+## Què permet fer
+
+- Cercar i filtrar 1.000+ serveis per operador, codi o destinació.
+- Consultar un catàleg complet de línies en una pantalla independent.
+- Guardar favorites i fins a quatre rutes recents localment, sense compte d’usuari.
+- Seleccionar sentit, sortida programada i vehicle abans d’iniciar el servei.
+- Navegar sobre un mapa fosc amb ruta, parades, posició projectada, edificis 3D i trànsit.
+- Treballar en retrat i horitzontal respectant les safe areas de l’iPhone.
+
+Les preferències es desen amb AsyncStorage, estan versionades, validades i limitades de mida. No s’hi desa cap dada sensible ni credencial d’usuari.
+
+## Arquitectura
+
+```text
+ATM GTFS / GTFS-RT          TomTom Traffic
+          \                    /
+           \                  /
+            v                v
+         FastAPI BFF  <-->  Redis
+              |
+              | HTTPS + X-API-Key
+              | WebSocket /api/v1/ws/live
+              v
+       Expo / React Native
+       iPhone portrait + landscape
+```
+
+### App mòbil
+
+- Expo SDK 57 i React Native 0.86.
+- React Navigation amb pantalles d’inici, catàleg i mapa.
+- MapLibre Native amb CARTO i Esri World Imagery.
+- Cache local acotada per a favorites i recents.
+- Peticions amb timeout, validació d’identificadors i HTTPS obligatori fora de desenvolupament.
+
+### BFF
+
+- FastAPI amb respostes ORJSON.
+- Redis per a geometries, metadades i dades en temps real.
+- Autenticació HTTP i WebSocket mitjançant `X-API-Key`.
+- Rate limiting, límits de WebSocket i validació de payloads.
+- Càrrega GTFS en segon pla per no bloquejar l’arrencada.
+
+## Estructura del repositori
+
+```text
+app-conductor/             App Expo / React Native
+  src/screens/             Inici, catàleg i mapa
+  src/services/            API, presentació i preferències locals
+app/                       BFF FastAPI
+  api/v1/                  GTFS, GTFS-RT, trànsit i WebSocket
+  services/                Ingesta, normalització i cache
+tests/                     Proves del backend
+docs/screenshots/          Captures reals de l’iPhone Simulator
+```
+
+## Requisits
+
+- Python 3.12 o superior.
+- Node.js i npm.
+- Redis local o Docker.
+- Xcode amb un iPhone Simulator per executar iOS.
+
+## Configuració
+
+El BFF necessita una clau de desenvolupament a l’entorn:
+
+```ini
+BFF_API_KEY=replace-with-a-development-key
+REDIS_URL=redis://localhost:6379/0
+```
+
+Configura la mateixa clau a l’app:
+
+```bash
+cp app-conductor/.env.example app-conductor/.env.local
+```
+
+`EXPO_PUBLIC_BFF_API_KEY` queda inclosa al bundle i no s’ha de considerar un secret. En producció cal utilitzar HTTPS/WSS i un mecanisme d’autenticació de client adequat.
+
+## Execució local
+
+Instal·la el backend i inicia Redis:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+redis-server
+```
+
+En un altre terminal, inicia el BFF:
+
+```bash
+.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Instal·la i executa l’app:
+
+```bash
+cd app-conductor
+npm install
+npx expo start --dev-client --host lan --port 8081
+```
+
+## API principal
+
+Tots els endpoints de dades requereixen `X-API-Key`.
+
+- `GET /api/v1/gtfs/routes`
+- `GET /api/v1/gtfs/shapes/{route_id}`
+- `GET /api/v1/gtfs/stops/{route_id}`
+- `GET /api/v1/gtfs/routes/{route_id}/upcoming-trips`
+- `GET /api/v1/atm_rt/vehicles/{route_id}`
+- `GET /api/v1/atm_rt/trips/{route_id}`
+- `GET /api/v1/traffic/summary`
+- `WS /api/v1/ws/live`
+
+Swagger UI està disponible a `http://localhost:8000/docs` durant el desenvolupament.
+
+## Verificació
+
+```bash
+cd app-conductor && npx tsc --noEmit
+cd .. && .venv/bin/python -m pytest -q
+git diff --check
+```
+
+## Funcionament del servidor BFF
 
 ```text
                               +--------------------+
@@ -45,60 +181,3 @@ Backend-For-Frontend (BFF) service for the Barcelona Bus Driver Situational Awar
                               | Tablet Application |
                               +--------------------+
 ```
-
-## Prerequisites and Configuration
-
-1. **Environment Configuration**
-   Copy the example environment file and configure the target API URLs:
-   ```bash
-   cp .env.example .env
-   ```
-
-   Ensure the ATM endpoints are defined as follows:
-   ```ini
-   ATM_RT_TRIP_UPDATES_URL=https://t-mobilitat.atm.cat/opendata/trip_updates/user/token/open
-   ATM_RT_ALERTS_URL=https://t-mobilitat.atm.cat/opendata/alerts/user/token/open
-   ATM_RT_VEHICLE_POSITIONS_URL=https://t-mobilitat.atm.cat/opendata/vehicle_positions/user/token/open
-   ATM_GTFS_URL=https://t-mobilitat.atm.cat/opendata/static/download/
-   ```
-
-2. **System Requirements**
-   - Python 3.12+
-   - Redis server (or Docker for containerized deployment)
-   - `curl` available in the system PATH
-
-## Running the Application
-
-Start the required infrastructure and the FastAPI server:
-
-```bash
-# Start the Redis cache
-docker compose up -d redis
-
-# Activate the virtual environment
-source .venv/bin/activate
-
-# Start the FastAPI server via Uvicorn
-uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-*Note: Initial startup requires approximately 30-60 seconds to download and parse the static GTFS ZIP payload into Redis.*
-
-## API Endpoints
-
-The API documentation is available via Swagger UI at `http://localhost:8000/docs` when the server is running.
-
-### Static GTFS Data
-* `GET /api/v1/gtfs/routes` - List all active ATM routes.
-* `GET /api/v1/gtfs/shapes/{route_id}` - Retrieve GeoJSON LineStrings defining the physical path of a route.
-* `GET /api/v1/gtfs/stops/{route_id}` - Retrieve GeoJSON Points for all stops serviced by a route.
-
-### Real-Time Data (GTFS-RT)
-* `GET /api/v1/atm_rt/vehicles` - List of all active vehicles across the entire network.
-* `GET /api/v1/atm_rt/vehicles/{route_id}` - List of active vehicles filtered by specific route.
-* `GET /api/v1/atm_rt/trips` - All real-time stop time updates (network-wide).
-* `GET /api/v1/atm_rt/trips/{route_id}` - Real-time stop time updates filtered by specific route.
-* `GET /api/v1/atm_rt/alerts` - System-wide service alerts and disruption notifications.
-* `GET /api/v1/atm_rt/feed` - The complete, raw merged JSON dump of all real-time data.
-
-### WebSockets
-* `WS /ws/v1/route/{route_id}` - Real-time, bidirectional connection pushing merged static and live data at 30-second intervals to the connected client.

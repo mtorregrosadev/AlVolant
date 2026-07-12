@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   AppState,
   Image,
+  Keyboard,
   ScrollView,
   StyleSheet,
   Text,
@@ -11,6 +12,7 @@ import {
   useWindowDimensions,
   View,
   type ImageSourcePropType,
+  type LayoutChangeEvent,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { StatusBar } from 'expo-status-bar';
@@ -38,7 +40,15 @@ import {
   type RecentRoute,
   type UserPreferences,
 } from '../services/userPreferences';
-import { cardShadow, colors, fonts, radii, safeHexColor, spacing, typography } from '../theme';
+import {
+  colors,
+  fonts,
+  radii,
+  routePastelColor,
+  safeHexColor,
+  spacing,
+  typography,
+} from '../theme';
 
 type HomeScreenProps = NativeStackScreenProps<RootStackParamList, 'Home'>;
 type PreferenceView = 'recent' | 'favorite';
@@ -61,6 +71,8 @@ const AGENCY_VISUALS: Record<AgencyFilter, ChipVisual> = {
 };
 
 const FOREGROUND_REFRESH_MS = 15 * 60 * 1000;
+const ROUTE_ROW_HEIGHT = 47;
+const SEARCH_RESULT_LIMIT = 40;
 
 function sanitizeVehicleId(value: string) {
   return value.toLocaleUpperCase('ca').replace(/[^A-Z0-9-]/g, '').slice(0, 12);
@@ -70,7 +82,6 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const isLandscape = screenWidth > screenHeight;
-  const isCompact = screenHeight < 750;
   const mountedRef = useRef(true);
   const lastRoutesFetchRef = useRef(0);
 
@@ -80,6 +91,7 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
   const [loading, setLoading] = useState(true);
   const [isConnected, setIsConnected] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [isSearchMode, setIsSearchMode] = useState(false);
   const [selectedAgency, setSelectedAgency] = useState<AgencyFilter>('Tots');
   const [preferenceView, setPreferenceView] = useState<PreferenceView>('recent');
   const [preferences, setPreferences] = useState<UserPreferences>({ ...EMPTY_USER_PREFERENCES });
@@ -88,6 +100,8 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
   const [manualVehicle, setManualVehicle] = useState('');
   const [upcomingTrips, setUpcomingTrips] = useState<UpcomingTrip[]>([]);
   const [isLoadingTrips, setIsLoadingTrips] = useState(false);
+  const [discoveryViewportHeight, setDiscoveryViewportHeight] = useState(0);
+  const [routeListTop, setRouteListTop] = useState(0);
 
   const loadRoutes = useCallback(async (showLoading = false) => {
     if (showLoading && mountedRef.current) setLoading(true);
@@ -194,7 +208,7 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
         .map((routeId) => byId.get(routeId))
         .filter((item): item is RouteInfo => Boolean(item))
         .map((item) => ({ route: item }))
-        .slice(0, 8);
+        .slice(0, 4);
     }
 
     return preferences.recentRoutes
@@ -202,11 +216,21 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
         const item = byId.get(recent.routeId);
         return item ? [{ route: item, recent }] : [];
       })
-      .slice(0, 8);
+      .slice(0, 4);
   }, [preferenceView, preferences, routes]);
 
-  const maxVisibleRoutes = isLandscape ? 4 : isCompact ? 2 : 3;
-  const displayedRoutes = filteredRoutes.slice(0, maxVisibleRoutes);
+  const minimumVisibleRoutes = isLandscape ? 4 : 2;
+  const measuredVisibleRoutes = discoveryViewportHeight > 0 && routeListTop > 0
+    ? Math.floor((discoveryViewportHeight - routeListTop - spacing.md) / ROUTE_ROW_HEIGHT)
+    : minimumVisibleRoutes;
+  const maxVisibleRoutes = Math.max(
+    minimumVisibleRoutes,
+    Math.min(isLandscape ? 6 : 8, measuredVisibleRoutes),
+  );
+  const displayedRoutes = filteredRoutes.slice(
+    0,
+    isSearchMode ? SEARCH_RESULT_LIMIT : maxVisibleRoutes,
+  );
 
   const persistPreferences = useCallback((next: UserPreferences) => {
     void saveUserPreferences(next);
@@ -231,6 +255,21 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
   const selectRoute = useCallback((item: RouteInfo, preferredDirection?: 0 | 1) => {
     setSelectedRoute(item);
     setDirectionId(preferredDirection ?? null);
+  }, []);
+
+  const closeSearch = useCallback(() => {
+    setSearchQuery('');
+    setIsSearchMode(false);
+    Keyboard.dismiss();
+  }, []);
+
+  const handleDiscoveryLayout = useCallback((event: LayoutChangeEvent) => {
+    setDiscoveryViewportHeight(event.nativeEvent.layout.height);
+  }, []);
+
+  const handleRoutesHeadingLayout = useCallback((event: LayoutChangeEvent) => {
+    const { y, height } = event.nativeEvent.layout;
+    setRouteListTop(y + height + spacing.xs);
   }, []);
 
   const navigateToMap = useCallback((vehicleId?: string, tripId?: string) => {
@@ -286,12 +325,26 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
   const renderRouteRow = (item: RouteInfo) => {
     const selected = selectedRoute?.route_id === item.route_id;
     const favorite = favoriteIds.has(item.route_id);
+    const routeColor = safeHexColor(item.route_color, colors.primary);
 
     return (
-      <View key={item.route_id} style={[styles.routeRow, selected && styles.routeRowSelected]}>
+      <View
+        key={item.route_id}
+        style={[
+          styles.routeRow,
+          selected && styles.routeRowSelected,
+          {
+            backgroundColor: routePastelColor(item.route_color, selected ? 0.18 : 0.1),
+            borderLeftColor: selected ? routeColor : 'transparent',
+          },
+        ]}
+      >
         <TouchableOpacity
           style={styles.routeMain}
-          onPress={() => selectRoute(item)}
+          onPress={() => {
+            selectRoute(item);
+            if (isSearchMode) closeSearch();
+          }}
           activeOpacity={0.82}
           accessibilityRole="button"
           accessibilityState={{ selected }}
@@ -310,7 +363,6 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
             <Text style={styles.routeName} numberOfLines={1}>{getRouteTitle(item)}</Text>
             <Text style={styles.routeMeta}>{getAgencyFilter(item)}</Text>
           </View>
-          {selected ? <MaterialCommunityIcons name="check-circle" size={20} color={colors.transit} /> : null}
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.starButton, favorite && styles.starButtonActive]}
@@ -336,172 +388,159 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
       <View style={[styles.content, isLandscape && styles.contentLandscape]}>
         <ScrollView
           style={styles.discoveryPane}
-          contentContainerStyle={[styles.discoveryContent, isLandscape && styles.discoveryContentLandscape]}
+          contentContainerStyle={[
+            styles.discoveryContent,
+            isLandscape && styles.discoveryContentLandscape,
+            isSearchMode && styles.discoveryContentSearch,
+          ]}
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
+          onLayout={handleDiscoveryLayout}
         >
-          <View style={styles.liveBar}>
-            <View style={styles.liveLabel}>
-              <MaterialCommunityIcons name="access-point" size={17} color={colors.transitDark} />
-              <Text style={styles.liveLabelText}>XARXA DE SERVEI</Text>
+          {!isSearchMode ? (
+            <View style={styles.liveBar}>
+              <View style={[styles.connectionBadge, !isConnected && styles.connectionBadgeOffline]}>
+                <View style={[styles.connectionDot, { backgroundColor: isConnected ? colors.success : colors.danger }]} />
+                <Text style={styles.connectionText}>{isConnected ? 'Dades en directe' : 'Sense connexió'}</Text>
+              </View>
             </View>
-            <View style={[styles.connectionBadge, !isConnected && styles.connectionBadgeOffline]}>
-              <View style={[styles.connectionDot, { backgroundColor: isConnected ? colors.success : colors.danger }]} />
-              <Text style={styles.connectionText}>{isConnected ? 'Dades en directe' : 'Sense connexió'}</Text>
-            </View>
-          </View>
+          ) : null}
 
-          <View style={styles.heroPanel}>
-            <View style={styles.heroRouteGraphic} pointerEvents="none">
-              <View style={[styles.heroLine, styles.heroLineOne]} />
-              <View style={[styles.heroLine, styles.heroLineTwo]} />
-              <View style={[styles.heroStop, styles.heroStopOne]} />
-              <View style={[styles.heroStop, styles.heroStopTwo]} />
-            </View>
-            <View style={styles.heroCopy}>
-              <Text style={styles.heroEyebrow}>TORN DE CONDUCCIÓ</Text>
-              <Text style={styles.heroTitle}>Quina línia toca avui?</Text>
-              <Text style={styles.heroSubtitle}>Tria servei, direcció i sortida.</Text>
-            </View>
-            <View style={styles.heroBusBadge}>
-              <MaterialCommunityIcons name="bus-side" size={39} color={colors.transitDark} />
-            </View>
-          </View>
+          <View style={[styles.journeyBlock, isSearchMode && styles.journeyBlockSearch]}>
+            {!isSearchMode ? (
+              <>
+                <View style={styles.journeyRail} pointerEvents="none" />
 
-          <View style={styles.searchShell}>
-            <MaterialCommunityIcons name="magnify" size={21} color={colors.transitDark} />
-            <TextInput
-              style={styles.searchInput}
-              value={searchQuery}
-              onChangeText={setSearchQuery}
-              placeholder="Cerca línia o destinació"
-              placeholderTextColor={colors.subtle}
-              maxLength={80}
-              returnKeyType="search"
-              autoCorrect={false}
-              accessibilityLabel="Cercar línies"
-            />
-            {searchQuery ? (
-              <TouchableOpacity onPress={() => setSearchQuery('')} hitSlop={8}>
-                <MaterialCommunityIcons name="close-circle" size={19} color={colors.subtle} />
-              </TouchableOpacity>
+                <View style={styles.heroPanel}>
+                  <View style={styles.heroCopy}>
+                    <Text style={styles.heroTitle}>Quina línia{`\n`}toca avui?</Text>
+                    <Text style={styles.heroSubtitle}>Tria servei, direcció i sortida.</Text>
+                  </View>
+                  <View style={styles.heroBusBadge}>
+                    <MaterialCommunityIcons name="bus" size={25} color={colors.primary} />
+                  </View>
+                </View>
+              </>
+            ) : null}
+
+            <View style={[styles.searchShell, isSearchMode && styles.searchShellFocused]}>
+              <MaterialCommunityIcons name="magnify" size={18} color={colors.inkSoft} />
+              <TextInput
+                style={styles.searchInput}
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+                onFocus={() => setIsSearchMode(true)}
+                placeholder="Cerca línia o destinació"
+                placeholderTextColor={colors.subtle}
+                maxLength={80}
+                returnKeyType="search"
+                autoCorrect={false}
+                accessibilityLabel="Cercar línies"
+              />
+              {isSearchMode || searchQuery ? (
+                <TouchableOpacity
+                  onPress={closeSearch}
+                  hitSlop={8}
+                  accessibilityRole="button"
+                  accessibilityLabel="Tancar la cerca"
+                >
+                  <MaterialCommunityIcons name="close-circle" size={18} color={colors.primary} />
+                </TouchableOpacity>
+              ) : null}
+            </View>
+
+            {!isSearchMode ? (
+              <>
+                <View style={styles.sectionHeading}>
+                  <Text style={styles.quickTitle}>Torna-hi ràpid</Text>
+                  <View style={styles.headingRule} />
+                  <TouchableOpacity
+                    style={[styles.preferenceMode, preferenceView === 'recent' && styles.preferenceModeActive]}
+                    onPress={() => setPreferenceView('recent')}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: preferenceView === 'recent' }}
+                  >
+                    <Text style={[
+                      styles.preferenceModeText,
+                      preferenceView === 'recent' && styles.preferenceModeTextActive,
+                    ]}>Recents {preferences.recentRoutes.length}</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.preferenceMode, preferenceView === 'favorite' && styles.preferenceModeActive]}
+                    onPress={() => setPreferenceView('favorite')}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: preferenceView === 'favorite' }}
+                  >
+                    <Text style={[
+                      styles.preferenceModeText,
+                      preferenceView === 'favorite' && styles.preferenceModeTextActive,
+                    ]}>Favorites {preferences.favoriteRouteIds.length}</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {preferenceRoutes.length > 0 ? (
+                  <View style={styles.preferenceList}>
+                    {preferenceRoutes.map(({ route: item, recent }) => {
+                      const selected = selectedRoute?.route_id === item.route_id;
+                      const labels = getDirectionNames(item);
+                      const destination = recent
+                        ? (recent.directionId === 0 ? labels.anada : labels.tornada)
+                        : getRouteTitle(item);
+
+                      return (
+                        <TouchableOpacity
+                          key={`${preferenceView}-${item.route_id}`}
+                          style={[styles.preferenceRow, selected && styles.preferenceRowSelected]}
+                          onPress={() => selectRoute(item, recent?.directionId)}
+                          activeOpacity={0.72}
+                          accessibilityRole="button"
+                          accessibilityState={{ selected }}
+                          accessibilityLabel={`${preferenceView === 'recent' ? 'Recent' : 'Favorita'}: ${item.route_short_name}`}
+                        >
+                          <View style={[
+                            styles.quickRouteBadge,
+                            { backgroundColor: safeHexColor(item.route_color, colors.primary) },
+                          ]}>
+                            <Text style={[
+                              styles.quickRouteBadgeText,
+                              { color: safeHexColor(item.route_text_color, colors.white) },
+                            ]}>{item.route_short_name || 'Bus'}</Text>
+                          </View>
+                          <Text
+                            style={[styles.preferenceDestination, selected && styles.preferenceDestinationSelected]}
+                            numberOfLines={1}
+                          >{destination}</Text>
+                          <Text style={styles.preferenceTime} numberOfLines={1}>
+                            {recent ? formatRecentTime(recent.usedAt) : getAgencyFilter(item)}
+                          </Text>
+                          <View style={[styles.railStop, selected && styles.railStopSelected]} />
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                ) : (
+                  <TouchableOpacity
+                    style={styles.preferenceEmpty}
+                    onPress={() => preferenceView === 'favorite' && navigation.navigate('Routes')}
+                    disabled={preferenceView === 'recent'}
+                    accessibilityRole="button"
+                  >
+                    <MaterialCommunityIcons
+                      name={preferenceView === 'recent' ? 'history' : 'star-outline'}
+                      size={17}
+                      color={colors.primary}
+                    />
+                    <Text style={styles.preferenceEmptyText} numberOfLines={1}>
+                      {preferenceView === 'recent'
+                        ? 'Les rutes iniciades apareixeran aquí.'
+                        : 'Marca una línia com a favorita.'}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              </>
             ) : null}
           </View>
 
-          <View style={styles.sectionHeading}>
-            <View>
-              <Text style={styles.sectionKicker}>LES TEVES LÍNIES</Text>
-              <Text style={styles.sectionTitle}>Torna-hi ràpid</Text>
-            </View>
-          </View>
-
-          <View style={styles.preferenceTabs}>
-            <TouchableOpacity
-              style={[styles.preferenceTab, preferenceView === 'recent' && styles.preferenceTabActive]}
-              onPress={() => setPreferenceView('recent')}
-              accessibilityRole="button"
-              accessibilityState={{ selected: preferenceView === 'recent' }}
-            >
-              <MaterialCommunityIcons
-                name="history"
-                size={18}
-                color={preferenceView === 'recent' ? colors.white : colors.transitDark}
-              />
-              <Text style={[styles.preferenceTabText, preferenceView === 'recent' && styles.preferenceTabTextActive]}>
-                Recents
-              </Text>
-              <Text style={[styles.preferenceCount, preferenceView === 'recent' && styles.preferenceCountActive]}>
-                {preferences.recentRoutes.length}
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.preferenceTab, preferenceView === 'favorite' && styles.preferenceTabActive]}
-              onPress={() => setPreferenceView('favorite')}
-              accessibilityRole="button"
-              accessibilityState={{ selected: preferenceView === 'favorite' }}
-            >
-              <MaterialCommunityIcons
-                name="star"
-                size={18}
-                color={preferenceView === 'favorite' ? colors.white : colors.transitDark}
-              />
-              <Text style={[styles.preferenceTabText, preferenceView === 'favorite' && styles.preferenceTabTextActive]}>
-                Favorites
-              </Text>
-              <Text style={[styles.preferenceCount, preferenceView === 'favorite' && styles.preferenceCountActive]}>
-                {preferences.favoriteRouteIds.length}
-              </Text>
-            </TouchableOpacity>
-          </View>
-
-          {preferenceRoutes.length > 0 ? (
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.preferenceRow}
-            >
-              {preferenceRoutes.map(({ route: item, recent }, index) => {
-                const selected = selectedRoute?.route_id === item.route_id;
-                const labels = getDirectionNames(item);
-                const destination = recent
-                  ? (recent.directionId === 0 ? labels.anada : labels.tornada)
-                  : getRouteTitle(item);
-
-                return (
-                  <TouchableOpacity
-                    key={`${preferenceView}-${item.route_id}`}
-                    style={[
-                      styles.preferenceCard,
-                      index % 2 === 1 && styles.preferenceCardMint,
-                      selected && styles.preferenceCardSelected,
-                    ]}
-                    onPress={() => selectRoute(item, recent?.directionId)}
-                    activeOpacity={0.84}
-                    accessibilityRole="button"
-                    accessibilityLabel={`${preferenceView === 'recent' ? 'Recent' : 'Favorita'}: ${item.route_short_name}`}
-                  >
-                    <View style={styles.preferenceCardTop}>
-                      <View style={[
-                        styles.routeBadge,
-                        { backgroundColor: safeHexColor(item.route_color, colors.primary) },
-                      ]}>
-                        <Text style={[
-                          styles.routeBadgeText,
-                          { color: safeHexColor(item.route_text_color, colors.white) },
-                        ]}>{item.route_short_name || 'Bus'}</Text>
-                      </View>
-                      <MaterialCommunityIcons
-                        name={preferenceView === 'recent' ? 'clock-outline' : 'star'}
-                        size={18}
-                        color={colors.transitDark}
-                      />
-                    </View>
-                    <Text style={styles.preferenceCardTitle} numberOfLines={2}>{destination}</Text>
-                    <Text style={styles.preferenceCardMeta}>
-                      {recent ? formatRecentTime(recent.usedAt) : getAgencyFilter(item)}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-          ) : (
-            <View style={styles.preferenceEmpty}>
-              <View style={styles.preferenceEmptyIcon}>
-                <MaterialCommunityIcons
-                  name={preferenceView === 'recent' ? 'history' : 'star-outline'}
-                  size={21}
-                  color={colors.transitDark}
-                />
-              </View>
-              <Text style={styles.preferenceEmptyText}>
-                {preferenceView === 'recent'
-                  ? 'Les rutes iniciades apareixeran aquí.'
-                  : 'Marca l’estrella d’una línia per guardar-la.'}
-              </Text>
-            </View>
-          )}
-
-          <Text style={styles.operatorLabel}>OPERADOR</Text>
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
@@ -524,13 +563,10 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
             })}
           </ScrollView>
 
-          <View style={styles.routesHeading}>
-            <View>
-              <Text style={styles.sectionKicker}>CATÀLEG</Text>
-              <Text style={styles.sectionTitle}>
-                {searchQuery || selectedAgency !== 'Tots' ? 'Resultats' : 'Línies disponibles'}
-              </Text>
-            </View>
+          <View style={styles.routesHeading} onLayout={handleRoutesHeadingLayout}>
+            <Text style={styles.sectionTitle}>
+              {isSearchMode || searchQuery || selectedAgency !== 'Tots' ? 'Resultats' : 'Línies'}
+            </Text>
             <TouchableOpacity
               style={styles.catalogButton}
               onPress={() => navigation.navigate('Routes')}
@@ -538,7 +574,7 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
               accessibilityLabel="Obrir totes les línies"
             >
               <Text style={styles.catalogButtonText}>Totes</Text>
-              <MaterialCommunityIcons name="arrow-top-right" size={17} color={colors.white} />
+              <MaterialCommunityIcons name="arrow-top-right" size={15} color={colors.primary} />
             </TouchableOpacity>
           </View>
 
@@ -557,29 +593,32 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
           )}
         </ScrollView>
 
-        <View style={[styles.servicePanel, isLandscape && styles.servicePanelLandscape]}>
-          <View style={styles.serviceHeader}>
-            <View style={styles.serviceHeaderIcon}>
-              <MaterialCommunityIcons name="steering" size={21} color={colors.white} />
-            </View>
-            <View style={styles.serviceHeaderCopy}>
-              <Text style={styles.serviceKicker}>SERVEI A PUNT</Text>
-              <Text style={styles.serviceTitle} numberOfLines={1}>
-                {selectedRoute ? getRouteTitle(selectedRoute) : 'Selecciona una línia'}
-              </Text>
-            </View>
-            {selectedRoute ? (
-              <View style={[
-                styles.serviceRouteBadge,
-                { backgroundColor: safeHexColor(selectedRoute.route_color, colors.primary) },
-              ]}>
-                <Text style={[
-                  styles.serviceRouteBadgeText,
-                  { color: safeHexColor(selectedRoute.route_text_color, colors.white) },
-                ]}>{selectedRoute.route_short_name || 'Bus'}</Text>
+        {!isSearchMode ? (
+          <View style={[styles.servicePanel, isLandscape && styles.servicePanelLandscape]}>
+          {isLandscape ? (
+            <View style={styles.serviceHeader}>
+              {selectedRoute ? (
+                <View style={[
+                  styles.serviceRouteBadge,
+                  { backgroundColor: safeHexColor(selectedRoute.route_color, colors.primary) },
+                ]}>
+                  <Text style={[
+                    styles.serviceRouteBadgeText,
+                    { color: safeHexColor(selectedRoute.route_text_color, colors.white) },
+                  ]}>{selectedRoute.route_short_name || 'Bus'}</Text>
+                </View>
+              ) : (
+                <View style={styles.serviceHeaderIcon}>
+                  <MaterialCommunityIcons name="bus" size={21} color={colors.white} />
+                </View>
+              )}
+              <View style={styles.serviceHeaderCopy}>
+                <Text style={styles.serviceTitle} numberOfLines={1}>
+                  {selectedRoute ? getRouteTitle(selectedRoute) : 'Selecciona una línia'}
+                </Text>
               </View>
-            ) : null}
-          </View>
+            </View>
+          ) : null}
 
           <Text style={styles.directionLabel}>Direcció</Text>
           <View style={[styles.directionSelector, isLandscape && styles.directionSelectorLandscape]}>
@@ -631,7 +670,8 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
             </View>
             <MaterialCommunityIcons name="arrow-right" size={21} color={colors.white} />
           </TouchableOpacity>
-        </View>
+          </View>
+        ) : null}
       </View>
 
       <ServiceAssignmentModal
@@ -657,194 +697,404 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   content: { flex: 1 },
-  contentLandscape: { flexDirection: 'row', gap: spacing.lg, paddingHorizontal: spacing.lg, paddingBottom: spacing.sm },
+  contentLandscape: {
+    flexDirection: 'row',
+    gap: spacing.lg,
+    paddingHorizontal: spacing.lg,
+    paddingBottom: spacing.sm,
+  },
   discoveryPane: { flex: 1, minWidth: 0 },
-  discoveryContent: { paddingHorizontal: spacing.lg, paddingTop: spacing.sm, paddingBottom: spacing.xl },
+  discoveryContent: {
+    paddingHorizontal: spacing.xl,
+    paddingTop: spacing.xs,
+    paddingBottom: spacing.md,
+  },
   discoveryContentLandscape: { paddingHorizontal: 0, paddingBottom: spacing.sm },
-  liveBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: spacing.sm },
-  liveLabel: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs },
-  liveLabelText: {
-    ...typography.eyebrow,
-    color: colors.transitDark,
+  discoveryContentSearch: { paddingTop: spacing.sm, paddingBottom: spacing.xl },
+  liveBar: {
+    minHeight: 25,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
   },
   connectionBadge: {
-    height: 27,
+    height: 23,
     paddingHorizontal: spacing.sm,
     borderRadius: radii.pill,
-    backgroundColor: '#DDF7E8',
+    backgroundColor: colors.primarySoft,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 5,
   },
-  connectionBadgeOffline: { backgroundColor: colors.primarySoft },
-  connectionDot: { width: 7, height: 7, borderRadius: 4 },
-  connectionText: { ...typography.meta, color: colors.inkSoft, fontWeight: '600' },
+  connectionBadgeOffline: { backgroundColor: colors.surfaceMuted },
+  connectionDot: { width: 6, height: 6, borderRadius: 3 },
+  connectionText: {
+    fontFamily: fonts.medium,
+    color: colors.inkSoft,
+    fontSize: 8.5,
+    lineHeight: 11,
+  },
+  journeyBlock: { position: 'relative', marginBottom: spacing.sm },
+  journeyBlockSearch: { marginBottom: spacing.xs },
+  journeyRail: {
+    position: 'absolute',
+    right: 22,
+    top: 61,
+    bottom: 7,
+    width: 1.25,
+    backgroundColor: colors.primary,
+  },
   heroPanel: {
-    minHeight: 126,
-    borderRadius: radii.xl,
-    backgroundColor: colors.transit,
-    padding: spacing.lg,
+    minHeight: 112,
+    paddingTop: spacing.xs,
+    paddingRight: 64,
     flexDirection: 'row',
-    alignItems: 'center',
-    overflow: 'hidden',
+    alignItems: 'flex-start',
   },
-  heroRouteGraphic: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, opacity: 0.24 },
-  heroLine: { position: 'absolute', height: 4, borderRadius: 2, backgroundColor: colors.white },
-  heroLineOne: { width: 175, right: -18, top: 26, transform: [{ rotate: '-13deg' }] },
-  heroLineTwo: { width: 150, right: 22, bottom: 22, transform: [{ rotate: '19deg' }] },
-  heroStop: { position: 'absolute', width: 14, height: 14, borderRadius: 7, backgroundColor: colors.sun, borderWidth: 3, borderColor: colors.white },
-  heroStopOne: { right: 88, top: 16 },
-  heroStopTwo: { right: 26, bottom: 15 },
-  heroCopy: { flex: 1, minWidth: 0, zIndex: 1 },
-  heroEyebrow: { ...typography.eyebrow, color: 'rgba(255,255,255,0.8)', fontSize: 8 },
-  heroTitle: { color: colors.white, fontFamily: fonts.hero, fontSize: 27, lineHeight: 34, fontWeight: '600', marginTop: 2 },
-  heroSubtitle: { ...typography.body, color: 'rgba(255,255,255,0.82)', marginTop: 2 },
+  heroCopy: { flex: 1, minWidth: 0 },
+  heroTitle: {
+    color: colors.ink,
+    fontFamily: fonts.hero,
+    fontSize: 35,
+    lineHeight: 33,
+    letterSpacing: -1.05,
+  },
+  heroSubtitle: {
+    fontFamily: fonts.body,
+    color: colors.muted,
+    fontSize: 10.5,
+    lineHeight: 15,
+    marginTop: 5,
+  },
   heroBusBadge: {
-    width: 70,
-    height: 70,
-    borderRadius: 22,
-    backgroundColor: colors.sun,
+    position: 'absolute',
+    top: 10,
+    right: -3,
+    width: 51,
+    height: 51,
+    borderRadius: 26,
+    borderWidth: 1.5,
+    borderColor: colors.primary,
+    backgroundColor: colors.surface,
     alignItems: 'center',
     justifyContent: 'center',
-    transform: [{ rotate: '3deg' }],
-    zIndex: 1,
   },
   searchShell: {
-    height: 51,
-    marginHorizontal: spacing.md,
-    marginTop: -18,
-    marginBottom: spacing.lg,
-    paddingHorizontal: spacing.lg,
-    borderRadius: radii.md,
-    backgroundColor: colors.white,
+    height: 41,
+    marginRight: 38,
+    paddingHorizontal: 2,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.borderStrong,
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
-    ...cardShadow,
   },
-  searchInput: { ...typography.control, flex: 1, height: '100%', paddingVertical: 0, color: colors.ink, fontSize: 14, lineHeight: 18 },
-  sectionHeading: { marginBottom: spacing.sm },
-  sectionKicker: { ...typography.eyebrow, color: colors.primary },
-  sectionTitle: { ...typography.sectionTitle, color: colors.ink, marginTop: 1 },
-  preferenceTabs: {
-    height: 43,
-    padding: 4,
-    borderRadius: radii.md,
-    backgroundColor: colors.transitWash,
-    flexDirection: 'row',
-    gap: spacing.xs,
-    marginBottom: spacing.md,
+  searchShellFocused: {
+    height: 46,
+    marginRight: 0,
+    marginBottom: spacing.sm,
+    borderBottomColor: colors.primary,
+    borderBottomWidth: 1.5,
   },
-  preferenceTab: {
+  searchInput: {
     flex: 1,
-    borderRadius: radii.sm,
+    height: '100%',
+    paddingVertical: 0,
+    color: colors.ink,
+    fontFamily: fonts.body,
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  sectionHeading: {
+    minHeight: 34,
+    marginRight: 38,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  quickTitle: {
+    fontFamily: fonts.label,
+    color: colors.ink,
+    fontSize: 10.5,
+    lineHeight: 14,
+  },
+  headingRule: { flex: 1, minWidth: 10, height: 1, backgroundColor: colors.borderStrong },
+  preferenceMode: {
+    height: 28,
+    paddingHorizontal: 4,
+    borderBottomWidth: 2,
+    borderBottomColor: 'transparent',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  preferenceModeActive: { borderBottomColor: colors.primary },
+  preferenceModeText: {
+    fontFamily: fonts.label,
+    color: colors.inkSoft,
+    fontSize: 9.5,
+    lineHeight: 14,
+  },
+  preferenceModeTextActive: { fontFamily: fonts.strong, color: colors.primary },
+  preferenceList: { marginRight: 38 },
+  preferenceRow: {
+    position: 'relative',
+    minHeight: 34,
+    paddingHorizontal: 2,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+  },
+  preferenceRowSelected: { backgroundColor: colors.primaryWash },
+  quickRouteBadge: {
+    minWidth: 33,
+    height: 21,
+    paddingHorizontal: 5,
+    borderRadius: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  quickRouteBadgeText: {
+    fontFamily: fonts.strong,
+    fontSize: 9,
+    lineHeight: 11,
+  },
+  preferenceDestination: {
+    flex: 1,
+    color: colors.inkSoft,
+    fontFamily: fonts.medium,
+    fontSize: 9.5,
+    lineHeight: 13,
+  },
+  preferenceDestinationSelected: { fontFamily: fonts.label, color: colors.ink },
+  preferenceTime: {
+    width: 56,
+    color: colors.muted,
+    fontFamily: fonts.body,
+    fontSize: 8.5,
+    lineHeight: 11,
+    textAlign: 'right',
+  },
+  railStop: {
+    position: 'absolute',
+    right: -20,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    backgroundColor: colors.background,
+  },
+  railStopSelected: { backgroundColor: colors.primary },
+  preferenceEmpty: {
+    minHeight: 40,
+    marginRight: 38,
+    paddingHorizontal: 2,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  preferenceEmptyText: {
+    flex: 1,
+    color: colors.muted,
+    fontFamily: fonts.body,
+    fontSize: 9.5,
+    lineHeight: 13,
+  },
+  agencyRow: {
+    gap: 2,
+    paddingRight: spacing.lg,
+    paddingVertical: spacing.xs,
+    marginBottom: spacing.xs,
+  },
+  agencyChip: {
+    height: 32,
+    minWidth: 62,
+    paddingHorizontal: spacing.sm,
+    borderRadius: 6,
+    backgroundColor: 'transparent',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
+    gap: 5,
   },
-  preferenceTabActive: { backgroundColor: colors.transitDark },
-  preferenceTabText: { ...typography.control, color: colors.transitDark },
-  preferenceTabTextActive: { color: colors.white },
-  preferenceCount: { ...typography.meta, minWidth: 20, height: 20, borderRadius: 10, backgroundColor: colors.white, color: colors.transitDark, textAlign: 'center', lineHeight: 20, fontWeight: '700' },
-  preferenceCountActive: { backgroundColor: colors.primary, color: colors.white },
-  preferenceRow: { gap: spacing.sm, paddingRight: spacing.lg, paddingBottom: spacing.xs, marginBottom: spacing.lg },
-  preferenceCard: {
-    width: 168,
-    minHeight: 94,
-    padding: spacing.md,
-    borderRadius: radii.md,
-    backgroundColor: colors.primarySoft,
-    borderWidth: 2,
-    borderColor: 'transparent',
+  agencyChipActive: { backgroundColor: colors.transitDark },
+  agencyLogo: { width: 20, height: 14 },
+  agencyText: { fontFamily: fonts.medium, color: colors.inkSoft, fontSize: 9.5, lineHeight: 12 },
+  agencyTextActive: { fontFamily: fonts.label, color: colors.white },
+  routesHeading: {
+    minHeight: 26,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: spacing.xs,
   },
-  preferenceCardMint: { backgroundColor: colors.transitSoft },
-  preferenceCardSelected: { borderColor: colors.transitDark },
-  preferenceCardTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: spacing.sm },
-  preferenceCardTitle: { ...typography.cardTitle, color: colors.ink },
-  preferenceCardMeta: { ...typography.meta, color: colors.muted, marginTop: 3 },
-  preferenceEmpty: {
-    minHeight: 72,
-    padding: spacing.md,
-    borderRadius: radii.lg,
-    backgroundColor: colors.white,
+  sectionTitle: {
+    fontFamily: fonts.display,
+    color: colors.ink,
+    fontSize: 14,
+    lineHeight: 18,
+  },
+  catalogButton: {
+    height: 28,
+    paddingHorizontal: 2,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+  },
+  catalogButtonText: { fontFamily: fonts.label, color: colors.primary, fontSize: 9.5, lineHeight: 12 },
+  routeList: {
     borderWidth: 1,
     borderColor: colors.border,
+    borderRadius: radii.sm,
+    backgroundColor: colors.surface,
+    overflow: 'hidden',
+  },
+  routeRow: {
+    minHeight: 47,
+    paddingHorizontal: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+    borderLeftWidth: 2,
+    backgroundColor: colors.surface,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  routeRowSelected: { borderLeftWidth: 2 },
+  routeMain: {
+    flex: 1,
+    minWidth: 0,
+    minHeight: 40,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  routeBadge: {
+    minWidth: 40,
+    height: 25,
+    paddingHorizontal: 6,
+    borderRadius: 5,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  routeBadgeText: { ...typography.badge, fontSize: 10, lineHeight: 12 },
+  routeCopy: { flex: 1, minWidth: 0 },
+  routeName: { fontFamily: fonts.label, color: colors.ink, fontSize: 10, lineHeight: 13 },
+  routeMeta: { fontFamily: fonts.body, color: colors.muted, fontSize: 8.5, lineHeight: 11, marginTop: 1 },
+  starButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  starButtonActive: { backgroundColor: colors.primarySoft },
+  loadingState: { minHeight: 70, alignItems: 'center', justifyContent: 'center' },
+  loadingText: { ...typography.body, color: colors.muted, marginTop: spacing.sm },
+  emptyRoutes: { minHeight: 70, alignItems: 'center', justifyContent: 'center' },
+  emptyRoutesText: { ...typography.body, color: colors.muted, marginTop: spacing.xs },
+  servicePanel: {
+    paddingHorizontal: spacing.xl,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  servicePanelLandscape: {
+    width: '39%',
+    maxWidth: 400,
+    minWidth: 290,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radii.md,
+    justifyContent: 'center',
+    alignSelf: 'stretch',
+  },
+  serviceHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.sm },
+  serviceHeaderIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 7,
+    backgroundColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  serviceHeaderCopy: { flex: 1, minWidth: 0 },
+  serviceTitle: { fontFamily: fonts.label, color: colors.ink, fontSize: 12, lineHeight: 16 },
+  serviceRouteBadge: {
+    minWidth: 44,
+    height: 34,
+    paddingHorizontal: spacing.sm,
+    borderRadius: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  serviceRouteBadgeText: { ...typography.badge, fontSize: 11 },
+  directionLabel: {
+    fontFamily: fonts.medium,
+    color: colors.muted,
+    fontSize: 9,
+    lineHeight: 12,
+    marginBottom: 4,
+  },
+  directionSelector: {
+    minHeight: 48,
+    padding: 3,
+    borderRadius: radii.sm,
+    backgroundColor: colors.surfaceMuted,
+    flexDirection: 'row',
+    gap: 3,
+    marginBottom: spacing.sm,
+  },
+  directionSelectorLandscape: { flexDirection: 'column' },
+  directionOption: {
+    flex: 1,
+    minHeight: 42,
+    paddingHorizontal: spacing.sm,
+    borderRadius: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  directionOptionSelected: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.borderStrong,
+  },
+  directionNumber: {
+    width: 25,
+    height: 25,
+    borderRadius: 13,
+    backgroundColor: colors.background,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  directionNumberSelected: { backgroundColor: colors.primary },
+  directionNumberText: { fontFamily: fonts.label, color: colors.transitDark, fontSize: 9, lineHeight: 11 },
+  directionNumberTextSelected: { color: colors.white },
+  directionText: { fontFamily: fonts.medium, flex: 1, color: colors.inkSoft, fontSize: 9.5, lineHeight: 13 },
+  directionTextSelected: { fontFamily: fonts.label, color: colors.ink },
+  startButton: {
+    minHeight: 53,
+    paddingHorizontal: spacing.lg,
+    borderRadius: radii.sm,
+    backgroundColor: colors.primary,
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.md,
-    marginBottom: spacing.lg,
   },
-  preferenceEmptyIcon: { width: 38, height: 38, borderRadius: 19, backgroundColor: colors.transitWash, alignItems: 'center', justifyContent: 'center' },
-  preferenceEmptyText: { ...typography.body, flex: 1, color: colors.inkSoft },
-  operatorLabel: { ...typography.eyebrow, color: colors.primary, marginBottom: spacing.sm },
-  agencyRow: { gap: spacing.sm, paddingRight: spacing.lg, paddingBottom: spacing.xs, marginBottom: spacing.lg },
-  agencyChip: {
-    height: 38,
-    minWidth: 90,
-    paddingHorizontal: spacing.md,
-    borderRadius: radii.md,
-    backgroundColor: colors.white,
-    borderWidth: 1,
-    borderColor: colors.border,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.sm,
-  },
-  agencyChipActive: { backgroundColor: colors.transitDark, borderColor: colors.transitDark },
-  agencyLogo: { width: 23, height: 18 },
-  agencyText: { ...typography.control, color: colors.inkSoft },
-  agencyTextActive: { color: colors.white },
-  routesHeading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: spacing.sm },
-  catalogButton: { height: 35, paddingHorizontal: spacing.md, borderRadius: radii.md, backgroundColor: colors.primary, flexDirection: 'row', alignItems: 'center', gap: spacing.xs },
-  catalogButtonText: { ...typography.control, color: colors.white, fontSize: 10 },
-  routeList: { gap: spacing.sm },
-  routeRow: { minHeight: 63, padding: spacing.sm, borderRadius: radii.md, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.border, flexDirection: 'row', alignItems: 'center' },
-  routeRowSelected: { borderColor: colors.transit, backgroundColor: colors.transitWash },
-  routeMain: { flex: 1, minWidth: 0, minHeight: 46, flexDirection: 'row', alignItems: 'center', gap: spacing.md },
-  routeBadge: { minWidth: 47, height: 29, paddingHorizontal: spacing.sm, borderRadius: radii.sm, alignItems: 'center', justifyContent: 'center' },
-  routeBadgeText: { ...typography.badge },
-  routeCopy: { flex: 1, minWidth: 0 },
-  routeName: { ...typography.cardTitle, color: colors.ink },
-  routeMeta: { ...typography.meta, color: colors.muted, marginTop: 2 },
-  starButton: { width: 37, height: 37, borderRadius: radii.md, backgroundColor: colors.transitWash, alignItems: 'center', justifyContent: 'center' },
-  starButtonActive: { backgroundColor: colors.primarySoft },
-  loadingState: { minHeight: 100, alignItems: 'center', justifyContent: 'center' },
-  loadingText: { ...typography.body, color: colors.muted, marginTop: spacing.sm },
-  emptyRoutes: { minHeight: 90, alignItems: 'center', justifyContent: 'center', borderRadius: radii.lg, backgroundColor: colors.white },
-  emptyRoutesText: { ...typography.body, color: colors.muted, marginTop: spacing.xs },
-  servicePanel: {
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.md,
-    paddingBottom: spacing.sm,
-    borderTopLeftRadius: radii.xl,
-    borderTopRightRadius: radii.xl,
-    backgroundColor: colors.white,
-    ...cardShadow,
-  },
-  servicePanelLandscape: { width: '39%', maxWidth: 400, minWidth: 290, borderRadius: radii.xl, justifyContent: 'center', alignSelf: 'stretch' },
-  serviceHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.sm },
-  serviceHeaderIcon: { width: 38, height: 38, borderRadius: radii.md, backgroundColor: colors.transit, alignItems: 'center', justifyContent: 'center' },
-  serviceHeaderCopy: { flex: 1, minWidth: 0 },
-  serviceKicker: { ...typography.eyebrow, color: colors.primary },
-  serviceTitle: { ...typography.cardTitle, color: colors.ink, marginTop: 1 },
-  serviceRouteBadge: { minWidth: 50, height: 31, paddingHorizontal: spacing.sm, borderRadius: radii.sm, alignItems: 'center', justifyContent: 'center' },
-  serviceRouteBadgeText: { ...typography.badge, fontSize: 13 },
-  directionLabel: { ...typography.meta, color: colors.muted, fontWeight: '600', marginBottom: 5 },
-  directionSelector: { padding: 4, borderRadius: radii.md, backgroundColor: colors.transitWash, flexDirection: 'row', gap: 4, marginBottom: spacing.sm },
-  directionSelectorLandscape: { flexDirection: 'column' },
-  directionOption: { flex: 1, minHeight: 51, paddingHorizontal: spacing.sm, borderRadius: radii.sm, flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
-  directionOptionSelected: { backgroundColor: colors.white, ...cardShadow },
-  directionNumber: { width: 27, height: 27, borderRadius: 14, backgroundColor: colors.surfaceMuted, alignItems: 'center', justifyContent: 'center' },
-  directionNumberSelected: { backgroundColor: colors.primary },
-  directionNumberText: { ...typography.control, color: colors.transitDark, fontSize: 10 },
-  directionNumberTextSelected: { color: colors.white },
-  directionText: { ...typography.control, flex: 1, color: colors.inkSoft },
-  directionTextSelected: { color: colors.ink },
-  startButton: { minHeight: 55, paddingHorizontal: spacing.lg, borderRadius: radii.md, backgroundColor: colors.primary, flexDirection: 'row', alignItems: 'center', gap: spacing.md },
-  startButtonDisabled: { backgroundColor: '#A7B9BF' },
+  startButtonDisabled: { backgroundColor: '#8C9B93' },
   startButtonCopy: { flex: 1, minWidth: 0 },
   startButtonText: { ...typography.button, color: colors.white },
-  startButtonMeta: { ...typography.meta, color: 'rgba(255,255,255,0.82)', marginTop: 1 },
+  startButtonMeta: {
+    fontFamily: fonts.body,
+    color: 'rgba(255,255,255,0.82)',
+    fontSize: 9,
+    lineHeight: 12,
+    marginTop: 1,
+  },
 });

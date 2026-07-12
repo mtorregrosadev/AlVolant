@@ -63,7 +63,6 @@ export default function ServiceAssignmentModal({
           <View style={styles.sheetHeader}>
             <View style={styles.sheetHeaderAccent} />
             <View style={styles.sheetHeaderCopy}>
-              <Text style={styles.kicker}>ASSIGNACIÓ DE SERVEI</Text>
               <Text style={styles.title}>Tria la sortida</Text>
             </View>
             {selectedRoute ? (
@@ -223,10 +222,6 @@ const styles = StyleSheet.create({
   sheetHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
   sheetHeaderAccent: { width: 7, height: 44, borderRadius: 4, backgroundColor: colors.transit },
   sheetHeaderCopy: { flex: 1, minWidth: 0 },
-  kicker: {
-    ...typography.eyebrow,
-    color: colors.transitDark,
-  },
   title: { ...typography.screenTitle, color: colors.ink },
   selectedRouteBadge: {
     minWidth: 48,

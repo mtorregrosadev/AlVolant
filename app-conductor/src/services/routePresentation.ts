@@ -1,5 +1,7 @@
 import type { RouteInfo } from './api';
 import { formatDirectionLabel } from './directionLabel';
+import { translate } from '../i18n';
+import type { AppLanguage } from './userPreferences';
 
 export type AgencyFilter = 'Tots' | 'TMB' | 'AMB' | 'FGC' | 'Rodalies' | 'Altres';
 
@@ -23,21 +25,32 @@ export function getAgencyFilter(route: RouteInfo): AgencyFilter {
   return 'Altres';
 }
 
-export function getRouteTitle(route: RouteInfo) {
-  return route.route_long_name || route.display_name || route.route_short_name || 'Línia sense nom';
+export function getAgencyLabel(agency: AgencyFilter, language: AppLanguage = 'ca') {
+  if (agency === 'Tots') return translate(language, 'common.all');
+  if (agency === 'Altres') return translate(language, 'common.other');
+  return agency;
 }
 
-export function getDirectionNames(route: RouteInfo | null) {
+export function getRouteTitle(route: RouteInfo, language: AppLanguage = 'ca') {
+  return route.route_long_name
+    || route.display_name
+    || route.route_short_name
+    || translate(language, 'common.lineWithoutName');
+}
+
+export function getDirectionNames(route: RouteInfo | null, language: AppLanguage = 'ca') {
   if (!route) return { anada: '', tornada: '' };
 
   const destinations = route.direction_destinations || [];
   const directionZero = destinations.find((direction) => direction.direction_id === 0);
   const directionOne = destinations.find((direction) => direction.direction_id === 1);
-  const fallback = route.route_short_name ? `Cap a ${route.route_short_name}` : 'Direcció pendent';
+  const fallback = route.route_short_name
+    ? translate(language, 'common.towards', { destination: route.route_short_name })
+    : translate(language, 'common.directionPending');
 
   return {
-    anada: formatDirectionLabel(directionZero?.label) || fallback,
-    tornada: formatDirectionLabel(directionOne?.label) || fallback,
+    anada: formatDirectionLabel(directionZero?.label, language) || fallback,
+    tornada: formatDirectionLabel(directionOne?.label, language) || fallback,
   };
 }
 
@@ -61,12 +74,14 @@ export function routeMatchesSearch(route: RouteInfo, query: string) {
   return searchable.includes(normalizedQuery);
 }
 
-export function formatRecentTime(timestamp: number) {
+export function formatRecentTime(timestamp: number, language: AppLanguage = 'ca') {
   const elapsedMinutes = Math.max(0, Math.floor((Date.now() - timestamp) / 60_000));
-  if (elapsedMinutes < 1) return 'Ara';
-  if (elapsedMinutes < 60) return `Fa ${elapsedMinutes} min`;
+  if (elapsedMinutes < 1) return translate(language, 'common.now');
+  if (elapsedMinutes < 60) {
+    return translate(language, 'common.agoMinutes', { count: elapsedMinutes });
+  }
 
   const elapsedHours = Math.floor(elapsedMinutes / 60);
-  if (elapsedHours < 24) return `Fa ${elapsedHours} h`;
-  return `Fa ${Math.floor(elapsedHours / 24)} d`;
+  if (elapsedHours < 24) return translate(language, 'common.agoHours', { count: elapsedHours });
+  return translate(language, 'common.agoDays', { count: Math.floor(elapsedHours / 24) });
 }

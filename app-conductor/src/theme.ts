@@ -1,3 +1,5 @@
+import type { VehicleColor } from './services/userPreferences';
+
 export const colors = {
   background: '#F1EFE8',
   canvas: '#F6F4EE',
@@ -23,6 +25,13 @@ export const colors = {
   danger: '#C74646',
   mapBackground: '#0A1628',
   white: '#FFFFFF',
+} as const;
+
+export const vehicleColors = {
+  red: '#DC2626',
+  yellow: '#F6A800',
+  green: '#176B5A',
+  route: '#1551B5',
 } as const;
 
 export const spacing = {
@@ -132,7 +141,7 @@ function hexChannels(value: string) {
 
 export function routePastelColor(
   value: string | null | undefined,
-  strength = 0.1,
+  strength = 0.075,
 ) {
   const routeChannels = hexChannels(safeHexColor(value, colors.primary));
   const surfaceChannels = hexChannels(colors.surface);
@@ -145,4 +154,13 @@ export function routePastelColor(
     .map((channel) => channel.toString(16).padStart(2, '0'))
     .join('')
     .toUpperCase()}`;
+}
+
+export function vehicleAccentColor(
+  vehicleColor: VehicleColor,
+  routeColor?: string | null,
+) {
+  return vehicleColor === 'route'
+    ? safeHexColor(routeColor, vehicleColors.route)
+    : vehicleColors[vehicleColor];
 }

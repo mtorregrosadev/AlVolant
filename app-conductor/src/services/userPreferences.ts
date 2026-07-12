@@ -13,9 +13,14 @@ export type RecentRoute = {
   usedAt: number;
 };
 
+export type AppLanguage = 'ca' | 'es';
+export type VehicleColor = 'red' | 'yellow' | 'green' | 'route';
+
 export type UserPreferences = {
   favoriteRouteIds: string[];
   recentRoutes: RecentRoute[];
+  language: AppLanguage;
+  vehicleColor: VehicleColor;
 };
 
 type StoredPreferences = UserPreferences & {
@@ -25,6 +30,8 @@ type StoredPreferences = UserPreferences & {
 export const EMPTY_USER_PREFERENCES: UserPreferences = {
   favoriteRouteIds: [],
   recentRoutes: [],
+  language: 'ca',
+  vehicleColor: 'red',
 };
 
 let writeQueue: Promise<void> = Promise.resolve();
@@ -88,9 +95,18 @@ function normalizePreferences(value: unknown): UserPreferences {
 
   recentRoutes.sort((a, b) => b.usedAt - a.usedAt);
 
+  const language: AppLanguage = value.language === 'es' ? 'es' : 'ca';
+  const vehicleColor: VehicleColor = (
+    value.vehicleColor === 'yellow'
+    || value.vehicleColor === 'green'
+    || value.vehicleColor === 'route'
+  ) ? value.vehicleColor : 'red';
+
   return {
     favoriteRouteIds,
     recentRoutes: recentRoutes.slice(0, MAX_RECENTS),
+    language,
+    vehicleColor,
   };
 }
 

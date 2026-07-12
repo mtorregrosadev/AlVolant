@@ -13,11 +13,14 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import HomeScreen from './src/screens/HomeScreen';
 import MapScreen from './src/screens/MapScreen';
 import RoutesScreen from './src/screens/RoutesScreen';
+import SettingsScreen from './src/screens/SettingsScreen';
+import { PreferencesProvider, usePreferences } from './src/PreferencesContext';
 import { colors } from './src/theme';
 
 export type RootStackParamList = {
   Home: { selectedRouteId?: string } | undefined;
   Routes: undefined;
+  Settings: undefined;
   Map: {
     routeId: string;
     directionId: 0 | 1;
@@ -41,7 +44,8 @@ const navigationTheme = {
   },
 };
 
-export default function App() {
+function AppContent() {
+  const { ready } = usePreferences();
   const [fontsLoaded, fontError] = useFonts({
     Inter_400Regular,
     Inter_500Medium,
@@ -50,35 +54,48 @@ export default function App() {
     Newsreader_500Medium,
   });
 
-  if (!fontsLoaded && !fontError) return null;
+  if ((!fontsLoaded && !fontError) || !ready) return null;
 
   return (
+    <NavigationContainer theme={navigationTheme}>
+      <Stack.Navigator
+        initialRouteName="Home"
+        screenOptions={{
+          headerShown: false,
+          animation: 'slide_from_right',
+        }}
+      >
+        <Stack.Screen
+          name="Home"
+          component={HomeScreen}
+          options={{ contentStyle: { backgroundColor: colors.background } }}
+        />
+        <Stack.Screen
+          name="Routes"
+          component={RoutesScreen}
+          options={{ contentStyle: { backgroundColor: colors.background } }}
+        />
+        <Stack.Screen
+          name="Settings"
+          component={SettingsScreen}
+          options={{ contentStyle: { backgroundColor: colors.background } }}
+        />
+        <Stack.Screen
+          name="Map"
+          component={MapScreen}
+          options={{ contentStyle: { backgroundColor: colors.mapBackground } }}
+        />
+      </Stack.Navigator>
+    </NavigationContainer>
+  );
+}
+
+export default function App() {
+  return (
     <SafeAreaProvider>
-      <NavigationContainer theme={navigationTheme}>
-        <Stack.Navigator
-          initialRouteName="Home"
-          screenOptions={{
-            headerShown: false,
-            animation: 'slide_from_right',
-          }}
-        >
-          <Stack.Screen
-            name="Home"
-            component={HomeScreen}
-            options={{ contentStyle: { backgroundColor: colors.background } }}
-          />
-          <Stack.Screen
-            name="Routes"
-            component={RoutesScreen}
-            options={{ contentStyle: { backgroundColor: colors.background } }}
-          />
-          <Stack.Screen
-            name="Map"
-            component={MapScreen}
-            options={{ contentStyle: { backgroundColor: colors.mapBackground } }}
-          />
-        </Stack.Navigator>
-      </NavigationContainer>
+      <PreferencesProvider>
+        <AppContent />
+      </PreferencesProvider>
     </SafeAreaProvider>
   );
 }

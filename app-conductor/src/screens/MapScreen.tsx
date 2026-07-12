@@ -18,9 +18,17 @@ import {
 } from '@maplibre/maplibre-react-native';
 import * as Location from 'expo-location';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { apiService, type RTTripUpdate, type VehiclePosition } from '../services/api';
+import {
+  apiService,
+  type RTTripUpdate,
+  type TrafficSummary,
+  type VehiclePosition,
+} from '../services/api';
 import { formatDirectionLabel } from '../services/directionLabel';
-import { colors, safeHexColor } from '../theme';
+import { colors, safeHexColor, vehicleAccentColor } from '../theme';
+import { usePreferences } from '../PreferencesContext';
+import { translate, useI18n, type TranslationKey } from '../i18n';
+import type { AppLanguage } from '../services/userPreferences';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../../App';
 
@@ -56,7 +64,7 @@ type PaceInfo = {
 type MapScreenProps = NativeStackScreenProps<RootStackParamList, 'Map'>;
 type MapTheme = 'dark' | 'light' | 'satellite';
 type MapThemeOption = {
-  label: string;
+  labelKey: TranslationKey;
   icon: IconName;
   style: any;
 };
@@ -239,9 +247,9 @@ function extractStopsOnRoute(stopsFeature: any, routeCoordinates: Coordinate[]):
     });
 }
 
-function formatDistance(meters: number | null) {
+function formatDistance(meters: number | null, language: AppLanguage) {
   if (meters === null) {
-    return 'Dist. pendent';
+    return translate(language, 'map.distancePending');
   }
 
   if (meters < 1000) {
@@ -251,9 +259,9 @@ function formatDistance(meters: number | null) {
   return `${(meters / 1000).toFixed(1)} km`;
 }
 
-function formatEta(minutes: number | null) {
+function formatEta(minutes: number | null, language: AppLanguage) {
   if (minutes === null) {
-    return 'pendent';
+    return translate(language, 'map.pending');
   }
 
   if (minutes <= 1) {
@@ -275,9 +283,9 @@ function formatEstimatedArrival(minutes: number | null) {
   return `${hours}:${mins}`;
 }
 
-function formatFleetGap(minutes: number | null) {
+function formatFleetGap(minutes: number | null, language: AppLanguage) {
   if (minutes === null) {
-    return 'sense dades';
+    return translate(language, 'map.noData');
   }
 
   if (minutes <= 1) {
@@ -287,7 +295,7 @@ function formatFleetGap(minutes: number | null) {
   return `${Math.round(minutes)} min`;
 }
 
-function formatDelay(seconds: number | null) {
+function formatDelay(seconds: number | null, language: AppLanguage) {
   if (seconds === null) {
     return null;
   }
@@ -301,7 +309,7 @@ function formatDelay(seconds: number | null) {
     return `${minutes} min`;
   }
 
-  return 'A l\'hora';
+  return translate(language, 'map.onTime');
 }
 
 function normalizeCoordinates(value: unknown): Coordinate | null {
@@ -350,24 +358,24 @@ function delayForStop(routeTripUpdates: RTTripUpdate[], activeTripId: string | u
   return null;
 }
 
-function getPaceInfo(delaySeconds: number | null): PaceInfo | null {
+function getPaceInfo(delaySeconds: number | null, language: AppLanguage): PaceInfo | null {
   if (delaySeconds === null) {
     return null;
   }
 
   if (delaySeconds >= 300) {
-    return { label: 'Vas tard. Recupera si és segur', icon: 'speedometer-medium', tone: 'danger' };
+    return { label: translate(language, 'map.paceLate'), icon: 'speedometer-medium', tone: 'danger' };
   }
 
   if (delaySeconds >= 90) {
-    return { label: 'Apreta una mica si és segur', icon: 'speedometer-medium', tone: 'warning' };
+    return { label: translate(language, 'map.paceSlightlyLate'), icon: 'speedometer-medium', tone: 'warning' };
   }
 
   if (delaySeconds <= -180) {
-    return { label: 'Vas avançat. Regula el ritme', icon: 'speedometer-slow', tone: 'warning' };
+    return { label: translate(language, 'map.paceEarly'), icon: 'speedometer-slow', tone: 'warning' };
   }
 
-  return { label: 'Vas bé de temps', icon: 'check-circle-outline', tone: 'good' };
+  return { label: translate(language, 'map.paceGood'), icon: 'check-circle-outline', tone: 'good' };
 }
 
 const SATELLITE_MAP_STYLE = {
@@ -404,17 +412,17 @@ const SATELLITE_MAP_STYLE = {
 
 const MAP_THEME_OPTIONS: Record<MapTheme, MapThemeOption> = {
   dark: {
-    label: 'Fosc',
+    labelKey: 'map.dark',
     icon: 'weather-night',
     style: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
   },
   light: {
-    label: 'Clar',
+    labelKey: 'map.light',
     icon: 'white-balance-sunny',
     style: 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json',
   },
   satellite: {
-    label: 'Sat',
+    labelKey: 'map.satellite',
     icon: 'satellite-variant',
     style: SATELLITE_MAP_STYLE,
   },
@@ -426,6 +434,8 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const insets = useSafeAreaInsets();
   const isLandscape = viewportWidth > viewportHeight;
   const isCompactLandscape = isLandscape && viewportHeight < 520;
+  const { preferences } = usePreferences();
+  const { language, t } = useI18n();
 
   const [routeFeature, setRouteFeature] = useState<any>(null);
   const [stopsFeature, setStopsFeature] = useState<any>(null);
@@ -446,7 +456,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const [routeInfo, setRouteInfo] = useState<any>(null);
   const [routeTripUpdates, setRouteTripUpdates] = useState<RTTripUpdate[]>([]);
   const [vehiclePositions, setVehiclePositions] = useState<VehiclePosition[]>([]);
-  const [trafficLabel, setTrafficLabel] = useState('Trànsit: carregant');
+  const [trafficState, setTrafficState] = useState<TrafficSummary['status'] | 'loading'>('loading');
   const [mapTheme, setMapTheme] = useState<MapTheme>('dark');
   const [isMapThemePickerOpen, setIsMapThemePickerOpen] = useState(false);
   const animationFrameRef = useRef<number | null>(null);
@@ -458,23 +468,24 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
 
   const directionName = React.useMemo(() => {
     if (directionLabel) {
-      return formatDirectionLabel(directionLabel);
+      return formatDirectionLabel(directionLabel, language);
     }
 
     if (routeInfo?.towards_label) {
-      return formatDirectionLabel(routeInfo.towards_label);
+      return formatDirectionLabel(routeInfo.towards_label, language);
     }
 
     if (routeInfo?.destination_name) {
-      return `Cap a ${routeInfo.destination_name}`;
+      return t('common.towards', { destination: routeInfo.destination_name });
     }
 
     return '';
-  }, [directionLabel, routeInfo]);
+  }, [directionLabel, language, routeInfo, t]);
 
-  const routeShortName = routeInfo?.route_short_name || 'Bus';
+  const routeShortName = routeInfo?.route_short_name || t('common.bus');
   const routeColor = safeHexColor(routeInfo?.route_color, colors.primary);
   const routeTextColor = safeHexColor(routeInfo?.route_text_color, colors.white);
+  const vehicleAccent = vehicleAccentColor(preferences.vehicleColor, routeInfo?.route_color);
   const activeMapTheme = MAP_THEME_OPTIONS[mapTheme];
   const usesLightChrome = mapTheme === 'light';
   const chromeTextColor = usesLightChrome ? '#1F2937' : '#FFFFFF';
@@ -561,7 +572,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     ? null
     : ((nextStopDistanceMeters / 1000) / effectiveSpeedKmh) * 60;
   const nextStopDelaySeconds = delayForStop(routeTripUpdates, tripId, nextStop);
-  const paceInfo = getPaceInfo(nextStopDelaySeconds);
+  const paceInfo = getPaceInfo(nextStopDelaySeconds, language);
   const estimatedArrival = formatEstimatedArrival(nextStopEtaMinutes);
   const selectedStopCoords = selectedStop?.coordinates ?? null;
   const selectedStopProjection = projectPointOnRoute(selectedStopCoords, routeCoordinates);
@@ -610,24 +621,37 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     };
   }, [assignedVehicle, currentRouteProgress, effectiveSpeedKmh, routeCoordinates, tripId, vehiclePositions]);
   const fleetLabel = fleetGaps.aheadMinutes !== null
-    ? `Davant ${formatFleetGap(fleetGaps.aheadMinutes)}`
+    ? t('map.ahead', { time: formatFleetGap(fleetGaps.aheadMinutes, language) })
     : fleetGaps.behindMinutes !== null
-      ? `Darrere ${formatFleetGap(fleetGaps.behindMinutes)}`
+      ? t('map.behind', { time: formatFleetGap(fleetGaps.behindMinutes, language) })
       : null;
-  const trafficStatus = trafficLabel.replace(/^Trànsit:\s*/i, '').trim();
-  const hasTrafficData = !/^(carregant|clau pendent|no disponible|dades parcials)$/i.test(trafficStatus);
+  const trafficKey: TranslationKey = trafficState === 'normal'
+    ? 'map.trafficNormal'
+    : trafficState === 'dense'
+      ? 'map.trafficDense'
+      : trafficState === 'slow'
+        ? 'map.trafficSlow'
+        : trafficState === 'jammed'
+          ? 'map.trafficJammed'
+          : trafficState === 'closed'
+            ? 'map.trafficClosed'
+            : trafficState === 'loading'
+              ? 'map.trafficLoading'
+              : 'map.trafficUnavailable';
+  const trafficStatus = t(trafficKey);
+  const hasTrafficData = trafficState !== 'loading' && trafficState !== 'unavailable';
   const driverMetrics = [
     nextStopDistanceMeters !== null
-      ? { icon: 'map-marker-distance' as IconName, label: formatDistance(nextStopDistanceMeters) }
+      ? { icon: 'map-marker-distance' as IconName, label: formatDistance(nextStopDistanceMeters, language) }
       : null,
     estimatedArrival
-      ? { icon: 'clock-time-four-outline' as IconName, label: `Arr. ${estimatedArrival}` }
+      ? { icon: 'clock-time-four-outline' as IconName, label: t('map.arrival', { time: estimatedArrival }) }
       : null,
     currentSpeedKmh !== null
       ? { icon: 'speedometer' as IconName, label: `${currentSpeedLabel} km/h` }
       : null,
     nextStopDelaySeconds !== null
-      ? { icon: 'calendar-clock-outline' as IconName, label: formatDelay(nextStopDelaySeconds) || 'A l\'hora' }
+      ? { icon: 'calendar-clock-outline' as IconName, label: formatDelay(nextStopDelaySeconds, language) || t('map.onTime') }
       : null,
     fleetLabel
       ? { icon: 'bus-multiple' as IconName, label: fleetLabel }
@@ -775,12 +799,12 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     apiService.fetchTrafficSummary(userCoords[1], userCoords[0])
       .then((summary) => {
         if (!cancelled) {
-          setTrafficLabel(summary.label || 'Trànsit: dades parcials');
+          setTrafficState(summary.status || 'unavailable');
         }
       })
       .catch(() => {
         if (!cancelled) {
-          setTrafficLabel('Trànsit: no disponible');
+          setTrafficState('unavailable');
         }
       });
 
@@ -921,8 +945,8 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   if (loading) {
     return (
       <View style={styles.center}>
-        <ActivityIndicator size="large" color="#DC2626" />
-        <Text style={styles.loadingText}>Carregant ruta...</Text>
+        <ActivityIndicator size="large" color={colors.primary} />
+        <Text style={styles.loadingText}>{t('map.loading')}</Text>
       </View>
     );
   }
@@ -930,12 +954,12 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   if (error) {
     return (
       <View style={styles.center}>
-        <Text style={styles.error}>Error: {error}</Text>
+        <Text style={styles.error}>{t('map.error')}</Text>
         <TouchableOpacity
           style={styles.retryButton}
           onPress={() => navigation.goBack()}
         >
-          <Text style={styles.retryText}>Tornar</Text>
+          <Text style={styles.retryText}>{t('map.retry')}</Text>
         </TouchableOpacity>
       </View>
     );
@@ -1028,10 +1052,10 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
             <View style={{ transform: [{ rotate: `${displayRouteBearing - mapBearing}deg` }] }}>
               <View style={styles.busContainer}>
                 <View style={styles.busBody}>
-                  <View style={styles.busRedFront} />
-                  <View style={styles.busRedBack} />
-                  <View style={styles.busStripeLeft} />
-                  <View style={styles.busStripeRight} />
+                  <View style={[styles.busRedFront, { backgroundColor: vehicleAccent }]} />
+                  <View style={[styles.busRedBack, { backgroundColor: vehicleAccent }]} />
+                  <View style={[styles.busStripeLeft, { backgroundColor: vehicleAccent }]} />
+                  <View style={[styles.busStripeRight, { backgroundColor: vehicleAccent }]} />
                   <View style={styles.busWindshield} />
                   <View style={styles.busRearWindow} />
                   <View style={styles.busACUnit} />
@@ -1113,17 +1137,17 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
                 </Text>
               </View>
               <Text style={[styles.stopCalloutName, { color: chromeTextColor }]} numberOfLines={1}>
-                {selectedStop.stop_name || 'Parada desconeguda'}
+                {selectedStop.stop_name || t('map.unknownStop')}
               </Text>
               <View style={styles.stopCalloutEta}>
                 <MaterialCommunityIcons name="timer-outline" size={13} color="#FFFFFF" />
-                <Text style={styles.stopCalloutEtaText}>{formatEta(selectedStopEtaMinutes)}</Text>
+                <Text style={styles.stopCalloutEtaText}>{formatEta(selectedStopEtaMinutes, language)}</Text>
               </View>
               <TouchableOpacity
                 style={[styles.stopCalloutClose, usesLightChrome && styles.stopCalloutCloseLight]}
                 onPress={() => setSelectedStop(null)}
                 accessibilityRole="button"
-                accessibilityLabel="Tancar informació de la parada"
+                accessibilityLabel={t('map.closeStop')}
               >
                 <MaterialCommunityIcons name="close" size={15} color={chromeTextColor} />
               </TouchableOpacity>
@@ -1145,7 +1169,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
           style={[styles.backButton, usesLightChrome && styles.mapChromeLight]}
           onPress={handleBack}
           accessibilityRole="button"
-          accessibilityLabel="Tornar a les línies"
+          accessibilityLabel={t('map.back')}
         >
           <MaterialCommunityIcons name="chevron-left" size={24} color={chromeTextColor} />
         </TouchableOpacity>
@@ -1160,7 +1184,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
               </Text>
             </View>
             <Text style={[styles.hudDirection, { color: chromeTextColor }]} numberOfLines={1}>
-              {directionName || 'Ruta activa'}
+              {directionName || t('map.activeRoute')}
             </Text>
           </View>
         </View>
@@ -1196,7 +1220,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
                     setIsMapThemePickerOpen(false);
                   }}
                   accessibilityRole="button"
-                  accessibilityLabel={`Mapa ${option.label}`}
+                  accessibilityLabel={t('map.themeA11y', { theme: t(option.labelKey) })}
                 >
                   <MaterialCommunityIcons
                     name={option.icon}
@@ -1213,7 +1237,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
             style={[styles.mapThemeTrigger, usesLightChrome && styles.mapChromeLight]}
             onPress={() => setIsMapThemePickerOpen(true)}
             accessibilityRole="button"
-            accessibilityLabel="Canviar el tipus de mapa"
+            accessibilityLabel={t('map.changeTheme')}
           >
             <MaterialCommunityIcons name="layers-outline" size={21} color={chromeTextColor} />
           </TouchableOpacity>
@@ -1225,7 +1249,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
           ]}
           onPress={handleRecenter}
           accessibilityRole="button"
-          accessibilityLabel="Centrar el bus al mapa"
+          accessibilityLabel={t('map.recenter')}
         >
           <MaterialCommunityIcons name="crosshairs-gps" size={21} color="#FFFFFF" />
         </TouchableOpacity>
@@ -1248,12 +1272,12 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
             </View>
             <View style={styles.driverStopInfo}>
               <Text style={[styles.driverStopName, { color: chromeTextColor }]} numberOfLines={1}>
-                {nextStop?.stop_name || 'Calculant parada'}
+                {nextStop?.stop_name || t('map.calculatingStop')}
               </Text>
             </View>
             <View style={styles.driverEtaPill}>
               <MaterialCommunityIcons name="timer-outline" size={13} color="#FFFFFF" />
-              <Text style={styles.driverEtaText}>{formatEta(nextStopEtaMinutes)}</Text>
+              <Text style={styles.driverEtaText}>{formatEta(nextStopEtaMinutes, language)}</Text>
             </View>
           </View>
 

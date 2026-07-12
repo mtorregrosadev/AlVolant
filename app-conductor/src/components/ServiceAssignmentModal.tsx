@@ -14,6 +14,7 @@ import type { EdgeInsets } from 'react-native-safe-area-context';
 import type { RouteInfo, UpcomingTrip } from '../services/api';
 import { formatDirectionLabel } from '../services/directionLabel';
 import { cardShadow, colors, fonts, radii, safeHexColor, spacing, typography } from '../theme';
+import { useI18n } from '../i18n';
 
 type ServiceAssignmentModalProps = {
   visible: boolean;
@@ -42,6 +43,7 @@ export default function ServiceAssignmentModal({
   onConfirm,
   onSkip,
 }: ServiceAssignmentModalProps) {
+  const { language, t } = useI18n();
   const overlayInsets = {
     paddingTop: Math.max(insets.top + spacing.md, spacing.xl),
     paddingRight: Math.max(insets.right + spacing.xl, spacing.xl),
@@ -63,7 +65,7 @@ export default function ServiceAssignmentModal({
           <View style={styles.sheetHeader}>
             <View style={styles.sheetHeaderAccent} />
             <View style={styles.sheetHeaderCopy}>
-              <Text style={styles.title}>Tria la sortida</Text>
+              <Text style={styles.title}>{t('assignment.title')}</Text>
             </View>
             {selectedRoute ? (
               <View style={[
@@ -80,14 +82,14 @@ export default function ServiceAssignmentModal({
               style={styles.closeButton}
               onPress={onClose}
               accessibilityRole="button"
-              accessibilityLabel="Tancar assignació"
+              accessibilityLabel={t('assignment.close')}
             >
               <MaterialCommunityIcons name="close" size={21} color={colors.ink} />
             </TouchableOpacity>
           </View>
 
           <Text style={styles.subtitle}>
-            Sincronitza una sortida del SAE o introdueix el vehicle manualment.
+            {t('assignment.subtitle')}
           </Text>
 
           {loading ? (
@@ -95,7 +97,7 @@ export default function ServiceAssignmentModal({
               <View style={styles.loadingIcon}>
                 <ActivityIndicator color={colors.white} />
               </View>
-              <Text style={styles.loadingText}>Consultant les properes sortides…</Text>
+              <Text style={styles.loadingText}>{t('assignment.loading')}</Text>
             </View>
           ) : (
             <ScrollView
@@ -107,19 +109,22 @@ export default function ServiceAssignmentModal({
                 <View style={styles.noticeCard}>
                   <MaterialCommunityIcons name="wrench-clock" size={24} color={colors.warning} />
                   <View style={styles.noticeCopy}>
-                    <Text style={styles.noticeTitle}>Horaris en manteniment</Text>
-                    <Text style={styles.noticeText}>Pots introduir el vehicle o conduir lliurement.</Text>
+                    <Text style={styles.noticeTitle}>{t('assignment.maintenance')}</Text>
+                    <Text style={styles.noticeText}>{t('assignment.maintenanceHint')}</Text>
                   </View>
                 </View>
               ) : upcomingTrips.length === 0 ? (
                 <View style={styles.emptyState}>
                   <MaterialCommunityIcons name="calendar-blank-outline" size={28} color={colors.transitDark} />
-                  <Text style={styles.emptyTitle}>No hi ha més sortides per avui</Text>
-                  <Text style={styles.emptyText}>La ruta continua disponible en mode lliure.</Text>
+                  <Text style={styles.emptyTitle}>{t('assignment.empty')}</Text>
+                  <Text style={styles.emptyText}>{t('assignment.emptyHint')}</Text>
                 </View>
               ) : upcomingTrips.map((trip) => {
                 const scheduledTime = (trip.departure_time || '').slice(0, 5);
-                const title = formatDirectionLabel(trip.trip_headsign || trip.towards_label) || 'Servei';
+                const title = formatDirectionLabel(
+                  trip.trip_headsign || trip.towards_label,
+                  language,
+                ) || t('assignment.service');
                 const delayMinutes = trip.has_rt_first_stop_update
                   ? Math.round((trip.delay_seconds ?? 0) / 60)
                   : 0;
@@ -133,7 +138,9 @@ export default function ServiceAssignmentModal({
 
                 const status = delayMinutes > 0
                   ? `+${delayMinutes} min`
-                  : delayMinutes < 0 ? `${delayMinutes} min` : trip.trip_status === 'on_time' ? 'A l’hora' : 'Programada';
+                  : delayMinutes < 0
+                    ? `${delayMinutes} min`
+                    : t(trip.trip_status === 'on_time' ? 'assignment.onTime' : 'assignment.scheduled');
 
                 return (
                   <TouchableOpacity
@@ -142,16 +149,20 @@ export default function ServiceAssignmentModal({
                     onPress={() => onConfirm('', trip.trip_id)}
                     activeOpacity={0.82}
                     accessibilityRole="button"
-                    accessibilityLabel={`${title}, sortida ${estimatedTime}`}
+                    accessibilityLabel={t('assignment.tripA11y', { title, time: estimatedTime })}
                   >
                     <View style={styles.timeBlock}>
                       <Text style={styles.timeText}>{estimatedTime || '--:--'}</Text>
-                      <Text style={styles.timeCaption}>{delayMinutes ? 'estimada' : 'sortida'}</Text>
+                      <Text style={styles.timeCaption}>
+                        {t(delayMinutes ? 'assignment.estimated' : 'assignment.departure')}
+                      </Text>
                     </View>
                     <View style={styles.tripCopy}>
                       <Text style={styles.tripTitle} numberOfLines={1}>{title}</Text>
                       <Text style={styles.tripOrigin} numberOfLines={1}>
-                        {trip.origin_stop_name ? `Origen · ${trip.origin_stop_name}` : 'Servei programat'}
+                        {trip.origin_stop_name
+                          ? t('assignment.origin', { value: trip.origin_stop_name })
+                          : t('assignment.programmed')}
                       </Text>
                     </View>
                     <View style={[
@@ -171,19 +182,19 @@ export default function ServiceAssignmentModal({
               <View style={styles.manualCard}>
                 <View style={styles.manualHeading}>
                   <MaterialCommunityIcons name="bus" size={20} color={colors.transitDark} />
-                  <Text style={styles.manualLabel}>Vehicle manual</Text>
+                  <Text style={styles.manualLabel}>{t('assignment.manualVehicle')}</Text>
                 </View>
                 <View style={styles.manualRow}>
                   <TextInput
                     style={styles.manualInput}
-                    placeholder="Ex. 3042"
+                    placeholder={t('assignment.vehicleExample')}
                     placeholderTextColor={colors.subtle}
                     autoCapitalize="characters"
                     autoCorrect={false}
                     maxLength={12}
                     value={manualVehicle}
                     onChangeText={onManualVehicleChange}
-                    accessibilityLabel="Identificador del vehicle"
+                    accessibilityLabel={t('assignment.vehicleA11y')}
                   />
                   <TouchableOpacity
                     style={[styles.syncButton, !manualVehicle && styles.syncButtonDisabled]}
@@ -191,13 +202,13 @@ export default function ServiceAssignmentModal({
                     onPress={() => onConfirm(manualVehicle)}
                     accessibilityRole="button"
                   >
-                    <Text style={styles.syncText}>Sincronitzar</Text>
+                    <Text style={styles.syncText}>{t('assignment.sync')}</Text>
                   </TouchableOpacity>
                 </View>
               </View>
 
               <TouchableOpacity style={styles.skipButton} onPress={onSkip} accessibilityRole="button">
-                <Text style={styles.skipText}>Conduir sense assignació</Text>
+                <Text style={styles.skipText}>{t('assignment.skip')}</Text>
                 <MaterialCommunityIcons name="arrow-right" size={18} color={colors.primary} />
               </TouchableOpacity>
             </ScrollView>

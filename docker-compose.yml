@@ -1,63 +1,162 @@
-# ==============================================================================
-# Route-TMB BFF — Local Development Stack
-# ==============================================================================
-# Usage:
-#   docker-compose up        → start app + Redis
-#   docker-compose up -d     → start in background
-#   docker-compose down -v   → stop and remove volumes
-# ==============================================================================
+name: alvolant
 
 services:
-  # --- BFF Application ---
   bff:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: route-tmb-bff
+    init: true
     ports:
-      - "${SERVER_PORT:-8000}:8000"
-    env_file:
-      - .env
+      - "${BFF_BIND_ADDRESS:-127.0.0.1}:${SERVER_PORT:-8000}:8000"
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      BFF_API_KEY: ""
+      BFF_API_KEY_FILE: "/run/secrets/bff_api_key"
+      RATE_LIMIT_HASH_KEY: ""
+      RATE_LIMIT_HASH_KEY_FILE: "/run/secrets/rate_limit_hash_key"
+      TOMTOM_API_KEY: ""
+      TOMTOM_API_KEY_FILE: "/run/secrets/tomtom_api_key"
+      REDIS_URL: ""
+      REDIS_HOST: "redis"
+      REDIS_PORT: "6379"
+      REDIS_DB: "0"
+      REDIS_USERNAME: "alvolant"
+      REDIS_PASSWORD_FILE: "/run/secrets/redis_password"
+      REDIS_USE_TLS: "false"
+      ENVIRONMENT: "${ENVIRONMENT:-production}"
+      DOCS_ENABLED: "${DOCS_ENABLED:-false}"
+      TRUSTED_HOSTS: "${TRUSTED_HOSTS:-localhost,127.0.0.1}"
+      CORS_ALLOWED_ORIGINS: "${CORS_ALLOWED_ORIGINS:-}"
+      OUTBOUND_ALLOWED_HOSTS: "${OUTBOUND_ALLOWED_HOSTS:-t-mobilitat.atm.cat,t-mobilitat.cat,api.tomtom.com}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      RATE_LIMIT_RPM: "${RATE_LIMIT_RPM:-60}"
+      RATE_LIMIT_WS_MPM: "${RATE_LIMIT_WS_MPM:-120}"
+      MAX_WS_CONNECTIONS: "${MAX_WS_CONNECTIONS:-200}"
+      MAX_WS_CONNECTIONS_PER_IP: "${MAX_WS_CONNECTIONS_PER_IP:-20}"
+      MAX_WS_TOPICS_PER_CLIENT: "${MAX_WS_TOPICS_PER_CLIENT:-20}"
+      MAX_WS_MESSAGE_BYTES: "${MAX_WS_MESSAGE_BYTES:-4096}"
+      MAX_REQUEST_BODY_BYTES: "${MAX_REQUEST_BODY_BYTES:-32768}"
+      REQUEST_BODY_TIMEOUT_SECONDS: "${REQUEST_BODY_TIMEOUT_SECONDS:-15}"
+      TRAFFIC_GLOBAL_REQUESTS_PER_MINUTE: "${TRAFFIC_GLOBAL_REQUESTS_PER_MINUTE:-120}"
+      TRAFFIC_GLOBAL_REQUESTS_PER_DAY: "${TRAFFIC_GLOBAL_REQUESTS_PER_DAY:-5000}"
+      TRAFFIC_PROVIDER_CIRCUIT_SECONDS: "${TRAFFIC_PROVIDER_CIRCUIT_SECONDS:-60}"
+      TELEMETRY_ENABLED: "${TELEMETRY_ENABLED:-true}"
+      TELEMETRY_RETENTION_DAYS: "${TELEMETRY_RETENTION_DAYS:-3}"
+      TELEMETRY_MAX_EVENTS_PER_DAY: "${TELEMETRY_MAX_EVENTS_PER_DAY:-5000}"
+      TELEMETRY_MAX_ERRORS_PER_DAY: "${TELEMETRY_MAX_ERRORS_PER_DAY:-500}"
+      TELEMETRY_QUEUE_SIZE: "${TELEMETRY_QUEUE_SIZE:-2048}"
+      SERVER_HOST: "0.0.0.0"
+      SERVER_PORT: "8000"
+      FORWARDED_ALLOW_IPS: "${FORWARDED_ALLOW_IPS:-127.0.0.1}"
+    secrets:
+      - bff_api_key
+      - rate_limit_hash_key
+      - tomtom_api_key
+      - redis_password
     depends_on:
       redis:
         condition: service_healthy
     volumes:
       - gtfs-data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    mem_limit: "${BFF_MEMORY_LIMIT:-3g}"
+    cpus: 1.5
+    stop_grace_period: 35s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read(1)"
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
     restart: unless-stopped
     networks:
-      - bff-network
+      - cache
+      - egress
 
-  # --- Redis Cache ---
   redis:
-    image: redis:7-alpine
-    container_name: route-tmb-redis
-    ports:
-      - "6379:6379"
-    command: >
-      redis-server
-      --maxmemory 256mb
-      --maxmemory-policy allkeys-lru
-      --save ""
-      --appendonly no
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
+    image: redis:7.4.9-alpine3.21@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+    user: redis
+    secrets:
+      - redis_password
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        password="$$(cat /run/secrets/redis_password)"
+        test "$${#password}" -ge 32
+        test "$${#password}" -le 512
+        case "$${password}" in *[!A-Za-z0-9_-]*) exit 1 ;; esac
+        umask 077
+        printf '%s\n' \
+          'user default off' \
+          "user alvolant on >$${password} ~gtfs:* ~atm_rt:* ~telemetry:* ~rl:* &channel:* +@read +@write +@connection +multi +exec +discard +watch +unwatch +publish -keys -flushall -flushdb -config -acl -shutdown -module -debug -save -bgsave -bgrewriteaof -migrate -replicaof -slaveof -restore" \
+          > /tmp/users.acl
+        exec redis-server \
+          --aclfile /tmp/users.acl \
+          --maxmemory "${REDIS_MAXMEMORY:-1gb}" \
+          --maxmemory-policy noeviction \
+          --appendonly yes \
+          --appendfsync everysec \
+          --aof-use-rdb-preamble yes \
+          --auto-aof-rewrite-percentage 100 \
+          --auto-aof-rewrite-min-size 64mb \
+          --save ""
+    expose:
+      - "6379"
     volumes:
       - redis-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'REDISCLI_AUTH="$$(cat /run/secrets/redis_password)" redis-cli --user alvolant ping | grep -q "^PONG$$"'
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 64
+    mem_limit: "${REDIS_MEMORY_LIMIT:-1536m}"
+    cpus: 0.5
+    stop_grace_period: 20s
     restart: unless-stopped
     networks:
-      - bff-network
+      - cache
 
 volumes:
   gtfs-data:
-    driver: local
   redis-data:
-    driver: local
 
 networks:
-  bff-network:
-    driver: bridge
+  # Redis is reachable only from the BFF and is never published on the host.
+  cache:
+    internal: true
+  # The BFF also needs outbound access to the transport and traffic providers.
+  egress:
+
+secrets:
+  # Compose reads this from the host environment and mounts it as a runtime
+  # secret file; it is not copied into the image or exposed to the BFF env.
+  redis_password:
+    environment: REDIS_PASSWORD
+  bff_api_key:
+    environment: BFF_API_KEY
+  rate_limit_hash_key:
+    environment: RATE_LIMIT_HASH_KEY
+  tomtom_api_key:
+    environment: TOMTOM_API_KEY

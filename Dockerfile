@@ -1,56 +1,59 @@
-# ==============================================================================
-# Route-TMB BFF — Production Dockerfile
-# ==============================================================================
-# Multi-stage build for minimal image size and security.
-# ==============================================================================
+# syntax=docker/dockerfile:1
 
-# --- Stage 1: Build dependencies ---
-FROM python:3.12-slim AS builder
+# -----------------------------------------------------------------------------
+# Build the Python environment separately so the runtime image contains neither
+# build caches nor packaging tools beyond what the application needs.
+# -----------------------------------------------------------------------------
+FROM python:3.12.13-slim-trixie@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf AS builder
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
 
 WORKDIR /build
 
-# Install build dependencies
-RUN pip install --no-cache-dir --upgrade pip hatchling
+# Install the exact audited dependency set with package hashes, then add the
+# local wheel without allowing its broad version ranges to re-resolve.
+COPY pyproject.toml README.md requirements.lock requirements-build.lock ./
+COPY app/ ./app/
 
-# Copy only dependency definition first (Docker cache optimization)
-COPY pyproject.toml ./
+RUN python -m venv /opt/buildenv \
+    && /opt/buildenv/bin/pip install --no-compile --require-hashes -r requirements-build.lock \
+    && /opt/buildenv/bin/pip wheel --no-build-isolation --no-deps --wheel-dir /wheels . \
+    && python -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-compile --require-hashes -r requirements.lock \
+    && /opt/venv/bin/pip install --no-compile --no-deps --no-index /wheels/*.whl
 
-# Install project dependencies into a virtual environment
-RUN python -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-RUN pip install --no-cache-dir .
 
+# -----------------------------------------------------------------------------
+# Production runtime
+# -----------------------------------------------------------------------------
+FROM python:3.12.13-slim-trixie@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf AS runtime
 
-# --- Stage 2: Production runtime ---
-FROM python:3.12-slim AS runtime
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONHASHSEED=random
 
-# Security: run as non-root user
-RUN groupadd --gid 1000 appuser && \
-    useradd --uid 1000 --gid appuser --shell /bin/bash --create-home appuser
+RUN groupadd --system --gid 10001 appuser \
+    && useradd --system --uid 10001 --gid appuser \
+        --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin appuser
 
 WORKDIR /app
 
-# Copy virtual environment from builder
-COPY --from=builder /opt/venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+COPY --from=builder --chown=root:root /opt/venv /opt/venv
 
-# Copy application code
-COPY app/ ./app/
+# Application code and dependencies stay root-owned/read-only. The named GTFS
+# volume mounted at /app/data is the sole writable application-data location.
+RUN mkdir -p /app/data \
+    && chown appuser:appuser /app/data \
+    && chmod 0750 /app/data \
+    && chmod -R a-w /opt/venv
 
-# Create data directory for GTFS downloads
-RUN mkdir -p /app/data && chown -R appuser:appuser /app
+USER 10001:10001
 
-# Switch to non-root user
-USER appuser
-
-# Expose the application port
 EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import httpx; httpx.get('http://localhost:8000/health')" || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read(1)"]
 
-# Run with uvicorn — multiple workers for production concurrency
-# NOTE: WebSocket connections require --workers 1 OR sticky sessions in the load balancer.
-# For WebSocket support, we use a single worker with asyncio concurrency.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--loop", "uvloop", "--http", "httptools", "--log-level", "info"]
+CMD ["python", "-m", "app.server"]

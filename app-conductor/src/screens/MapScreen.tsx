@@ -1,5 +1,8 @@
 import React, { useEffect, useState, useRef } from 'react';
 import {
+  Animated,
+  Easing,
+  Image,
   StyleSheet,
   View,
   Text,
@@ -96,6 +99,7 @@ type RouteProjectionOptions = {
 
 type MapScreenProps = NativeStackScreenProps<RootStackParamList, 'Map'>;
 type MapTheme = 'dark' | 'light' | 'satellite';
+type MapOrientation = 'course' | 'northUp';
 type MapThemeOption = {
   labelKey: TranslationKey;
   icon: IconName;
@@ -529,7 +533,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const [error, setError] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [locationGranted, setLocationGranted] = useState(false);
-  const [trackingMode, setTrackingMode] = useState<string>('course');
+  const [mapOrientation, setMapOrientation] = useState<MapOrientation>('course');
   const [gpsFix, setGpsFix] = useState<GpsFix | null>(null);
   const [visualPose, setVisualPose] = useState<VisualPose | null>(null);
   const [displayRouteProgress, setDisplayRouteProgress] = useState<number | null>(null);
@@ -540,7 +544,16 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const [trafficState, setTrafficState] = useState<TrafficSummary['status'] | 'loading'>('loading');
   const [mapTheme, setMapTheme] = useState<MapTheme>('dark');
   const [isMapThemePickerOpen, setIsMapThemePickerOpen] = useState(false);
+  const [pendingMapTheme, setPendingMapTheme] = useState<MapTheme | null>(null);
+  const [mapThemeTransitionSnapshot, setMapThemeTransitionSnapshot] = useState<string | null>(null);
+  const [isCameraFollowing, setIsCameraFollowing] = useState(true);
+  const [cameraTransitionDuration, setCameraTransitionDuration] = useState(0);
   const animationFrameRef = useRef<number | null>(null);
+  const orientationTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mapThemeTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mapThemeTransitionInFlightRef = useRef(false);
+  const mapThemeFadeStartedRef = useRef(false);
+  const mapThemeTransitionOpacity = useRef(new Animated.Value(1)).current;
   const visualPoseRef = useRef<VisualPose | null>(null);
   const lastSnappedProgressRef = useRef<number | null>(null);
   const routeMatchingStateRef = useRef<RouteMatchingState>(
@@ -734,14 +747,12 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const trafficStatus = t(trafficKey);
   const hasTrafficData = trafficState !== 'loading' && trafficState !== 'unavailable';
   const driverMetrics = [
+    { icon: 'speedometer' as IconName, label: `${currentSpeedLabel} km/h` },
     nextStopDistanceMeters !== null
       ? { icon: 'map-marker-distance' as IconName, label: formatDistance(nextStopDistanceMeters, language) }
       : null,
     estimatedArrival
       ? { icon: 'clock-time-four-outline' as IconName, label: t('map.arrival', { time: estimatedArrival }) }
-      : null,
-    currentSpeedKmh !== null
-      ? { icon: 'speedometer' as IconName, label: `${currentSpeedLabel} km/h` }
       : null,
     nextStopDelaySeconds !== null
       ? { icon: 'calendar-clock-outline' as IconName, label: formatDelay(nextStopDelaySeconds, language) || t('map.onTime') }
@@ -759,6 +770,16 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
 
   const mapRef = useRef<any>(null);
   const cameraRef = useRef<any>(null);
+
+  useEffect(() => () => {
+    if (orientationTransitionTimerRef.current) {
+      clearTimeout(orientationTransitionTimerRef.current);
+    }
+    if (mapThemeTransitionTimerRef.current) {
+      clearTimeout(mapThemeTransitionTimerRef.current);
+    }
+    mapThemeTransitionOpacity.stopAnimation();
+  }, [mapThemeTransitionOpacity]);
 
   // Request location permissions and start watching GPS coordinates/heading
   useEffect(() => {
@@ -1273,8 +1294,10 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   }
 
   const handleRegionChange = (event: any) => {
-    if (event?.properties && typeof event.properties.bearing === 'number') {
-      const nextBearing = (event.properties.bearing + 360) % 360;
+    const eventBearing = event?.nativeEvent?.bearing ?? event?.properties?.bearing;
+
+    if (typeof eventBearing === 'number') {
+      const nextBearing = (eventBearing + 360) % 360;
       setMapBearing((current) => (
         Math.abs(((nextBearing - current + 540) % 360) - 180) >= 0.5
           ? nextBearing
@@ -1283,19 +1306,150 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     }
   };
 
-  const handleRecenter = () => {
-    setTrackingMode('course');
-
-    if (displayCoords) {
-      cameraRef.current?.easeTo({
-        center: displayCoords,
-        zoom: mapZoom,
-        bearing: displayRouteBearing,
-        pitch: mapPitch,
-        duration: 700,
-        easing: 'ease',
-      });
+  const releaseCameraFollow = () => {
+    if (orientationTransitionTimerRef.current) {
+      clearTimeout(orientationTransitionTimerRef.current);
+      orientationTransitionTimerRef.current = null;
     }
+    setCameraTransitionDuration(0);
+    setIsCameraFollowing(false);
+  };
+
+  const handleRegionWillChange = (event: any) => {
+    const isUserInteraction = event?.nativeEvent?.userInteraction
+      ?? event?.userInteraction
+      ?? false;
+
+    if (isUserInteraction) {
+      releaseCameraFollow();
+    }
+  };
+
+  const finishMapThemeTransition = () => {
+    if (!mapThemeTransitionInFlightRef.current || mapThemeFadeStartedRef.current) {
+      return;
+    }
+
+    mapThemeFadeStartedRef.current = true;
+    if (mapThemeTransitionTimerRef.current) {
+      clearTimeout(mapThemeTransitionTimerRef.current);
+      mapThemeTransitionTimerRef.current = null;
+    }
+
+    Animated.timing(mapThemeTransitionOpacity, {
+      toValue: 0,
+      duration: 420,
+      easing: Easing.inOut(Easing.cubic),
+      useNativeDriver: true,
+    }).start(({ finished }) => {
+      if (!finished) {
+        return;
+      }
+
+      setMapThemeTransitionSnapshot(null);
+      setPendingMapTheme(null);
+      mapThemeTransitionInFlightRef.current = false;
+      mapThemeFadeStartedRef.current = false;
+      mapThemeTransitionOpacity.setValue(1);
+    });
+  };
+
+  const handleMapThemeSnapshotReady = () => {
+    if (!pendingMapTheme) {
+      return;
+    }
+
+    setMapTheme(pendingMapTheme);
+    mapThemeTransitionTimerRef.current = setTimeout(finishMapThemeTransition, 2400);
+  };
+
+  const handleMapThemeSnapshotError = () => {
+    if (mapThemeTransitionTimerRef.current) {
+      clearTimeout(mapThemeTransitionTimerRef.current);
+      mapThemeTransitionTimerRef.current = null;
+    }
+    if (pendingMapTheme) {
+      setMapTheme(pendingMapTheme);
+    }
+    setMapThemeTransitionSnapshot(null);
+    setPendingMapTheme(null);
+    mapThemeTransitionInFlightRef.current = false;
+    mapThemeFadeStartedRef.current = false;
+  };
+
+  const handleMapThemeChange = async (theme: MapTheme) => {
+    setIsMapThemePickerOpen(false);
+    if (theme === mapTheme || mapThemeTransitionInFlightRef.current) {
+      return;
+    }
+
+    mapThemeTransitionInFlightRef.current = true;
+    mapThemeFadeStartedRef.current = false;
+
+    try {
+      const snapshot = await mapRef.current?.createStaticMapImage({ output: 'base64' });
+      if (!snapshot) {
+        throw new Error('Map snapshot unavailable');
+      }
+
+      mapThemeTransitionOpacity.setValue(1);
+      setPendingMapTheme(theme);
+      setMapThemeTransitionSnapshot(snapshot);
+    } catch {
+      mapThemeTransitionInFlightRef.current = false;
+      setMapTheme(theme);
+    }
+  };
+
+  const handleMapRenderedFully = () => {
+    if (
+      mapThemeTransitionSnapshot
+      && pendingMapTheme
+      && mapTheme === pendingMapTheme
+    ) {
+      finishMapThemeTransition();
+    }
+  };
+
+  const handleMapOrientation = () => {
+    const nextOrientation: MapOrientation = mapOrientation === 'course' ? 'northUp' : 'course';
+    if (orientationTransitionTimerRef.current) {
+      clearTimeout(orientationTransitionTimerRef.current);
+    }
+
+    setMapOrientation(nextOrientation);
+
+    if (isCameraFollowing) {
+      setCameraTransitionDuration(500);
+      orientationTransitionTimerRef.current = setTimeout(() => {
+        setCameraTransitionDuration(0);
+        orientationTransitionTimerRef.current = null;
+      }, 520);
+      return;
+    }
+
+    cameraRef.current?.setStop({
+      bearing: nextOrientation === 'course' ? displayRouteBearing : 0,
+      duration: 500,
+      easing: 'ease',
+    });
+  };
+
+  const handleRecenter = () => {
+    if (!displayCoords) {
+      return;
+    }
+
+    if (orientationTransitionTimerRef.current) {
+      clearTimeout(orientationTransitionTimerRef.current);
+    }
+
+    setCameraTransitionDuration(450);
+    setIsCameraFollowing(true);
+    orientationTransitionTimerRef.current = setTimeout(() => {
+      setCameraTransitionDuration(0);
+      orientationTransitionTimerRef.current = null;
+    }, 470);
   };
 
   const handleBack = () => {
@@ -1314,8 +1468,12 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
         ref={mapRef}
         style={styles.map}
         mapStyle={activeMapTheme.style}
+        onTouchStart={releaseCameraFollow}
         onPress={handleMapPress}
+        onRegionWillChange={handleRegionWillChange}
+        onRegionIsChanging={handleRegionChange}
         onRegionDidChange={handleRegionChange}
+        onDidFinishRenderingMapFully={handleMapRenderedFully}
         attributionPosition={{ bottom: mapOrnamentBottom, left: mapSafeLeft }}
         logoPosition={{ bottom: mapOrnamentBottom, left: mapSafeLeft }}
       >
@@ -1328,12 +1486,16 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
               zoom: 14,
               pitch: mapPitch,
             }}
-            center={trackingMode === 'course' ? displayCoords ?? undefined : undefined}
-            bearing={trackingMode === 'course' ? displayRouteBearing : undefined}
-            duration={trackingMode === 'course' ? 0 : undefined}
-            easing="linear"
-            pitch={mapPitch}
-            zoom={mapZoom}
+            center={isCameraFollowing ? displayCoords ?? undefined : undefined}
+            bearing={isCameraFollowing
+              ? mapOrientation === 'course' ? displayRouteBearing : 0
+              : undefined}
+            duration={isCameraFollowing ? cameraTransitionDuration : undefined}
+            easing={isCameraFollowing
+              ? cameraTransitionDuration > 0 ? 'ease' : 'linear'
+              : undefined}
+            pitch={isCameraFollowing ? mapPitch : undefined}
+            zoom={isCameraFollowing ? mapZoom : undefined}
           />
         ) : null}
 
@@ -1355,7 +1517,9 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
           >
             <View style={{
               transform: [{
-                rotate: `${trackingMode === 'course' ? 0 : displayRouteBearing - mapBearing}deg`,
+                rotate: `${isCameraFollowing && mapOrientation === 'course'
+                  ? 0
+                  : displayRouteBearing - mapBearing}deg`,
               }],
             }}>
               <View style={styles.busContainer}>
@@ -1464,6 +1628,24 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
         ) : null}
       </Map>
 
+      {mapThemeTransitionSnapshot ? (
+        <Animated.View
+          style={[
+            styles.mapThemeTransitionSnapshot,
+            { opacity: mapThemeTransitionOpacity },
+          ]}
+          pointerEvents="none"
+        >
+          <Image
+            source={{ uri: mapThemeTransitionSnapshot }}
+            style={styles.mapThemeTransitionImage}
+            resizeMode="cover"
+            onLoad={handleMapThemeSnapshotReady}
+            onError={handleMapThemeSnapshotError}
+          />
+        </Animated.View>
+      ) : null}
+
       {/* Route controls stay compact so the map remains the primary surface. */}
       <View style={[
         styles.hudTop,
@@ -1523,10 +1705,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
                     styles.mapThemeOption,
                     isActive && styles.mapThemeOptionActive,
                   ]}
-                  onPress={() => {
-                    setMapTheme(theme);
-                    setIsMapThemePickerOpen(false);
-                  }}
+                  onPress={() => handleMapThemeChange(theme)}
                   accessibilityRole="button"
                   accessibilityLabel={t('map.themeA11y', { theme: t(option.labelKey) })}
                 >
@@ -1553,11 +1732,35 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
         <TouchableOpacity
           style={[
             styles.mapRecenterTrigger,
-            trackingMode === 'course' && styles.mapRecenterTriggerActive,
+            mapOrientation === 'course' && styles.mapRecenterTriggerActive,
+          ]}
+          onPress={handleMapOrientation}
+          accessibilityRole="button"
+          accessibilityLabel={mapOrientation === 'course'
+            ? t('map.orientationNorthUp')
+            : t('map.orientationCourse')}
+          accessibilityState={{ selected: mapOrientation === 'northUp' }}
+        >
+          <MaterialCommunityIcons
+            name={mapOrientation === 'course' ? 'compass-outline' : 'navigation-variant'}
+            size={22}
+            color="#FFFFFF"
+          />
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[
+            styles.mapRecenterTrigger,
+            isCameraFollowing && styles.mapRecenterTriggerActive,
+            (!displayCoords || cameraTransitionDuration > 0) && styles.mapControlDisabled,
           ]}
           onPress={handleRecenter}
+          disabled={!displayCoords || cameraTransitionDuration > 0}
           accessibilityRole="button"
           accessibilityLabel={t('map.recenter')}
+          accessibilityState={{
+            disabled: !displayCoords || cameraTransitionDuration > 0,
+            selected: isCameraFollowing,
+          }}
         >
           <MaterialCommunityIcons name="crosshairs-gps" size={21} color="#FFFFFF" />
         </TouchableOpacity>
@@ -1634,6 +1837,18 @@ const styles = StyleSheet.create({
   },
   map: {
     flex: 1,
+  },
+  mapThemeTransitionSnapshot: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+  },
+  mapThemeTransitionImage: {
+    flex: 1,
+    width: '100%',
+    height: '100%',
   },
   center: {
     flex: 1,
@@ -1786,6 +2001,9 @@ const styles = StyleSheet.create({
   },
   mapRecenterTriggerActive: {
     backgroundColor: colors.primary,
+  },
+  mapControlDisabled: {
+    opacity: 0.45,
   },
   driverPanel: {
     position: 'absolute',

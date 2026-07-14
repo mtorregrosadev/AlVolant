@@ -27,6 +27,9 @@ type PreferencesContextValue = {
   recordRecent: (routeId: string, directionId: 0 | 1) => void;
   setLanguage: (language: AppLanguage) => void;
   setVehicleColor: (vehicleColor: VehicleColor) => void;
+  setBackgroundLocationEnabled: (enabled: boolean) => void;
+  setKeepAwakeEnabled: (enabled: boolean) => void;
+  setLiveActivitiesEnabled: (enabled: boolean) => void;
 };
 
 const PreferencesContext = createContext<PreferencesContextValue | null>(null);
@@ -38,14 +41,26 @@ export function PreferencesProvider({ children }: PropsWithChildren) {
 
   useEffect(() => {
     mountedRef.current = true;
+    let settled = false;
+    const fallbackTimer = setTimeout(() => {
+      if (!mountedRef.current || settled) return;
+      settled = true;
+      // A blocked keychain/storage service must not leave the app on a blank
+      // screen forever. The in-memory defaults remain private and usable.
+      setReady(true);
+    }, 3_000);
+
     void loadUserPreferences().then((stored) => {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || settled) return;
+      settled = true;
+      clearTimeout(fallbackTimer);
       setPreferences(stored);
       setReady(true);
     });
 
     return () => {
       mountedRef.current = false;
+      clearTimeout(fallbackTimer);
     };
   }, []);
 
@@ -75,6 +90,21 @@ export function PreferencesProvider({ children }: PropsWithChildren) {
     updatePreferences((current) => ({ ...current, vehicleColor }));
   }, [updatePreferences]);
 
+  const setBackgroundLocationEnabled = useCallback((enabled: boolean) => {
+    telemetry.capture('preference_changed', { setting: 'background_location', value: enabled });
+    updatePreferences((current) => ({ ...current, backgroundLocationEnabled: enabled }));
+  }, [updatePreferences]);
+
+  const setKeepAwakeEnabled = useCallback((enabled: boolean) => {
+    telemetry.capture('preference_changed', { setting: 'keep_screen_awake', value: enabled });
+    updatePreferences((current) => ({ ...current, keepAwakeEnabled: enabled }));
+  }, [updatePreferences]);
+
+  const setLiveActivitiesEnabled = useCallback((enabled: boolean) => {
+    telemetry.capture('preference_changed', { setting: 'live_activities', value: enabled });
+    updatePreferences((current) => ({ ...current, liveActivitiesEnabled: enabled }));
+  }, [updatePreferences]);
+
   const value = useMemo<PreferencesContextValue>(() => ({
     ready,
     preferences,
@@ -82,7 +112,20 @@ export function PreferencesProvider({ children }: PropsWithChildren) {
     recordRecent,
     setLanguage,
     setVehicleColor,
-  }), [preferences, ready, recordRecent, setLanguage, setVehicleColor, toggleFavorite]);
+    setBackgroundLocationEnabled,
+    setKeepAwakeEnabled,
+    setLiveActivitiesEnabled,
+  }), [
+    preferences,
+    ready,
+    recordRecent,
+    setBackgroundLocationEnabled,
+    setKeepAwakeEnabled,
+    setLiveActivitiesEnabled,
+    setLanguage,
+    setVehicleColor,
+    toggleFavorite,
+  ]);
 
   return <PreferencesContext.Provider value={value}>{children}</PreferencesContext.Provider>;
 }

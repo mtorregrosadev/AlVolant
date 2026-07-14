@@ -22,6 +22,9 @@ export type UserPreferences = {
   recentRoutes: RecentRoute[];
   language: AppLanguage;
   vehicleColor: VehicleColor;
+  backgroundLocationEnabled: boolean;
+  keepAwakeEnabled: boolean;
+  liveActivitiesEnabled: boolean;
 };
 
 type StoredPreferences = UserPreferences & {
@@ -33,6 +36,9 @@ export const EMPTY_USER_PREFERENCES: UserPreferences = {
   recentRoutes: [],
   language: 'ca',
   vehicleColor: 'red',
+  backgroundLocationEnabled: true,
+  keepAwakeEnabled: true,
+  liveActivitiesEnabled: true,
 };
 
 let writeQueue: Promise<void> = Promise.resolve();
@@ -108,6 +114,9 @@ function normalizePreferences(value: unknown): UserPreferences {
     recentRoutes: recentRoutes.slice(0, MAX_RECENTS),
     language,
     vehicleColor,
+    backgroundLocationEnabled: value.backgroundLocationEnabled !== false,
+    keepAwakeEnabled: value.keepAwakeEnabled !== false,
+    liveActivitiesEnabled: value.liveActivitiesEnabled !== false,
   };
 }
 

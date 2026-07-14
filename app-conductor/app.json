@@ -9,6 +9,14 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.anonymous.app-conductor",
+      "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": false
+        },
+        "UIBackgroundModes": [
+          "location"
+        ]
+      },
       "privacyManifests": {
         "NSPrivacyTracking": false,
         "NSPrivacyCollectedDataTypes": [
@@ -65,15 +73,27 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
+      "./plugins/withLocalLiveActivities",
       "@maplibre/maplibre-react-native",
       "expo-dev-client",
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "AlVolant utilitza la teva ubicació mentre fas servir l’app per ordenar les línies properes i mostrar la posició del bus a la ruta."
+          "locationWhenInUsePermission": "AlVolant utilitza la teva ubicació mentre fas servir l’app per ordenar les línies properes i mostrar la posició del bus a la ruta.",
+          "locationAlwaysAndWhenInUsePermission": false,
+          "locationAlwaysPermission": false,
+          "isIosBackgroundLocationEnabled": true
         }
       ],
-      "expo-font"
+      "expo-font",
+      [
+        "expo-widgets",
+        {
+          "enablePushNotifications": false,
+          "frequentUpdates": false
+        }
+      ],
+      "expo-task-manager"
     ]
   }
 }

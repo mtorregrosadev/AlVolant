@@ -2,7 +2,6 @@ import React, { useEffect, useState, useRef } from 'react';
 import {
   Animated,
   Easing,
-  Image,
   StyleSheet,
   View,
   Text,
@@ -20,6 +19,8 @@ import {
   Marker,
 } from '@maplibre/maplibre-react-native';
 import * as Location from 'expo-location';
+import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
+import * as ScreenOrientation from 'expo-screen-orientation';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   apiService,
@@ -29,6 +30,17 @@ import {
   type VehiclePosition,
 } from '../services/api';
 import { telemetry } from '../services/telemetry';
+import {
+  requestBackgroundRoutePermission,
+  startBackgroundRouteTracking,
+  stopBackgroundRouteTracking,
+} from '../services/backgroundRoute';
+import {
+  endRouteLiveActivity,
+  startRouteLiveActivity,
+  updateRouteLiveActivity,
+  type RouteLiveActivityProps,
+} from '../services/routeLiveActivity';
 import { formatDirectionLabel } from '../services/directionLabel';
 import {
   createRouteMatchingState,
@@ -77,6 +89,11 @@ type GpsFix = {
   headingDegrees: number | null;
   timestampMs: number;
 };
+type DeviceHeading = {
+  degrees: number;
+  accuracy: number;
+  source: 'true' | 'magnetic';
+};
 type VisualPose = {
   coordinate: Coordinate;
   bearing: number;
@@ -114,6 +131,9 @@ const LIVE_REFRESH_JITTER_MS = 5_000;
 const LIVE_RECONNECT_MAX_MS = 30_000;
 const LIVE_SUBSCRIPTION_TIMEOUT_MS = 10_000;
 const LIVE_DATA_STALE_AFTER_MS = 180_000;
+const DEVICE_HEADING_STALE_AFTER_MS = 3_500;
+const DEVICE_HEADING_DEADBAND_DEGREES = 0.8;
+const DEVICE_HEADING_MIN_UPDATE_INTERVAL_MS = 80;
 
 function toRadians(value: number) {
   return (value * Math.PI) / 180;
@@ -153,6 +173,68 @@ function bearingBetween(from: Coordinate, to: Coordinate) {
     - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
 
   return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+
+function isValidHeading(value: unknown): value is number {
+  return typeof value === 'number'
+    && Number.isFinite(value)
+    && value >= 0
+    && value <= 360;
+}
+
+function normalizeHeading(value: number) {
+  return ((value % 360) + 360) % 360;
+}
+
+function shortestHeadingDelta(from: number, to: number) {
+  return ((normalizeHeading(to) - normalizeHeading(from) + 540) % 360) - 180;
+}
+
+function headingOffsetForScreenOrientation(
+  orientation: ScreenOrientation.Orientation,
+): number | null {
+  switch (orientation) {
+    case ScreenOrientation.Orientation.PORTRAIT_UP:
+      return 0;
+    case ScreenOrientation.Orientation.PORTRAIT_DOWN:
+      return 180;
+    case ScreenOrientation.Orientation.LANDSCAPE_LEFT:
+      return 90;
+    case ScreenOrientation.Orientation.LANDSCAPE_RIGHT:
+      return -90;
+    default:
+      return null;
+  }
+}
+
+function selectDeviceHeading(
+  heading: Location.LocationHeadingObject,
+): DeviceHeading | null {
+  const accuracy = Number.isFinite(heading.accuracy) ? heading.accuracy : 0;
+
+  // expo-location reports accuracy 0 when the compass is not calibrated enough
+  // to provide a useful direction. In that case GPS/route bearing is safer.
+  if (accuracy < 1) {
+    return null;
+  }
+
+  if (isValidHeading(heading.trueHeading)) {
+    return {
+      degrees: normalizeHeading(heading.trueHeading),
+      accuracy,
+      source: 'true',
+    };
+  }
+
+  if (isValidHeading(heading.magHeading)) {
+    return {
+      degrees: normalizeHeading(heading.magHeading),
+      accuracy,
+      source: 'magnetic',
+    };
+  }
+
+  return null;
 }
 
 function interpolateCoordinate(from: Coordinate, to: Coordinate, ratio: number): Coordinate {
@@ -517,14 +599,51 @@ const MAP_THEME_OPTIONS: Record<MapTheme, MapThemeOption> = {
   },
 };
 
+// A lightweight colour veil hides MapLibre's unavoidable style rebuild. The
+// old implementation captured the whole map as a base64 image on every tap,
+// transferred it through the native bridge and decoded it again; that work was
+// the source of the visible hitch. These colours are deliberately close to the
+// corresponding basemap so the transition does not flash grey while tiles load.
+const MAP_THEME_TRANSITION_COLORS: Record<MapTheme, string> = {
+  dark: '#0B1118',
+  light: '#F4F1E9',
+  satellite: '#17252A',
+};
+const MAP_THEME_TRANSITION_MAX_MS = 1_200;
+
 export default function MapScreen({ route, navigation }: MapScreenProps) {
   const { routeId, directionId, assignedVehicle, tripId, directionLabel } = route.params;
   const { width: viewportWidth, height: viewportHeight } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const isLandscape = viewportWidth > viewportHeight;
   const isCompactLandscape = isLandscape && viewportHeight < 520;
-  const { preferences } = usePreferences();
+  const { preferences, setBackgroundLocationEnabled } = usePreferences();
   const { language, t } = useI18n();
+
+  useEffect(() => {
+    if (!preferences.keepAwakeEnabled) {
+      return undefined;
+    }
+
+    const keepAwakeTag = 'alvolant-active-route';
+    let cancelled = false;
+    void activateKeepAwakeAsync(keepAwakeTag)
+      .then(() => {
+        if (cancelled) {
+          return deactivateKeepAwake(keepAwakeTag);
+        }
+        return undefined;
+      })
+      .catch((error) => {
+        telemetry.captureException(error, { phase: 'keep_awake_activate' });
+      });
+    return () => {
+      cancelled = true;
+      void deactivateKeepAwake(keepAwakeTag).catch((error) => {
+        telemetry.captureException(error, { phase: 'keep_awake_deactivate' });
+      });
+    };
+  }, [preferences.keepAwakeEnabled]);
 
   const [routeFeature, setRouteFeature] = useState<any>(null);
   const [stopsFeature, setStopsFeature] = useState<any>(null);
@@ -535,6 +654,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const [locationGranted, setLocationGranted] = useState(false);
   const [mapOrientation, setMapOrientation] = useState<MapOrientation>('course');
   const [gpsFix, setGpsFix] = useState<GpsFix | null>(null);
+  const [deviceHeading, setDeviceHeading] = useState<DeviceHeading | null>(null);
   const [visualPose, setVisualPose] = useState<VisualPose | null>(null);
   const [displayRouteProgress, setDisplayRouteProgress] = useState<number | null>(null);
   const [mapBearing, setMapBearing] = useState<number>(0);
@@ -545,16 +665,27 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const [mapTheme, setMapTheme] = useState<MapTheme>('dark');
   const [isMapThemePickerOpen, setIsMapThemePickerOpen] = useState(false);
   const [pendingMapTheme, setPendingMapTheme] = useState<MapTheme | null>(null);
-  const [mapThemeTransitionSnapshot, setMapThemeTransitionSnapshot] = useState<string | null>(null);
+  const [mapThemeTransitionColor, setMapThemeTransitionColor] = useState(
+    MAP_THEME_TRANSITION_COLORS.dark,
+  );
   const [isCameraFollowing, setIsCameraFollowing] = useState(true);
   const [cameraTransitionDuration, setCameraTransitionDuration] = useState(0);
   const animationFrameRef = useRef<number | null>(null);
+  const smoothedDeviceHeadingRef = useRef<number | null>(null);
+  const screenHeadingOffsetRef = useRef(0);
+  const lastDeviceHeadingUpdateRef = useRef(0);
+  const deviceHeadingExpiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const orientationTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mapThemeTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const mapThemeTransitionInFlightRef = useRef(false);
-  const mapThemeFadeStartedRef = useRef(false);
-  const mapThemeTransitionOpacity = useRef(new Animated.Value(1)).current;
+  const appliedMapThemeRef = useRef<MapTheme>('dark');
+  const mapThemeTransitionTargetRef = useRef<MapTheme | null>(null);
+  const mapThemeTransitionGenerationRef = useRef(0);
+  const mapThemeStyleReadyGenerationRef = useRef<number | null>(null);
+  const mapThemeFadeGenerationRef = useRef<number | null>(null);
+  const mapThemeTransitionOpacity = useRef(new Animated.Value(0)).current;
   const visualPoseRef = useRef<VisualPose | null>(null);
+  const liveActivityPropsRef = useRef<RouteLiveActivityProps | null>(null);
+  const liveActivityStartedRef = useRef(false);
   const lastSnappedProgressRef = useRef<number | null>(null);
   const routeMatchingStateRef = useRef<RouteMatchingState>(
     createRouteMatchingState('offRoute'),
@@ -567,6 +698,18 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const userSpeedKmh = gpsFix?.speedKmh ?? null;
   const displayCoords = visualPose?.coordinate ?? null;
   const displayRouteBearing = visualPose?.bearing ?? 0;
+  const gpsBearing = gpsFix
+    && isValidHeading(gpsFix.headingDegrees)
+    && (gpsFix.speedKmh ?? 0) >= MIN_MOVING_SPEED_KMH
+    ? normalizeHeading(gpsFix.headingDegrees)
+    : null;
+  const vehicleWorldBearing = deviceHeading?.degrees
+    ?? gpsBearing
+    ?? displayRouteBearing;
+  const effectiveMapBearing = isCameraFollowing && cameraTransitionDuration === 0
+    ? mapOrientation === 'course' ? displayRouteBearing : 0
+    : mapBearing;
+  const vehicleMarkerRotation = vehicleWorldBearing - effectiveMapBearing;
 
   const directionName = React.useMemo(() => {
     if (directionLabel) {
@@ -677,6 +820,70 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const nextStopEtaMinutes = nextStopDistanceMeters === null
     ? null
     : ((nextStopDistanceMeters / 1000) / effectiveSpeedKmh) * 60;
+  const liveActivityProps = React.useMemo<RouteLiveActivityProps>(() => {
+    const updatedAtEpochMs = Date.now();
+    const hasValidEta = nextStopEtaMinutes !== null
+      && Number.isFinite(nextStopEtaMinutes)
+      && nextStopEtaMinutes >= 0;
+    const isArrivingNow = hasValidEta && nextStopEtaMinutes <= 1;
+
+    return {
+      line: String(routeShortName),
+      direction: directionName || t('common.directionPending'),
+      nextStop: nextStop?.stop_name || t('map.calculatingStop'),
+      nextStopLabel: t('map.nextStop'),
+      etaLabel: t('map.eta'),
+      etaValue: hasValidEta ? t('common.now') : '--',
+      updatedAtEpochMs,
+      etaEpochMs: hasValidEta && !isArrivingNow
+        ? updatedAtEpochMs + Math.round(nextStopEtaMinutes * 60_000)
+        : 0,
+      routeColor,
+      routeTextColor,
+    };
+  }, [
+    directionName,
+    nextStop?.stop_name,
+    nextStopEtaMinutes,
+    routeColor,
+    routeShortName,
+    routeTextColor,
+    t,
+  ]);
+  liveActivityPropsRef.current = liveActivityProps;
+  const liveActivityReady = preferences.liveActivitiesEnabled
+    && !loading
+    && !error
+    && Boolean(routeInfo);
+
+  useEffect(() => {
+    const initialProps = liveActivityPropsRef.current;
+    if (!liveActivityReady || !initialProps) {
+      liveActivityStartedRef.current = false;
+      return undefined;
+    }
+
+    let disposed = false;
+    void startRouteLiveActivity(initialProps).then((started) => {
+      if (disposed) {
+        if (started) void endRouteLiveActivity();
+        return;
+      }
+      liveActivityStartedRef.current = started;
+    });
+
+    return () => {
+      disposed = true;
+      liveActivityStartedRef.current = false;
+      void endRouteLiveActivity();
+    };
+  }, [directionId, liveActivityReady, routeId]);
+
+  useEffect(() => {
+    if (!liveActivityReady || !liveActivityStartedRef.current) return;
+    void updateRouteLiveActivity(liveActivityProps);
+  }, [liveActivityProps, liveActivityReady]);
+
   const nextStopDelaySeconds = delayForStop(routeTripUpdates, tripId, nextStop);
   const paceInfo = getPaceInfo(nextStopDelaySeconds, language);
   const estimatedArrival = formatEstimatedArrival(nextStopEtaMinutes);
@@ -771,20 +978,151 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const mapRef = useRef<any>(null);
   const cameraRef = useRef<any>(null);
 
+  useEffect(() => {
+    let active = true;
+
+    const applyOrientation = (orientation: ScreenOrientation.Orientation) => {
+      const nextOffset = headingOffsetForScreenOrientation(orientation);
+      if (nextOffset === null || nextOffset === screenHeadingOffsetRef.current) {
+        return;
+      }
+
+      screenHeadingOffsetRef.current = nextOffset;
+      smoothedDeviceHeadingRef.current = null;
+      lastDeviceHeadingUpdateRef.current = 0;
+      setDeviceHeading(null);
+    };
+
+    void ScreenOrientation.getOrientationAsync()
+      .then((orientation) => {
+        if (active) applyOrientation(orientation);
+      })
+      .catch(() => undefined);
+
+    const subscription = ScreenOrientation.addOrientationChangeListener((event) => {
+      if (active) applyOrientation(event.orientationInfo.orientation);
+    });
+
+    return () => {
+      active = false;
+      subscription.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    const configureBackgroundTracking = async () => {
+      if (!preferences.backgroundLocationEnabled) {
+        await stopBackgroundRouteTracking();
+        return;
+      }
+
+      // The foreground GPS watcher owns the only permission prompt. Once the
+      // route is active, iOS may continue that user-initiated session in the
+      // background with its visible location indicator; “Always” is not used.
+      if (!locationGranted) return;
+
+      const permission = await requestBackgroundRoutePermission();
+      if (!active) return;
+      if (permission !== 'granted') {
+        setBackgroundLocationEnabled(false);
+        await stopBackgroundRouteTracking();
+        return;
+      }
+
+      const started = await startBackgroundRouteTracking();
+      if (active && !started) {
+        console.warn('Background route tracking is unavailable');
+      }
+    };
+
+    void configureBackgroundTracking().catch(() => {
+      if (active) {
+        console.warn('Background route tracking could not start');
+      }
+    });
+
+    return () => {
+      active = false;
+      void stopBackgroundRouteTracking();
+    };
+  }, [locationGranted, preferences.backgroundLocationEnabled, setBackgroundLocationEnabled]);
+
   useEffect(() => () => {
     if (orientationTransitionTimerRef.current) {
       clearTimeout(orientationTransitionTimerRef.current);
     }
     if (mapThemeTransitionTimerRef.current) {
       clearTimeout(mapThemeTransitionTimerRef.current);
+      mapThemeTransitionTimerRef.current = null;
     }
+    mapThemeTransitionGenerationRef.current += 1;
     mapThemeTransitionOpacity.stopAnimation();
   }, [mapThemeTransitionOpacity]);
 
   // Request location permissions and start watching GPS coordinates/heading
   useEffect(() => {
-    let subscription: any;
+    let positionSubscription: Location.LocationSubscription | null = null;
+    let headingSubscription: Location.LocationSubscription | null = null;
     let active = true;
+
+    const refreshHeadingExpiry = () => {
+      if (deviceHeadingExpiryTimerRef.current) {
+        clearTimeout(deviceHeadingExpiryTimerRef.current);
+      }
+      deviceHeadingExpiryTimerRef.current = setTimeout(() => {
+        if (!active) return;
+        smoothedDeviceHeadingRef.current = null;
+        lastDeviceHeadingUpdateRef.current = 0;
+        setDeviceHeading(null);
+        deviceHeadingExpiryTimerRef.current = null;
+      }, DEVICE_HEADING_STALE_AFTER_MS);
+    };
+
+    const handleDeviceHeading = (heading: Location.LocationHeadingObject) => {
+      if (!active) return;
+      const rawReading = selectDeviceHeading(heading);
+      if (!rawReading) return;
+      const reading = {
+        ...rawReading,
+        degrees: normalizeHeading(rawReading.degrees + screenHeadingOffsetRef.current),
+      };
+
+      refreshHeadingExpiry();
+      const current = smoothedDeviceHeadingRef.current;
+      if (current === null) {
+        smoothedDeviceHeadingRef.current = reading.degrees;
+        lastDeviceHeadingUpdateRef.current = Date.now();
+        setDeviceHeading(reading);
+        return;
+      }
+
+      const delta = shortestHeadingDelta(current, reading.degrees);
+      if (Math.abs(delta) < DEVICE_HEADING_DEADBAND_DEGREES) {
+        return;
+      }
+      const now = Date.now();
+      if (
+        now - lastDeviceHeadingUpdateRef.current < DEVICE_HEADING_MIN_UPDATE_INTERVAL_MS
+        && Math.abs(delta) < 20
+      ) {
+        return;
+      }
+
+      // Higher quality readings can react faster. Large deliberate turns also
+      // receive a little more weight, while small compass noise is damped.
+      const accuracyWeight = reading.accuracy >= 3
+        ? 0.42
+        : reading.accuracy >= 2 ? 0.32 : 0.22;
+      const smoothingWeight = Math.abs(delta) >= 35
+        ? Math.max(accuracyWeight, 0.52)
+        : accuracyWeight;
+      const nextDegrees = normalizeHeading(current + delta * smoothingWeight);
+      smoothedDeviceHeadingRef.current = nextDegrees;
+      lastDeviceHeadingUpdateRef.current = now;
+      setDeviceHeading({ ...reading, degrees: nextDegrees });
+    };
 
     async function setupLocation() {
       try {
@@ -794,7 +1132,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
         setLocationGranted(granted);
 
         if (granted) {
-          const nextSubscription = await Location.watchPositionAsync(
+          const nextPositionSubscription = await Location.watchPositionAsync(
             {
               accuracy: Location.Accuracy.BestForNavigation,
               timeInterval: 1000,
@@ -811,8 +1149,8 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
                 speedKmh: typeof loc.coords.speed === 'number' && loc.coords.speed >= 0
                   ? loc.coords.speed * MS_TO_KMH
                   : null,
-                headingDegrees: typeof loc.coords.heading === 'number'
-                  ? loc.coords.heading
+                headingDegrees: isValidHeading(loc.coords.heading)
+                  ? normalizeHeading(loc.coords.heading)
                   : null,
                 timestampMs: typeof loc.timestamp === 'number' && Number.isFinite(loc.timestamp)
                   ? loc.timestamp
@@ -821,10 +1159,26 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
             }
           );
           if (!active) {
-            nextSubscription.remove();
+            nextPositionSubscription.remove();
             return;
           }
-          subscription = nextSubscription;
+          positionSubscription = nextPositionSubscription;
+
+          try {
+            const nextHeadingSubscription = await Location.watchHeadingAsync(
+              handleDeviceHeading,
+              (message) => console.warn('Device heading unavailable:', message),
+            );
+            if (!active) {
+              nextHeadingSubscription.remove();
+              return;
+            }
+            headingSubscription = nextHeadingSubscription;
+          } catch (headingError) {
+            // Position tracking remains active: the marker falls back to its
+            // GPS course and finally to the matched route bearing.
+            console.warn('Error starting device heading:', headingError);
+          }
         } else {
           console.warn('Location permission not granted');
         }
@@ -837,8 +1191,17 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
 
     return () => {
       active = false;
-      if (subscription) {
-        subscription.remove();
+      if (deviceHeadingExpiryTimerRef.current) {
+        clearTimeout(deviceHeadingExpiryTimerRef.current);
+        deviceHeadingExpiryTimerRef.current = null;
+      }
+      smoothedDeviceHeadingRef.current = null;
+      lastDeviceHeadingUpdateRef.current = 0;
+      if (positionSubscription) {
+        positionSubscription.remove();
+      }
+      if (headingSubscription) {
+        headingSubscription.remove();
       }
     };
   }, []);
@@ -1325,12 +1688,15 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     }
   };
 
-  const finishMapThemeTransition = () => {
-    if (!mapThemeTransitionInFlightRef.current || mapThemeFadeStartedRef.current) {
+  const finishMapThemeTransition = (generation: number) => {
+    if (
+      generation !== mapThemeTransitionGenerationRef.current
+      || mapThemeFadeGenerationRef.current === generation
+    ) {
       return;
     }
 
-    mapThemeFadeStartedRef.current = true;
+    mapThemeFadeGenerationRef.current = generation;
     if (mapThemeTransitionTimerRef.current) {
       clearTimeout(mapThemeTransitionTimerRef.current);
       mapThemeTransitionTimerRef.current = null;
@@ -1338,76 +1704,99 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
 
     Animated.timing(mapThemeTransitionOpacity, {
       toValue: 0,
-      duration: 420,
-      easing: Easing.inOut(Easing.cubic),
+      duration: 280,
+      easing: Easing.out(Easing.cubic),
       useNativeDriver: true,
     }).start(({ finished }) => {
-      if (!finished) {
+      if (!finished || generation !== mapThemeTransitionGenerationRef.current) {
         return;
       }
 
-      setMapThemeTransitionSnapshot(null);
       setPendingMapTheme(null);
-      mapThemeTransitionInFlightRef.current = false;
-      mapThemeFadeStartedRef.current = false;
-      mapThemeTransitionOpacity.setValue(1);
+      mapThemeTransitionTargetRef.current = null;
+      mapThemeStyleReadyGenerationRef.current = null;
+      mapThemeFadeGenerationRef.current = null;
     });
   };
 
-  const handleMapThemeSnapshotReady = () => {
-    if (!pendingMapTheme) {
+  const handleMapThemeChange = (theme: MapTheme) => {
+    setIsMapThemePickerOpen(false);
+
+    const currentTarget = mapThemeTransitionTargetRef.current;
+    if (theme === currentTarget || (!currentTarget && theme === appliedMapThemeRef.current)) {
       return;
     }
 
-    setMapTheme(pendingMapTheme);
-    mapThemeTransitionTimerRef.current = setTimeout(finishMapThemeTransition, 2400);
-  };
-
-  const handleMapThemeSnapshotError = () => {
     if (mapThemeTransitionTimerRef.current) {
       clearTimeout(mapThemeTransitionTimerRef.current);
       mapThemeTransitionTimerRef.current = null;
     }
-    if (pendingMapTheme) {
-      setMapTheme(pendingMapTheme);
-    }
-    setMapThemeTransitionSnapshot(null);
-    setPendingMapTheme(null);
-    mapThemeTransitionInFlightRef.current = false;
-    mapThemeFadeStartedRef.current = false;
-  };
+    mapThemeTransitionOpacity.stopAnimation();
 
-  const handleMapThemeChange = async (theme: MapTheme) => {
-    setIsMapThemePickerOpen(false);
-    if (theme === mapTheme || mapThemeTransitionInFlightRef.current) {
+    const generation = mapThemeTransitionGenerationRef.current + 1;
+    mapThemeTransitionGenerationRef.current = generation;
+    mapThemeStyleReadyGenerationRef.current = null;
+    mapThemeFadeGenerationRef.current = null;
+
+    // A second tap can return to the style that is still on screen before the
+    // first switch is applied. Cancel that pending switch instead of reloading
+    // the exact same style.
+    if (theme === appliedMapThemeRef.current) {
+      mapThemeTransitionTargetRef.current = null;
+      setPendingMapTheme(null);
+      Animated.timing(mapThemeTransitionOpacity, {
+        toValue: 0,
+        duration: 160,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }).start();
       return;
     }
 
-    mapThemeTransitionInFlightRef.current = true;
-    mapThemeFadeStartedRef.current = false;
+    mapThemeTransitionTargetRef.current = theme;
+    setPendingMapTheme(theme);
+    setMapThemeTransitionColor(MAP_THEME_TRANSITION_COLORS[theme]);
 
-    try {
-      const snapshot = await mapRef.current?.createStaticMapImage({ output: 'base64' });
-      if (!snapshot) {
-        throw new Error('Map snapshot unavailable');
+    // Fade the cheap native veil in first, then rebuild the style underneath.
+    // The generation check makes rapid theme changes safely interruptible.
+    Animated.timing(mapThemeTransitionOpacity, {
+      toValue: 0.94,
+      duration: 110,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start(({ finished }) => {
+      if (!finished || generation !== mapThemeTransitionGenerationRef.current) {
+        return;
       }
 
-      mapThemeTransitionOpacity.setValue(1);
-      setPendingMapTheme(theme);
-      setMapThemeTransitionSnapshot(snapshot);
-    } catch {
-      mapThemeTransitionInFlightRef.current = false;
+      appliedMapThemeRef.current = theme;
       setMapTheme(theme);
+      mapThemeTransitionTimerRef.current = setTimeout(
+        () => finishMapThemeTransition(generation),
+        MAP_THEME_TRANSITION_MAX_MS,
+      );
+    });
+  };
+
+  const handleMapStyleLoaded = () => {
+    const generation = mapThemeTransitionGenerationRef.current;
+    const target = mapThemeTransitionTargetRef.current;
+    if (
+      target
+      && mapTheme === target
+      && appliedMapThemeRef.current === target
+    ) {
+      mapThemeStyleReadyGenerationRef.current = generation;
     }
   };
 
   const handleMapRenderedFully = () => {
+    const generation = mapThemeTransitionGenerationRef.current;
     if (
-      mapThemeTransitionSnapshot
-      && pendingMapTheme
-      && mapTheme === pendingMapTheme
+      mapThemeTransitionTargetRef.current === mapTheme
+      && mapThemeStyleReadyGenerationRef.current === generation
     ) {
-      finishMapThemeTransition();
+      finishMapThemeTransition(generation);
     }
   };
 
@@ -1473,6 +1862,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
         onRegionWillChange={handleRegionWillChange}
         onRegionIsChanging={handleRegionChange}
         onRegionDidChange={handleRegionChange}
+        onDidFinishLoadingStyle={handleMapStyleLoaded}
         onDidFinishRenderingMapFully={handleMapRenderedFully}
         attributionPosition={{ bottom: mapOrnamentBottom, left: mapSafeLeft }}
         logoPosition={{ bottom: mapOrnamentBottom, left: mapSafeLeft }}
@@ -1517,9 +1907,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
           >
             <View style={{
               transform: [{
-                rotate: `${isCameraFollowing && mapOrientation === 'course'
-                  ? 0
-                  : displayRouteBearing - mapBearing}deg`,
+                rotate: `${vehicleMarkerRotation}deg`,
               }],
             }}>
               <View style={styles.busContainer}>
@@ -1628,23 +2016,16 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
         ) : null}
       </Map>
 
-      {mapThemeTransitionSnapshot ? (
-        <Animated.View
-          style={[
-            styles.mapThemeTransitionSnapshot,
-            { opacity: mapThemeTransitionOpacity },
-          ]}
-          pointerEvents="none"
-        >
-          <Image
-            source={{ uri: mapThemeTransitionSnapshot }}
-            style={styles.mapThemeTransitionImage}
-            resizeMode="cover"
-            onLoad={handleMapThemeSnapshotReady}
-            onError={handleMapThemeSnapshotError}
-          />
-        </Animated.View>
-      ) : null}
+      <Animated.View
+        style={[
+          styles.mapThemeTransitionVeil,
+          {
+            backgroundColor: mapThemeTransitionColor,
+            opacity: mapThemeTransitionOpacity,
+          },
+        ]}
+        pointerEvents="none"
+      />
 
       {/* Route controls stay compact so the map remains the primary surface. */}
       <View style={[
@@ -1696,7 +2077,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
           <View style={[styles.mapThemeMenu, usesLightChrome && styles.mapChromeLight]}>
             {(Object.keys(MAP_THEME_OPTIONS) as MapTheme[]).map((theme) => {
               const option = MAP_THEME_OPTIONS[theme];
-              const isActive = theme === mapTheme;
+              const isActive = theme === (pendingMapTheme ?? mapTheme);
 
               return (
                 <TouchableOpacity
@@ -1838,17 +2219,12 @@ const styles = StyleSheet.create({
   map: {
     flex: 1,
   },
-  mapThemeTransitionSnapshot: {
+  mapThemeTransitionVeil: {
     position: 'absolute',
     top: 0,
     right: 0,
     bottom: 0,
     left: 0,
-  },
-  mapThemeTransitionImage: {
-    flex: 1,
-    width: '100%',
-    height: '100%',
   },
   center: {
     flex: 1,

@@ -5,6 +5,7 @@
   "dependencies": {
     "@expo-google-fonts/inter": "^0.4.2",
     "@expo-google-fonts/newsreader": "^0.4.1",
+    "@expo/ui": "~57.0.4",
     "@expo/vector-icons": "^15.1.1",
     "@maplibre/maplibre-react-native": "^11.3.6",
     "@react-native-async-storage/async-storage": "2.2.0",
@@ -14,8 +15,12 @@
     "expo": "~57.0.4",
     "expo-dev-client": "~57.0.5",
     "expo-font": "~57.0.0",
+    "expo-keep-awake": "~57.0.0",
     "expo-location": "~57.0.2",
+    "expo-screen-orientation": "~57.0.0",
     "expo-status-bar": "~57.0.0",
+    "expo-task-manager": "~57.0.2",
+    "expo-widgets": "~57.0.3",
     "react": "19.2.3",
     "react-native": "0.86.0",
     "react-native-safe-area-context": "~5.7.0",
@@ -34,6 +39,7 @@
     "start": "expo start",
     "android": "expo run:android",
     "ios": "expo run:ios",
+    "ipa:unsigned": "../scripts/build_unsigned_ipa.sh",
     "web": "expo start --web"
   },
   "private": true

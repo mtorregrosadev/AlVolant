@@ -1,6 +1,7 @@
 import { registerRootComponent } from 'expo';
 
 import App from './App';
+import './src/services/backgroundRoute';
 import { installGlobalTelemetryErrorHandler } from './src/services/telemetry';
 
 installGlobalTelemetryErrorHandler();

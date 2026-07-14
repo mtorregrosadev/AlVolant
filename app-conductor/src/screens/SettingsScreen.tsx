@@ -1,7 +1,11 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
+  Alert,
+  Linking,
+  Platform,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TouchableOpacity,
   useWindowDimensions,
@@ -15,6 +19,10 @@ import type { RootStackParamList } from '../../App';
 import { usePreferences } from '../PreferencesContext';
 import { useI18n, type TranslationKey } from '../i18n';
 import type { AppLanguage, VehicleColor } from '../services/userPreferences';
+import {
+  requestBackgroundRoutePermission,
+  stopBackgroundRouteTracking,
+} from '../services/backgroundRoute';
 import {
   colors,
   fonts,
@@ -60,9 +68,57 @@ function BusPreview({ accent }: { accent: string }) {
 export default function SettingsScreen({ navigation }: SettingsScreenProps) {
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
-  const { preferences, setLanguage, setVehicleColor } = usePreferences();
+  const {
+    preferences,
+    setBackgroundLocationEnabled,
+    setKeepAwakeEnabled,
+    setLiveActivitiesEnabled,
+    setLanguage,
+    setVehicleColor,
+  } = usePreferences();
   const { t } = useI18n();
+  const [requestingBackgroundPermission, setRequestingBackgroundPermission] = useState(false);
   const previewAccent = vehicleAccentColor(preferences.vehicleColor);
+
+  const handleBackgroundLocationChange = async (enabled: boolean) => {
+    if (!enabled) {
+      setBackgroundLocationEnabled(false);
+      void stopBackgroundRouteTracking();
+      return;
+    }
+
+    setRequestingBackgroundPermission(true);
+    try {
+      const result = await requestBackgroundRoutePermission();
+      if (result === 'granted') {
+        setBackgroundLocationEnabled(true);
+        return;
+      }
+
+      if (result === 'unavailable') {
+        Alert.alert(
+          t('settings.backgroundUnavailableTitle'),
+          t('settings.backgroundUnavailableHint'),
+          [{ text: t('settings.notNow') }],
+        );
+        return;
+      }
+
+      Alert.alert(
+        t('settings.permissionDeniedTitle'),
+        t('settings.permissionDeniedHint'),
+        [
+          { text: t('settings.notNow'), style: 'cancel' },
+          {
+            text: t('settings.openSystemSettings'),
+            onPress: () => { void Linking.openSettings(); },
+          },
+        ],
+      );
+    } finally {
+      setRequestingBackgroundPermission(false);
+    }
+  };
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'right', 'bottom', 'left']}>
@@ -83,6 +139,7 @@ export default function SettingsScreen({ navigation }: SettingsScreenProps) {
       </View>
 
       <ScrollView
+        style={styles.scroll}
         contentContainerStyle={[
           styles.content,
           isLandscape && styles.contentLandscape,
@@ -90,7 +147,7 @@ export default function SettingsScreen({ navigation }: SettingsScreenProps) {
         showsVerticalScrollIndicator={false}
       >
         <View style={[styles.settingsGrid, isLandscape && styles.settingsGridLandscape]}>
-          <View style={styles.card}>
+          <View style={[styles.card, isLandscape && styles.cardLandscape]}>
             <View style={styles.cardHeading}>
               <View style={styles.cardIcon}>
                 <MaterialCommunityIcons name="translate" size={19} color={colors.primary} />
@@ -124,7 +181,7 @@ export default function SettingsScreen({ navigation }: SettingsScreenProps) {
             </View>
           </View>
 
-          <View style={[styles.card, styles.vehicleCard]}>
+          <View style={[styles.card, styles.vehicleCard, isLandscape && styles.cardLandscape]}>
             <View style={styles.cardHeading}>
               <View style={styles.cardIcon}>
                 <MaterialCommunityIcons name="bus" size={19} color={colors.primary} />
@@ -160,6 +217,72 @@ export default function SettingsScreen({ navigation }: SettingsScreenProps) {
               })}
             </View>
           </View>
+
+          <View style={[
+            styles.card,
+            isLandscape && styles.cardLandscape,
+            isLandscape && styles.routePreferencesCardLandscape,
+          ]}>
+            <View style={styles.cardHeading}>
+              <View style={styles.cardIcon}>
+                <MaterialCommunityIcons name="navigation-variant" size={19} color={colors.primary} />
+              </View>
+              <View style={styles.cardHeadingCopy}>
+                <Text style={styles.cardTitle}>{t('settings.routeBehavior')}</Text>
+                <Text style={styles.cardHint}>{t('settings.routeBehaviorHint')}</Text>
+              </View>
+            </View>
+
+            <View style={styles.preferenceRows}>
+              <View style={styles.preferenceRow}>
+                <View style={styles.preferenceCopy}>
+                  <Text style={styles.preferenceTitle}>{t('settings.backgroundLocation')}</Text>
+                  <Text style={styles.preferenceHint}>{t('settings.backgroundLocationHint')}</Text>
+                </View>
+                <Switch
+                  value={preferences.backgroundLocationEnabled}
+                  disabled={requestingBackgroundPermission}
+                  onValueChange={(enabled) => { void handleBackgroundLocationChange(enabled); }}
+                  trackColor={{ false: colors.border, true: colors.primarySoft }}
+                  thumbColor={preferences.backgroundLocationEnabled ? colors.primary : colors.surface}
+                  ios_backgroundColor={colors.border}
+                  accessibilityLabel={t('settings.backgroundLocation')}
+                />
+              </View>
+
+              <View style={[styles.preferenceRow, styles.preferenceRowBorder]}>
+                <View style={styles.preferenceCopy}>
+                  <Text style={styles.preferenceTitle}>{t('settings.keepScreenAwake')}</Text>
+                  <Text style={styles.preferenceHint}>{t('settings.keepScreenAwakeHint')}</Text>
+                </View>
+                <Switch
+                  value={preferences.keepAwakeEnabled}
+                  onValueChange={setKeepAwakeEnabled}
+                  trackColor={{ false: colors.border, true: colors.primarySoft }}
+                  thumbColor={preferences.keepAwakeEnabled ? colors.primary : colors.surface}
+                  ios_backgroundColor={colors.border}
+                  accessibilityLabel={t('settings.keepScreenAwake')}
+                />
+              </View>
+
+              {Platform.OS === 'ios' ? (
+                <View style={[styles.preferenceRow, styles.preferenceRowBorder]}>
+                  <View style={styles.preferenceCopy}>
+                    <Text style={styles.preferenceTitle}>{t('settings.liveActivities')}</Text>
+                    <Text style={styles.preferenceHint}>{t('settings.liveActivitiesHint')}</Text>
+                  </View>
+                  <Switch
+                    value={preferences.liveActivitiesEnabled}
+                    onValueChange={setLiveActivitiesEnabled}
+                    trackColor={{ false: colors.border, true: colors.primarySoft }}
+                    thumbColor={preferences.liveActivitiesEnabled ? colors.primary : colors.surface}
+                    ios_backgroundColor={colors.border}
+                    accessibilityLabel={t('settings.liveActivities')}
+                  />
+                </View>
+              ) : null}
+            </View>
+          </View>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -168,6 +291,7 @@ export default function SettingsScreen({ navigation }: SettingsScreenProps) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
+  scroll: { flex: 1 },
   header: {
     minHeight: 86,
     paddingHorizontal: spacing.xl,
@@ -206,9 +330,8 @@ const styles = StyleSheet.create({
   },
   contentLandscape: { paddingTop: spacing.md },
   settingsGrid: { gap: spacing.md },
-  settingsGridLandscape: { flexDirection: 'row', alignItems: 'flex-start' },
+  settingsGridLandscape: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'flex-start' },
   card: {
-    flex: 1,
     minWidth: 0,
     padding: spacing.lg,
     borderRadius: radii.lg,
@@ -216,7 +339,9 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     backgroundColor: colors.surface,
   },
+  cardLandscape: { flex: 1 },
   vehicleCard: { overflow: 'hidden' },
+  routePreferencesCardLandscape: { flexBasis: '100%' },
   cardHeading: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
   cardIcon: {
     width: 38,
@@ -228,7 +353,7 @@ const styles = StyleSheet.create({
   },
   cardHeadingCopy: { flex: 1, minWidth: 0 },
   cardTitle: { ...typography.sectionTitle, color: colors.ink, fontSize: 17, lineHeight: 21 },
-  cardHint: { ...typography.body, color: colors.muted, fontSize: 10.5, lineHeight: 14, marginTop: 2 },
+  cardHint: { ...typography.body, color: colors.muted, fontSize: 12.5, lineHeight: 17, marginTop: 2 },
   segmentedControl: {
     marginTop: spacing.lg,
     padding: 3,
@@ -247,7 +372,7 @@ const styles = StyleSheet.create({
     gap: spacing.xs,
   },
   segmentSelected: { backgroundColor: colors.primary },
-  segmentText: { ...typography.control, color: colors.inkSoft, fontSize: 11.5 },
+  segmentText: { ...typography.control, color: colors.inkSoft, fontSize: 13 },
   segmentTextSelected: { color: colors.white },
   previewStage: {
     height: 146,
@@ -328,6 +453,21 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  colorLabel: { fontFamily: fonts.medium, color: colors.inkSoft, fontSize: 8.5, lineHeight: 11 },
+  colorLabel: { fontFamily: fonts.medium, color: colors.inkSoft, fontSize: 11, lineHeight: 14 },
   colorLabelSelected: { fontFamily: fonts.label, color: colors.ink },
+  preferenceRows: { marginTop: spacing.md },
+  preferenceRow: {
+    minHeight: 76,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  preferenceRowBorder: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
+  },
+  preferenceCopy: { flex: 1, minWidth: 0 },
+  preferenceTitle: { ...typography.control, color: colors.ink, fontSize: 14, lineHeight: 18 },
+  preferenceHint: { ...typography.body, color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 3 },
 });

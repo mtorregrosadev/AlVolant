@@ -1,4 +1,4 @@
-# App de conducció i BFF de mobilitat
+# AlVolant - BFF and APP
 
 Aplicació mòbil per preparar i seguir serveis d’autobús sobre la xarxa integrada de transport. El repositori inclou una app Expo/React Native orientada a iPhone i un Backend-for-Frontend FastAPI que agrega GTFS estàtic, GTFS-Realtime i informació de trànsit.
 

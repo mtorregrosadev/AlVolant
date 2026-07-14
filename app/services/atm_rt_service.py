@@ -45,6 +45,7 @@ from app.models.atm_rt import (
     StopTimeUpdate,
     TripUpdate,
     VehiclePosition,
+    VehicleStopStatus,
 )
 
 logger = get_logger(__name__)
@@ -499,10 +500,31 @@ class ATMRTService:
         trip_id = v.trip.trip_id if v.HasField("trip") else ""
         if (route_id and not _is_safe_id(route_id)) or (trip_id and not _is_safe_id(trip_id)):
             return None
+        direction_id = (
+            v.trip.direction_id
+            if v.HasField("trip")
+            and v.trip.HasField("direction_id")
+            and v.trip.direction_id in (0, 1)
+            else None
+        )
         lat = v.position.latitude if v.HasField("position") else 0.0
         lon = v.position.longitude if v.HasField("position") else 0.0
         bearing = v.position.bearing if v.position.HasField("bearing") else None
         speed = v.position.speed if v.position.HasField("speed") else None
+        current_stop_sequence = (
+            v.current_stop_sequence if v.HasField("current_stop_sequence") else None
+        )
+        current_stop_id = v.stop_id if v.HasField("stop_id") else ""
+        if current_stop_id and not _is_safe_id(current_stop_id):
+            current_stop_id = ""
+        current_status = None
+        if v.HasField("current_status"):
+            try:
+                current_status = VehicleStopStatus(
+                    gtfs_realtime_pb2.VehiclePosition.VehicleStopStatus.Name(v.current_status)
+                )
+            except (ValueError, KeyError):
+                current_status = None
         timestamp = v.timestamp if v.HasField("timestamp") else 0
 
         # Basic validity check for coordinates (must be realistic for Earth)
@@ -513,10 +535,14 @@ class ATMRTService:
             vehicle_id=vid,
             route_id=route_id,
             trip_id=trip_id,
+            direction_id=direction_id,
             latitude=lat,
             longitude=lon,
             bearing=bearing,
             speed=speed,
+            current_stop_sequence=current_stop_sequence,
+            stop_id=current_stop_id,
+            current_status=current_status,
             timestamp=timestamp,
         )
 
@@ -527,6 +553,13 @@ class ATMRTService:
             return None
 
         route_id = tu.trip.route_id if tu.HasField("trip") else ""
+        direction_id = (
+            tu.trip.direction_id
+            if tu.HasField("trip")
+            and tu.trip.HasField("direction_id")
+            and tu.trip.direction_id in (0, 1)
+            else None
+        )
         start_date = tu.trip.start_date if tu.trip.HasField("start_date") else ""
         vid = tu.vehicle.id if tu.HasField("vehicle") else ""
         if any(value and not _is_safe_id(value) for value in (route_id, vid, start_date)):
@@ -541,6 +574,16 @@ class ATMRTService:
 
             arr_delay = stu.arrival.delay if stu.HasField("arrival") else 0
             dep_delay = stu.departure.delay if stu.HasField("departure") else 0
+            arrival_time = (
+                stu.arrival.time
+                if stu.HasField("arrival") and stu.arrival.HasField("time")
+                else None
+            )
+            departure_time = (
+                stu.departure.time
+                if stu.HasField("departure") and stu.departure.HasField("time")
+                else None
+            )
 
             updates.append(
                 StopTimeUpdate(
@@ -548,6 +591,8 @@ class ATMRTService:
                     stop_sequence=stu.stop_sequence,
                     arrival_delay=arr_delay,
                     departure_delay=dep_delay,
+                    arrival_time=arrival_time,
+                    departure_time=departure_time,
                 )
             )
 
@@ -555,6 +600,7 @@ class ATMRTService:
             trip_id=trip_id,
             route_id=route_id,
             vehicle_id=vid,
+            direction_id=direction_id,
             start_date=start_date,
             stop_time_updates=updates,
             timestamp=timestamp,
@@ -901,6 +947,11 @@ class ATMRTService:
 
     def _freshness_window_seconds(self) -> int:
         return max(30, min(self._settings.ATM_RT_FRESHNESS_SECONDS, 600))
+
+    @property
+    def freshness_window_seconds(self) -> int:
+        """Maximum accepted provider/entity age for realtime matching."""
+        return self._freshness_window_seconds()
 
     async def _component_is_fresh(self, component: str) -> bool:
         raw = await self._cache.get(f"{_KEY_COMPONENT_PROVIDER_TIMESTAMP_PREFIX}:{component}")

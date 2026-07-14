@@ -53,6 +53,7 @@ _ALLOWED_CONTEXT_KEYS = frozenset({
 _ALLOWED_ENDPOINTS = frozenset({
     "live_websocket",
     "nearby_routes",
+    "relief_candidates",
     "route_shape",
     "route_stops",
     "route_updates",
@@ -80,7 +81,13 @@ _ALLOWED_PHASES = frozenset({
     "preferences_write",
     "render",
 })
-_ALLOWED_SETTINGS = frozenset({"language", "vehicle_color"})
+_ALLOWED_SETTINGS = frozenset({
+    "background_location",
+    "keep_screen_awake",
+    "language",
+    "live_activities",
+    "vehicle_color",
+})
 _ALLOWED_VALUES = frozenset({"ca", "es", "green", "red", "route", "yellow"})
 _ALLOWED_MODES = frozenset({"off_route", "snapped"})
 

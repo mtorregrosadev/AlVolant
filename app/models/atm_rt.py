@@ -93,6 +93,30 @@ class AlertSeverity(StrEnum):
     SEVERE = "SEVERE"
 
 
+class VehicleStopStatus(StrEnum):
+    """Normalized GTFS-RT vehicle progress relative to its current stop."""
+
+    INCOMING_AT = "INCOMING_AT"
+    STOPPED_AT = "STOPPED_AT"
+    IN_TRANSIT_TO = "IN_TRANSIT_TO"
+
+
+class ReliefPhase(StrEnum):
+    """Vehicle state relative to the requested relief stop."""
+
+    APPROACHING = "approaching"
+    AT_STOP = "at_stop"
+    PASSED = "passed"
+
+
+class ReliefConfidence(StrEnum):
+    """Strength of the evidence used to match a relief vehicle."""
+
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
 # ---------------------------------------------------------------------------
 # Sub-models for enriched alerts
 # ---------------------------------------------------------------------------
@@ -145,6 +169,12 @@ class VehiclePosition(BaseModel):
     vehicle_id: str = Field(..., max_length=160, description="Unique vehicle identifier")
     route_id: str = Field("", max_length=160, description="GTFS route_id")
     trip_id: str = Field("", max_length=160, description="GTFS trip_id")
+    direction_id: int | None = Field(
+        None,
+        ge=0,
+        le=1,
+        description="GTFS direction_id when supplied by the realtime feed",
+    )
     latitude: float = Field(..., ge=-90, le=90, allow_inf_nan=False, description="WGS-84 latitude")
     longitude: float = Field(
         ...,
@@ -167,6 +197,17 @@ class VehiclePosition(BaseModel):
         allow_inf_nan=False,
         description="Speed in m/s",
     )
+    current_stop_sequence: int | None = Field(
+        None,
+        ge=0,
+        le=10_000,
+        description="Sequence of the stop currently referenced by the vehicle",
+    )
+    stop_id: str = Field("", max_length=160, description="Current or next GTFS stop_id")
+    current_status: VehicleStopStatus | None = Field(
+        None,
+        description="GTFS-RT progress state relative to stop_id",
+    )
     timestamp: int = Field(0, ge=0, le=10_000_000_000, description="POSIX report timestamp")
 
 
@@ -187,6 +228,18 @@ class StopTimeUpdate(BaseModel):
         le=604_800,
         description="Departure delay in seconds",
     )
+    arrival_time: int | None = Field(
+        None,
+        ge=0,
+        le=10_000_000_000,
+        description="Predicted POSIX arrival time when supplied by GTFS-RT",
+    )
+    departure_time: int | None = Field(
+        None,
+        ge=0,
+        le=10_000_000_000,
+        description="Predicted POSIX departure time when supplied by GTFS-RT",
+    )
 
 
 class TripUpdate(BaseModel):
@@ -195,6 +248,12 @@ class TripUpdate(BaseModel):
     trip_id: str = Field(..., max_length=160, description="GTFS trip_id")
     route_id: str = Field("", max_length=160, description="GTFS route_id")
     vehicle_id: str = Field("", max_length=160, description="Vehicle serving this trip")
+    direction_id: int | None = Field(
+        None,
+        ge=0,
+        le=1,
+        description="GTFS direction_id when supplied by the realtime feed",
+    )
     start_date: str = Field("", max_length=8, description="Service date (YYYYMMDD)")
     stop_time_updates: list[StopTimeUpdate] = Field(
         default_factory=list,
@@ -202,6 +261,18 @@ class TripUpdate(BaseModel):
         description="Per-stop arrival/departure predictions",
     )
     timestamp: int = Field(0, ge=0, le=10_000_000_000, description="POSIX update timestamp")
+
+
+class ReliefCandidate(BaseModel):
+    """A bounded, privacy-preserving vehicle match for a relief stop."""
+
+    vehicle_id: str = Field(..., min_length=1, max_length=160)
+    trip_id: str = Field(..., min_length=1, max_length=160)
+    phase: ReliefPhase
+    eta_seconds: int | None = Field(None, ge=0, le=7_200)
+    distance_to_stop_m: float = Field(..., ge=0, le=20_050_000, allow_inf_nan=False)
+    confidence: ReliefConfidence
+    stop_name: str = Field("", max_length=500)
 
 
 class ServiceAlert(BaseModel):

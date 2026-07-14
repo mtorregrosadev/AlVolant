@@ -505,6 +505,10 @@ class GTFSService:
         trip_meta, _manifest = await self._get_trip_meta_record(trip_id)
         return trip_meta
 
+    async def resolve_group_route_ids(self, route_id: str) -> list[str]:
+        """Return every underlying GTFS route id represented by a catalog route."""
+        return await self._resolve_group_route_ids(route_id)
+
     async def _get_trip_meta_record(self, trip_id: str) -> tuple[dict | None, dict | None]:
         """Read v2 metadata first and retain per-trip legacy compatibility."""
         manifest = await self._get_active_trip_index()

@@ -48,6 +48,7 @@ from app.core.security import RequestBodyLimitMiddleware, SecurityHeadersMiddlew
 from app.core.telemetry import TelemetryMiddleware
 from app.services.atm_rt_service import ATMRTService
 from app.services.gtfs_service import GTFSService
+from app.services.relief_matching_service import ReliefMatchingService
 from app.services.telemetry_service import TelemetryService
 from app.services.traffic_service import TrafficService
 from app.workers.atm_rt_worker import ATMRTWorker
@@ -317,6 +318,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     gtfs_service = GTFSService(settings=runtime_settings, cache=cache)
     await gtfs_service.start()
     app.state.gtfs_service = gtfs_service
+
+    app.state.relief_matching_service = ReliefMatchingService(
+        atm_rt_service,
+        gtfs_service,
+        freshness_seconds=atm_rt_service.freshness_window_seconds,
+    )
 
     traffic_service = TrafficService(settings=runtime_settings, cache=cache)
     await traffic_service.start()

@@ -1,0 +1,36 @@
+{
+	# The router keeps the public standard ports while forwarding to these
+	# unprivileged ports on the Mac: TCP 80 -> 8080 and TCP 443 -> 8443.
+	http_port 8080
+	https_port 8443
+	admin 127.0.0.1:2019
+
+	servers {
+		protocols h1 h2
+		strict_sni_host on
+	}
+}
+
+alvolant.duckdns.org {
+	# Development documentation must never become part of the public surface.
+	@development_docs path /docs /docs/* /redoc /redoc/* /openapi.json
+	respond @development_docs 404
+
+	request_body {
+		max_size 32KB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	reverse_proxy 127.0.0.1:8000 {
+		transport http {
+			dial_timeout 3s
+			response_header_timeout 30s
+		}
+	}
+}

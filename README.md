@@ -158,13 +158,32 @@ En un altre terminal, inicia el BFF:
 .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
+Per fer una prova temporal des d’un iPhone fora de casa, segueix el perfil de [proxy HTTPS i port forwarding](docs/REMOTE_TESTING.md). No publiquis directament els ports del BFF, Redis o Metro.
+
 Instal·la i executa l’app:
 
 ```bash
-cd app-conductor
-npm install
-npx expo start --dev-client --host lan --port 8081
+./install-ios.sh
 ```
+
+Aquesta ordre genera el projecte natiu, valida TypeScript, compila una build
+`Release` autònoma i la instal·la al primer iPhone Simulator arrencat. No tria
+mai un iPad. Pots fixar el dispositiu amb `IOS_SIMULATOR_UDID=<udid>`.
+
+### IPA unsigned d’una sola ordre
+
+En un Mac amb Xcode i CocoaPods, el script reprodueix el prebuild, valida
+TypeScript, compila per a iPhone físic sense signatura i comprova el ZIP final:
+
+```bash
+./install-ios.sh --ipa
+```
+
+L’artefacte queda a `app-conductor/build/AlVolant-unsigned-<versió>-<revisió>.ipa`
+i el log a `app-conductor/build/unsigned-ipa-build.log`. Calen com a mínim 3 GiB
+lliures. L’IPA inclou l’extensió de Live Activities, però no es pot instal·lar en
+un iPhone fins que se signi l’app i l’extensió amb un certificat i perfils de
+provisioning compatibles.
 
 ## API principal
 

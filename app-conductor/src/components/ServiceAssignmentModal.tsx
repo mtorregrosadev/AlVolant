@@ -12,6 +12,7 @@ import {
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import type { EdgeInsets } from 'react-native-safe-area-context';
 import type { RouteInfo, UpcomingTrip } from '../services/api';
+import type { ReliefCandidate } from '../services/reliefDetection';
 import { formatDirectionLabel } from '../services/directionLabel';
 import { cardShadow, colors, fonts, radii, safeHexColor, spacing, typography } from '../theme';
 import { useI18n } from '../i18n';
@@ -22,11 +23,15 @@ type ServiceAssignmentModalProps = {
   insets: EdgeInsets;
   selectedRoute: RouteInfo | null;
   upcomingTrips: UpcomingTrip[];
+  mode: 'detecting' | 'candidate' | 'departures';
+  candidate: ReliefCandidate | null;
+  nearbyStopName: string;
   loading: boolean;
   manualVehicle: string;
   onManualVehicleChange: (value: string) => void;
   onClose: () => void;
   onConfirm: (vehicleId: string, tripId?: string) => void;
+  onChooseDeparture: () => void;
   onSkip: () => void;
 };
 
@@ -36,14 +41,29 @@ export default function ServiceAssignmentModal({
   insets,
   selectedRoute,
   upcomingTrips,
+  mode,
+  candidate,
+  nearbyStopName,
   loading,
   manualVehicle,
   onManualVehicleChange,
   onClose,
   onConfirm,
+  onChooseDeparture,
   onSkip,
 }: ServiceAssignmentModalProps) {
   const { language, t } = useI18n();
+  const arrivalLabel = candidate
+    ? candidate.phase === 'at_stop'
+      ? t('relief.atStop')
+      : candidate.etaSeconds !== null && candidate.etaSeconds <= 30
+        ? t('relief.arrivesNow')
+        : candidate.etaSeconds !== null
+          ? t('relief.arrivesIn', { count: Math.max(1, Math.ceil(candidate.etaSeconds / 60)) })
+          : candidate.distanceToStopMeters !== null
+            ? t('relief.distance', { distance: Math.round(candidate.distanceToStopMeters) })
+            : t('relief.arrivesNow')
+    : '';
   const overlayInsets = {
     paddingTop: Math.max(insets.top + spacing.md, spacing.xl),
     paddingRight: Math.max(insets.right + spacing.xl, spacing.xl),
@@ -65,7 +85,13 @@ export default function ServiceAssignmentModal({
           <View style={styles.sheetHeader}>
             <View style={styles.sheetHeaderAccent} />
             <View style={styles.sheetHeaderCopy}>
-              <Text style={styles.title}>{t('assignment.title')}</Text>
+              <Text style={styles.title}>
+                {t(mode === 'candidate'
+                  ? 'relief.title'
+                  : mode === 'detecting'
+                    ? 'relief.searchingTitle'
+                    : 'assignment.title')}
+              </Text>
             </View>
             {selectedRoute ? (
               <View style={[
@@ -89,15 +115,63 @@ export default function ServiceAssignmentModal({
           </View>
 
           <Text style={styles.subtitle}>
-            {t('assignment.subtitle')}
+            {t(mode === 'candidate'
+              ? 'relief.subtitle'
+              : mode === 'detecting'
+                ? 'relief.searching'
+                : 'assignment.subtitle')}
           </Text>
 
-          {loading ? (
+          {mode === 'detecting' ? (
             <View style={styles.loadingState}>
               <View style={styles.loadingIcon}>
                 <ActivityIndicator color={colors.white} />
               </View>
-              <Text style={styles.loadingText}>{t('assignment.loading')}</Text>
+              <Text style={styles.loadingText}>{t('relief.searchingHint')}</Text>
+            </View>
+          ) : mode === 'candidate' && candidate ? (
+            <View style={styles.candidateContent}>
+              <View
+                style={styles.candidateCard}
+                accessible
+                accessibilityLabel={t('relief.candidateA11y', {
+                  vehicle: t('relief.vehicle', { value: candidate.vehicleId }),
+                  arrival: arrivalLabel,
+                  stop: nearbyStopName || candidate.stopName,
+                })}
+              >
+                <View style={styles.candidateVehicleIcon}>
+                  <MaterialCommunityIcons name="bus" size={27} color={colors.white} />
+                </View>
+                <View style={styles.candidateCopy}>
+                  <Text style={styles.candidateVehicle} numberOfLines={1}>
+                    {t('relief.vehicle', { value: candidate.vehicleId })}
+                  </Text>
+                  <Text style={styles.candidateArrival}>{arrivalLabel}</Text>
+                  <Text style={styles.candidateStop} numberOfLines={2}>
+                    {t('relief.stop', { value: nearbyStopName || candidate.stopName })}
+                  </Text>
+                </View>
+              </View>
+
+              <TouchableOpacity
+                style={styles.confirmCandidateButton}
+                onPress={() => onConfirm(candidate.vehicleId, candidate.tripId)}
+                activeOpacity={0.86}
+                accessibilityRole="button"
+              >
+                <MaterialCommunityIcons name="check" size={21} color={colors.white} />
+                <Text style={styles.confirmCandidateText}>{t('relief.confirm')}</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.chooseDepartureButton}
+                onPress={onChooseDeparture}
+                accessibilityRole="button"
+              >
+                <Text style={styles.chooseDepartureText}>{t('relief.chooseDeparture')}</Text>
+                <MaterialCommunityIcons name="arrow-right" size={18} color={colors.primary} />
+              </TouchableOpacity>
             </View>
           ) : (
             <ScrollView
@@ -105,7 +179,14 @@ export default function ServiceAssignmentModal({
               showsVerticalScrollIndicator={false}
               keyboardShouldPersistTaps="handled"
             >
-              {upcomingTrips.length > 0 && upcomingTrips[0].is_maintenance ? (
+              {loading ? (
+                <View style={styles.loadingState}>
+                  <View style={styles.loadingIcon}>
+                    <ActivityIndicator color={colors.white} />
+                  </View>
+                  <Text style={styles.loadingText}>{t('assignment.loading')}</Text>
+                </View>
+              ) : upcomingTrips.length > 0 && upcomingTrips[0].is_maintenance ? (
                 <View style={styles.noticeCard}>
                   <MaterialCommunityIcons name="wrench-clock" size={24} color={colors.warning} />
                   <View style={styles.noticeCopy}>
@@ -264,6 +345,50 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   loadingText: { ...typography.body, color: colors.muted, marginTop: spacing.md },
+  candidateContent: { gap: spacing.md, paddingTop: spacing.lg },
+  candidateCard: {
+    minHeight: 112,
+    padding: spacing.lg,
+    borderRadius: radii.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.white,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+  },
+  candidateVehicleIcon: {
+    width: 54,
+    height: 54,
+    borderRadius: radii.lg,
+    backgroundColor: colors.transit,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  candidateCopy: { flex: 1, minWidth: 0 },
+  candidateVehicle: { ...typography.cardTitle, color: colors.ink, fontSize: 16 },
+  candidateArrival: { ...typography.control, color: colors.primary, marginTop: 3 },
+  candidateStop: { ...typography.body, color: colors.muted, marginTop: 4 },
+  confirmCandidateButton: {
+    minHeight: 50,
+    borderRadius: radii.lg,
+    paddingHorizontal: spacing.lg,
+    backgroundColor: colors.primary,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+  },
+  confirmCandidateText: { ...typography.button, color: colors.white },
+  chooseDepartureButton: {
+    minHeight: 44,
+    alignSelf: 'center',
+    paddingHorizontal: spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  chooseDepartureText: { ...typography.control, color: colors.primary },
   listContent: { gap: spacing.sm, paddingTop: spacing.md, paddingBottom: spacing.xs },
   noticeCard: {
     padding: spacing.md,

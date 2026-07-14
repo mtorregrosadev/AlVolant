@@ -4,7 +4,6 @@ import {
   ActivityIndicator,
   Animated,
   AppState,
-  Easing,
   Image,
   Keyboard,
   LayoutAnimation,
@@ -29,6 +28,12 @@ import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../../App';
 import ServiceAssignmentModal from '../components/ServiceAssignmentModal';
 import { apiService, type RouteInfo, type UpcomingTrip } from '../services/api';
+import {
+  parseReliefStopsGeoJson,
+  selectNearbyReliefStop,
+  selectReliefCandidate,
+  type ReliefCandidate,
+} from '../services/reliefDetection';
 import { telemetry } from '../services/telemetry';
 import {
   AGENCY_OPTIONS,
@@ -57,6 +62,7 @@ import {
 
 type HomeScreenProps = NativeStackScreenProps<RootStackParamList, 'Home'>;
 type PreferenceView = 'recent' | 'favorite';
+type AssignmentMode = 'detecting' | 'candidate' | 'departures';
 type ChipVisual = {
   icon?: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
   image?: ImageSourcePropType;
@@ -78,18 +84,19 @@ const AGENCY_VISUALS: Record<AgencyFilter, ChipVisual> = {
 const FOREGROUND_REFRESH_MS = 15 * 60 * 1000;
 const NEARBY_REFRESH_MS = 2 * 60 * 1000;
 const RECENT_LOCATION_MAX_AGE_MS = 2 * 60 * 1000;
-const ROUTE_ROW_HEIGHT = 47;
-const PREFERENCE_ROW_HEIGHT = 34;
+const BASE_ROUTE_ROW_HEIGHT = 49;
+const BASE_PREFERENCE_ROW_HEIGHT = 38;
 const PREFERENCE_ROWS_PORTRAIT = 4;
 const PREFERENCE_ROWS_LANDSCAPE = 3;
 const SEARCH_RESULT_LIMIT = 40;
-const INTRO_MINIMUM_MS = 1100;
 const SEARCH_OPEN_DURATION_MS = 320;
 const SEARCH_CLOSE_DURATION_MS = 280;
 const SEARCH_INITIAL_EXTRA_RESULTS = 12;
 const SEARCH_APPEND_BATCH_SIZE = 8;
 const SEARCH_APPEND_THROTTLE_MS = 180;
 const SEARCH_APPEND_REVEAL_DURATION_MS = 160;
+const RELIEF_LOCATION_MAX_AGE_MS = 45_000;
+const RELIEF_LOCATION_MAX_ACCURACY_METERS = 60;
 
 function configureSearchLayout(
   duration: number,
@@ -106,19 +113,6 @@ function configureSearchLayout(
     } : {}),
     update: { type: LayoutAnimation.Types.easeInEaseOut },
   }, onEnd);
-}
-
-function IntroBus({ accent = colors.primary }: { accent?: string }) {
-  return (
-    <View style={styles.introBus}>
-      <View style={[styles.introBusEnd, styles.introBusFront, { backgroundColor: accent }]} />
-      <View style={[styles.introBusEnd, styles.introBusBack, { backgroundColor: accent }]} />
-      <View style={[styles.introBusStripe, styles.introBusStripeLeft, { backgroundColor: accent }]} />
-      <View style={[styles.introBusStripe, styles.introBusStripeRight, { backgroundColor: accent }]} />
-      <View style={styles.introBusGlass} />
-      <View style={styles.introBusRoof} />
-    </View>
-  );
 }
 
 function sanitizeVehicleId(value: string) {
@@ -151,17 +145,122 @@ function haveSameDistances(
 }
 
 export default function HomeScreen({ navigation, route }: HomeScreenProps) {
-  const { width: screenWidth, height: screenHeight } = useWindowDimensions();
+  const {
+    width: screenWidth,
+    height: screenHeight,
+    fontScale,
+  } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const isLandscape = screenWidth > screenHeight;
+  const usableScreenHeight = Math.max(0, screenHeight - insets.top - insets.bottom);
+  const contentGutter = isLandscape
+    ? 0
+    : (screenWidth < 360 ? spacing.lg : screenWidth >= 430 ? spacing.xxl : spacing.xl);
+  const isCompactPortrait = !isLandscape && usableScreenHeight < 690;
+  const isBalancedPortrait = !isLandscape
+    && usableScreenHeight >= 690
+    && usableScreenHeight < 810;
+  const typeScale = Math.min(
+    1.1,
+    Math.max(0.92, Math.min(screenWidth, screenHeight) / 390),
+  );
+  const rowScale = typeScale * Math.max(1, fontScale);
+  const preferenceRowHeight = Math.ceil(BASE_PREFERENCE_ROW_HEIGHT * rowScale);
+  const routeRowHeight = Math.ceil(BASE_ROUTE_ROW_HEIGHT * rowScale);
+  const responsiveType = useMemo(() => {
+    const fontSize = (value: number) => Math.round(value * typeScale * 2) / 2;
+    const lineHeight = (value: number) => Math.ceil(value * typeScale);
+
+    return StyleSheet.create({
+      connectionText: { fontSize: fontSize(11.5), lineHeight: lineHeight(15) },
+      heroSubtitle: { fontSize: fontSize(14), lineHeight: lineHeight(19) },
+      searchInput: { fontSize: fontSize(15), lineHeight: lineHeight(20) },
+      quickTitle: { fontSize: fontSize(13.5), lineHeight: lineHeight(18), flexShrink: 1 },
+      preferenceModeText: {
+        fontSize: fontSize(13),
+        lineHeight: lineHeight(17),
+        flexShrink: 1,
+      },
+      quickRouteBadgeText: { fontSize: fontSize(11.5), lineHeight: lineHeight(15) },
+      preferenceDestination: { fontSize: fontSize(13.5), lineHeight: lineHeight(18) },
+      preferenceTime: {
+        width: Math.ceil(72 * typeScale),
+        fontSize: fontSize(12),
+        lineHeight: lineHeight(16),
+      },
+      agencyText: { fontSize: fontSize(12.5), lineHeight: lineHeight(17) },
+      sectionTitle: { fontSize: fontSize(19), lineHeight: lineHeight(23) },
+      catalogButtonText: { fontSize: fontSize(12.5), lineHeight: lineHeight(17) },
+      routeBadgeText: { fontSize: fontSize(12.5), lineHeight: lineHeight(16) },
+      routeName: { fontSize: fontSize(13.5), lineHeight: lineHeight(18) },
+      routeMeta: { fontSize: fontSize(11.5), lineHeight: lineHeight(15) },
+      serviceTitle: { fontSize: fontSize(15), lineHeight: lineHeight(20) },
+      directionLabel: { fontSize: fontSize(12), lineHeight: lineHeight(16) },
+      directionNumberText: { fontSize: fontSize(11.5), lineHeight: lineHeight(15) },
+      directionText: { fontSize: fontSize(13), lineHeight: lineHeight(17) },
+      startButtonText: { fontSize: fontSize(16.5), lineHeight: lineHeight(21) },
+      startButtonMeta: { fontSize: fontSize(11.5), lineHeight: lineHeight(15) },
+      preferenceRow: { height: preferenceRowHeight },
+      routeRow: { minHeight: routeRowHeight },
+      routeMain: { minHeight: Math.max(40, routeRowHeight - 4) },
+      quickRouteBadge: {
+        minWidth: Math.ceil(36 * typeScale),
+        height: Math.ceil(23 * rowScale),
+      },
+      routeBadge: {
+        minWidth: Math.ceil(44 * typeScale),
+        height: Math.ceil(29 * rowScale),
+      },
+    });
+  }, [preferenceRowHeight, routeRowHeight, rowScale, typeScale]);
+  const responsiveLayout = useMemo(() => StyleSheet.create({
+    discoveryContent: {
+      paddingHorizontal: contentGutter,
+      paddingTop: isCompactPortrait ? 0 : spacing.xs,
+      paddingBottom: isCompactPortrait ? spacing.sm : spacing.md,
+    },
+    heroPanel: {
+      minHeight: isLandscape || isCompactPortrait
+        ? 92
+        : (isBalancedPortrait ? 103 : 112),
+    },
+    heroTitle: {
+      fontSize: isCompactPortrait ? 32 : 35,
+      lineHeight: isCompactPortrait ? 30 : 33,
+    },
+    heroBusBadge: isCompactPortrait ? {
+      top: 7,
+      width: 47,
+      height: 47,
+      borderRadius: 24,
+    } : {},
+    journeyRail: {
+      top: isCompactPortrait ? 55 : 61,
+    },
+    searchShell: {
+      height: isCompactPortrait ? 38 : 41,
+    },
+    sectionHeading: {
+      minHeight: isCompactPortrait ? 31 : 34,
+    },
+    servicePanel: {
+      paddingHorizontal: isLandscape ? spacing.xl : contentGutter,
+      paddingTop: isCompactPortrait ? 6 : spacing.sm,
+      paddingBottom: isCompactPortrait ? 6 : spacing.sm,
+    },
+    directionSelector: {
+      minHeight: isCompactPortrait ? 44 : 48,
+      marginBottom: isCompactPortrait ? 6 : spacing.sm,
+    },
+    directionOption: {
+      minHeight: isCompactPortrait ? 38 : 42,
+    },
+    startButton: {
+      minHeight: isCompactPortrait ? 49 : 53,
+    },
+  }), [contentGutter, isBalancedPortrait, isCompactPortrait, isLandscape]);
   const mountedRef = useRef(true);
   const lastRoutesFetchRef = useRef(0);
-  const introOpacity = useRef(new Animated.Value(1)).current;
-  const contentOpacity = useRef(new Animated.Value(0)).current;
-  const contentTranslateY = useRef(new Animated.Value(12)).current;
-  const introBusForward = useRef(new Animated.Value(0)).current;
-  const introBusReverse = useRef(new Animated.Value(0)).current;
-  const introPulse = useRef(new Animated.Value(0)).current;
   const searchInitialCountRef = useRef(4);
   const searchTransitionTokenRef = useRef(0);
   const lastSearchAppendAtRef = useRef(0);
@@ -173,6 +272,8 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
   const autoSelectedRouteRef = useRef<string | null>(null);
   const preferenceScrollRef = useRef<ScrollView | null>(null);
   const preferenceScrollY = useRef(new Animated.Value(0)).current;
+  const assignmentRequestRef = useRef(0);
+  const reliefAbortRef = useRef<AbortController | null>(null);
 
   const {
     ready: preferencesReady,
@@ -198,11 +299,13 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
   const [manualVehicle, setManualVehicle] = useState('');
   const [upcomingTrips, setUpcomingTrips] = useState<UpcomingTrip[]>([]);
   const [isLoadingTrips, setIsLoadingTrips] = useState(false);
+  const [assignmentMode, setAssignmentMode] = useState<AssignmentMode>('departures');
+  const [reliefCandidate, setReliefCandidate] = useState<ReliefCandidate | null>(null);
+  const [nearbyReliefStopName, setNearbyReliefStopName] = useState('');
   const [discoveryViewportHeight, setDiscoveryViewportHeight] = useState(0);
+  const [agencyViewportWidth, setAgencyViewportWidth] = useState(0);
   const [resultsBlockTop, setResultsBlockTop] = useState(0);
   const [routesHeadingBottom, setRoutesHeadingBottom] = useState(0);
-  const [introMinimumElapsed, setIntroMinimumElapsed] = useState(false);
-  const [showIntro, setShowIntro] = useState(true);
   const [reduceMotion, setReduceMotion] = useState(false);
 
   const loadRoutes = useCallback(async (showLoading = false) => {
@@ -291,16 +394,27 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
 
     return () => {
       mountedRef.current = false;
+      assignmentRequestRef.current += 1;
+      reliefAbortRef.current?.abort();
       subscription.remove();
     };
   }, [loadRoutes]);
 
   useEffect(() => {
-    const minimumTimer = setTimeout(() => setIntroMinimumElapsed(true), INTRO_MINIMUM_MS);
-    void AccessibilityInfo.isReduceMotionEnabled().then(setReduceMotion).catch(() => undefined);
+    let active = true;
+    void AccessibilityInfo.isReduceMotionEnabled()
+      .then((enabled) => {
+        if (active) setReduceMotion(enabled);
+      })
+      .catch(() => undefined);
+    const subscription = AccessibilityInfo.addEventListener(
+      'reduceMotionChanged',
+      setReduceMotion,
+    );
 
     return () => {
-      clearTimeout(minimumTimer);
+      active = false;
+      subscription.remove();
     };
   }, []);
 
@@ -311,74 +425,8 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
     }
   }, []);
 
-  useEffect(() => {
-    if (!showIntro || reduceMotion) return undefined;
-
-    introBusForward.setValue(0);
-    introBusReverse.setValue(0);
-    introPulse.setValue(0);
-    const animation = Animated.parallel([
-      Animated.loop(Animated.timing(introBusForward, {
-        toValue: 1,
-        duration: 1350,
-        easing: Easing.inOut(Easing.cubic),
-        useNativeDriver: true,
-      })),
-      Animated.loop(Animated.timing(introBusReverse, {
-        toValue: 1,
-        duration: 1600,
-        easing: Easing.inOut(Easing.cubic),
-        useNativeDriver: true,
-      })),
-      Animated.loop(Animated.sequence([
-        Animated.timing(introPulse, {
-          toValue: 1,
-          duration: 460,
-          easing: Easing.out(Easing.quad),
-          useNativeDriver: true,
-        }),
-        Animated.timing(introPulse, {
-          toValue: 0,
-          duration: 460,
-          easing: Easing.in(Easing.quad),
-          useNativeDriver: true,
-        }),
-      ])),
-    ]);
-
-    animation.start();
-    return () => animation.stop();
-  }, [introBusForward, introBusReverse, introPulse, reduceMotion, showIntro]);
-
-  useEffect(() => {
-    if (!showIntro || loading || !introMinimumElapsed) return;
-
-    Animated.parallel([
-      Animated.timing(introOpacity, {
-        toValue: 0,
-        duration: reduceMotion ? 120 : 280,
-        easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
-      }),
-      Animated.timing(contentOpacity, {
-        toValue: 1,
-        duration: reduceMotion ? 120 : 520,
-        easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
-      }),
-      Animated.timing(contentTranslateY, {
-        toValue: 0,
-        duration: reduceMotion ? 120 : 520,
-        easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
-      }),
-    ]).start(({ finished }) => {
-      if (finished && mountedRef.current) setShowIntro(false);
-    });
-  }, [contentOpacity, contentTranslateY, introMinimumElapsed, introOpacity, loading, reduceMotion, showIntro]);
-
   useFocusEffect(useCallback(() => {
-    if (showIntro || routes.length === 0) return undefined;
+    if (routes.length === 0) return undefined;
 
     let active = true;
     const refreshNearbyRoutes = () => {
@@ -409,7 +457,7 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
       active = false;
       foregroundSubscription.remove();
     };
-  }, [fetchNearbyDistances, reduceMotion, routes.length, showIntro]));
+  }, [fetchNearbyDistances, reduceMotion, routes.length]));
 
   useEffect(() => {
     const requestedRouteId = route.params?.selectedRouteId;
@@ -459,6 +507,43 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
     routes.forEach((item) => present.add(getAgencyFilter(item)));
     return AGENCY_OPTIONS.filter((agency) => agency === 'Tots' || present.has(agency));
   }, [routes]);
+
+  const agencyLayout = useMemo(() => {
+    const itemCount = Math.max(1, availableAgencies.length);
+    const safeContentWidth = Math.max(0, screenWidth - insets.left - insets.right);
+    let estimatedWidth = safeContentWidth - (contentGutter * 2);
+
+    if (isLandscape) {
+      const landscapeOuterPadding = spacing.lg * 2;
+      const serviceWidth = Math.min(400, Math.max(290, safeContentWidth * 0.39));
+      estimatedWidth = Math.max(
+        220,
+        safeContentWidth - landscapeOuterPadding - spacing.lg - serviceWidth,
+      );
+    }
+
+    const availableWidth = Math.max(1, agencyViewportWidth || estimatedWidth);
+    const singleRowItemWidth = (
+      availableWidth - (Math.max(1, itemCount) - 1) * 6
+    ) / itemCount;
+    const singleRowFits = singleRowItemWidth >= 72;
+    const columns = singleRowFits ? itemCount : Math.min(3, itemCount);
+    const width = Math.floor((availableWidth - (Math.max(1, columns) - 1) * 6) / columns);
+
+    return {
+      columns,
+      width,
+      compact: width < 76,
+    };
+  }, [
+    agencyViewportWidth,
+    availableAgencies.length,
+    contentGutter,
+    insets.left,
+    insets.right,
+    isLandscape,
+    screenWidth,
+  ]);
 
   useEffect(() => {
     if (!availableAgencies.includes(selectedAgency)) setSelectedAgency('Tots');
@@ -523,19 +608,26 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
       .slice(0, 4);
   }, [preferenceView, preferences, routes]);
 
-  const visiblePreferenceRows = isLandscape
+  const defaultVisiblePreferenceRows = isLandscape
     ? PREFERENCE_ROWS_LANDSCAPE
-    : PREFERENCE_ROWS_PORTRAIT;
+    : (isCompactPortrait
+      ? 2
+      : isBalancedPortrait
+        ? 3
+        : PREFERENCE_ROWS_PORTRAIT);
+  const visiblePreferenceRows = fontScale > 1.35
+    ? Math.min(2, defaultVisiblePreferenceRows)
+    : defaultVisiblePreferenceRows;
   const preferenceViewportHeight = Math.min(
     preferenceRoutes.length,
     visiblePreferenceRows,
-  ) * PREFERENCE_ROW_HEIGHT;
+  ) * preferenceRowHeight;
   const preferenceScrollEnabled = preferenceRoutes.length > visiblePreferenceRows;
 
-  const minimumVisibleRoutes = isLandscape ? 4 : 2;
+  const minimumVisibleRoutes = isLandscape ? 3 : (isCompactPortrait ? 2 : 3);
   const routeListTop = resultsBlockTop + routesHeadingBottom;
   const measuredVisibleRoutes = discoveryViewportHeight > 0 && routeListTop > 0
-    ? Math.floor((discoveryViewportHeight - routeListTop - spacing.md) / ROUTE_ROW_HEIGHT)
+    ? Math.floor((discoveryViewportHeight - routeListTop - spacing.md) / routeRowHeight)
     : minimumVisibleRoutes;
   const maxVisibleRoutes = Math.max(
     minimumVisibleRoutes,
@@ -656,7 +748,7 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
 
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
     const remaining = contentSize.height - layoutMeasurement.height - contentOffset.y;
-    if (remaining > ROUTE_ROW_HEIGHT * 2) return;
+    if (remaining > routeRowHeight * 2) return;
 
     const now = Date.now();
     if (now - lastSearchAppendAtRef.current < SEARCH_APPEND_THROTTLE_MS) return;
@@ -665,7 +757,7 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
       targetCount,
       current + SEARCH_APPEND_BATCH_SIZE,
     ));
-  }, [filteredRoutes.length, isSearchMode, searchVisibleCount]);
+  }, [filteredRoutes.length, isSearchMode, routeRowHeight, searchVisibleCount]);
 
   const handleDiscoveryLayout = useCallback((event: LayoutChangeEvent) => {
     setDiscoveryViewportHeight(event.nativeEvent.layout.height);
@@ -694,39 +786,169 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
     });
   }, [directionId, directionNames, navigation, recordRecent, selectedRoute]);
 
-  const handleStartDriving = useCallback(async () => {
+  const handleStartDriving = useCallback(() => {
     if (!selectedRoute || directionId === null || isLoadingTrips) return;
+
+    const routeSnapshot = selectedRoute;
+    const directionSnapshot = directionId;
+    const requestId = assignmentRequestRef.current + 1;
+    assignmentRequestRef.current = requestId;
+    reliefAbortRef.current?.abort();
+    const controller = new AbortController();
+    reliefAbortRef.current = controller;
 
     telemetry.capture('route_selected', { direction: directionId, source: 'home' });
     setUpcomingTrips([]);
     setIsLoadingTrips(true);
+    setAssignmentMode('detecting');
+    setReliefCandidate(null);
+    setNearbyReliefStopName('');
     setShowAssignModal(true);
-    try {
-      const trips = await apiService.fetchUpcomingTrips(selectedRoute.route_id, directionId);
-      if (mountedRef.current) setUpcomingTrips(trips);
-    } catch {
-      if (mountedRef.current) setUpcomingTrips([]);
-    } finally {
-      if (mountedRef.current) setIsLoadingTrips(false);
-    }
+
+    void apiService.fetchUpcomingTrips(routeSnapshot.route_id, directionSnapshot)
+      .then((trips) => {
+        if (mountedRef.current && assignmentRequestRef.current === requestId) {
+          setUpcomingTrips(trips);
+        }
+      })
+      .catch(() => {
+        if (mountedRef.current && assignmentRequestRef.current === requestId) {
+          setUpcomingTrips([]);
+        }
+      })
+      .finally(() => {
+        if (mountedRef.current && assignmentRequestRef.current === requestId) {
+          setIsLoadingTrips(false);
+        }
+      });
+
+    const fallBackToDepartures = () => {
+      if (mountedRef.current && assignmentRequestRef.current === requestId) {
+        setReliefCandidate(null);
+        setAssignmentMode('departures');
+      }
+    };
+
+    void (async () => {
+      try {
+        let permission = await Location.getForegroundPermissionsAsync();
+        if (permission.status !== 'granted' && permission.canAskAgain) {
+          permission = await Location.requestForegroundPermissionsAsync();
+        }
+        if (permission.status !== 'granted' || assignmentRequestRef.current !== requestId) {
+          fallBackToDepartures();
+          return;
+        }
+
+        let position = await Location.getLastKnownPositionAsync({
+          maxAge: RELIEF_LOCATION_MAX_AGE_MS,
+          requiredAccuracy: RELIEF_LOCATION_MAX_ACCURACY_METERS,
+        });
+        const lastKnownAccuracy = position?.coords.accuracy ?? Number.POSITIVE_INFINITY;
+        if (
+          !position
+          || Date.now() - position.timestamp > RELIEF_LOCATION_MAX_AGE_MS
+          || lastKnownAccuracy > RELIEF_LOCATION_MAX_ACCURACY_METERS
+        ) {
+          position = await Location.getCurrentPositionAsync({
+            accuracy: Location.Accuracy.High,
+          });
+        }
+        if (assignmentRequestRef.current !== requestId || controller.signal.aborted) return;
+
+        const stopsPayload = await apiService.fetchRouteStops(
+          routeSnapshot.route_id,
+          directionSnapshot,
+          undefined,
+          controller.signal,
+        );
+        const stops = parseReliefStopsGeoJson(stopsPayload);
+        const accuracyMeters = position.coords.accuracy;
+        if (!stops || accuracyMeters === null) {
+          fallBackToDepartures();
+          return;
+        }
+
+        const nearbyStop = selectNearbyReliefStop(stops, {
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+          accuracyMeters,
+          observedAtEpochMs: position.timestamp,
+        }, {
+          nowEpochMs: Date.now(),
+          maximumLocationAgeMs: RELIEF_LOCATION_MAX_AGE_MS,
+          maximumAccuracyMeters: RELIEF_LOCATION_MAX_ACCURACY_METERS,
+        });
+        if (!nearbyStop || nearbyStop.terminal === 'origin' || nearbyStop.terminal === 'both') {
+          fallBackToDepartures();
+          return;
+        }
+
+        setNearbyReliefStopName(nearbyStop.stopName);
+        const candidates = await apiService.fetchReliefCandidates(
+          routeSnapshot.route_id,
+          directionSnapshot,
+          nearbyStop.stopId,
+          controller.signal,
+        );
+        if (assignmentRequestRef.current !== requestId || controller.signal.aborted) return;
+
+        const routeIds = Array.from(new Set([
+          routeSnapshot.route_id,
+          ...(routeSnapshot.route_ids ?? []),
+        ]));
+        const candidate = selectReliefCandidate(candidates, {
+          stopId: nearbyStop.stopId,
+          directionId: directionSnapshot,
+          routeIds,
+          nowEpochSeconds: Math.floor(Date.now() / 1000),
+        });
+        if (!candidate) {
+          fallBackToDepartures();
+          return;
+        }
+
+        setReliefCandidate(candidate);
+        setAssignmentMode('candidate');
+      } catch (error) {
+        if (!(error instanceof Error && error.name === 'AbortError')) {
+          fallBackToDepartures();
+        }
+      }
+    })();
   }, [directionId, isLoadingTrips, selectedRoute]);
 
-  const handleConfirmAssignment = useCallback((vehicleId: string, tripId?: string) => {
+  const closeAssignmentModal = useCallback(() => {
+    assignmentRequestRef.current += 1;
+    reliefAbortRef.current?.abort();
+    reliefAbortRef.current = null;
     setShowAssignModal(false);
+    setIsLoadingTrips(false);
     setManualVehicle('');
+  }, []);
+
+  const handleConfirmAssignment = useCallback((vehicleId: string, tripId?: string) => {
+    closeAssignmentModal();
     navigateToMap(sanitizeVehicleId(vehicleId) || undefined, tripId);
-  }, [navigateToMap]);
+  }, [closeAssignmentModal, navigateToMap]);
 
   const renderAgencyVisual = (agency: AgencyFilter, active: boolean) => {
     const visual = AGENCY_VISUALS[agency];
     if (visual.image) {
-      return <Image source={visual.image} style={styles.agencyLogo} resizeMode="contain" accessible={false} />;
+      return (
+        <Image
+          source={visual.image}
+          style={[styles.agencyLogo, agencyLayout.compact && styles.agencyLogoCompact]}
+          resizeMode="contain"
+          accessible={false}
+        />
+      );
     }
 
     return (
       <MaterialCommunityIcons
         name={visual.icon || 'bus'}
-        size={17}
+        size={agencyLayout.compact ? 16 : 17}
         color={active ? colors.white : colors.transitDark}
       />
     );
@@ -742,6 +964,7 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
         key={item.route_id}
         style={[
           styles.routeRow,
+          responsiveType.routeRow,
           selected && styles.routeRowSelected,
           {
             backgroundColor: routePastelColor(item.route_color, selected ? 0.135 : 0.075),
@@ -750,7 +973,7 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
         ]}
       >
         <TouchableOpacity
-          style={styles.routeMain}
+          style={[styles.routeMain, responsiveType.routeMain]}
           onPress={() => {
             selectRoute(item);
             if (isSearchMode) closeSearch();
@@ -765,16 +988,22 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
         >
           <View style={[
             styles.routeBadge,
+            responsiveType.routeBadge,
             { backgroundColor: safeHexColor(item.route_color, colors.primary) },
           ]}>
             <Text style={[
               styles.routeBadgeText,
+              responsiveType.routeBadgeText,
               { color: safeHexColor(item.route_text_color, colors.white) },
             ]}>{item.route_short_name || 'Bus'}</Text>
           </View>
           <View style={styles.routeCopy}>
-            <Text style={styles.routeName} numberOfLines={1}>{getRouteTitle(item, language)}</Text>
-            <Text style={styles.routeMeta}>{getAgencyLabel(getAgencyFilter(item), language)}</Text>
+            <Text style={[styles.routeName, responsiveType.routeName]} numberOfLines={1}>
+              {getRouteTitle(item, language)}
+            </Text>
+            <Text style={[styles.routeMeta, responsiveType.routeMeta]}>
+              {getAgencyLabel(getAgencyFilter(item), language)}
+            </Text>
           </View>
         </TouchableOpacity>
         <TouchableOpacity
@@ -800,18 +1029,13 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
   return (
     <SafeAreaView style={styles.container} edges={['top', 'right', 'bottom', 'left']}>
       <StatusBar style="dark" />
-      <Animated.View
-        style={[
-          styles.animatedContent,
-          { opacity: contentOpacity, transform: [{ translateY: contentTranslateY }] },
-        ]}
-        pointerEvents={showIntro ? 'none' : 'auto'}
-      >
+      <View style={styles.animatedContent}>
       <View style={[styles.content, isLandscape && styles.contentLandscape]}>
         <ScrollView
           style={styles.discoveryPane}
           contentContainerStyle={[
             styles.discoveryContent,
+            responsiveLayout.discoveryContent,
             isLandscape && styles.discoveryContentLandscape,
             isSearchMode && styles.discoveryContentSearch,
           ]}
@@ -826,6 +1050,7 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
               <TouchableOpacity
                 style={styles.settingsButton}
                 onPress={() => navigation.navigate('Settings')}
+                hitSlop={10}
                 accessibilityRole="button"
                 accessibilityLabel={t('home.settings')}
               >
@@ -833,7 +1058,9 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
               </TouchableOpacity>
               <View style={[styles.connectionBadge, !isConnected && styles.connectionBadgeOffline]}>
                 <View style={[styles.connectionDot, { backgroundColor: isConnected ? colors.success : colors.danger }]} />
-                <Text style={styles.connectionText}>{t(isConnected ? 'home.live' : 'home.offline')}</Text>
+                <Text style={[styles.connectionText, responsiveType.connectionText]}>
+                  {t(isConnected ? 'home.live' : 'home.offline')}
+                </Text>
               </View>
             </View>
           ) : null}
@@ -841,24 +1068,33 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
           <View style={[styles.journeyBlock, isSearchMode && styles.journeyBlockSearch]}>
             {!isSearchMode ? (
               <>
-                <View style={styles.journeyRail} pointerEvents="none" />
+                <View
+                  style={[styles.journeyRail, responsiveLayout.journeyRail]}
+                  pointerEvents="none"
+                />
 
-                <View style={styles.heroPanel}>
+                <View style={[styles.heroPanel, responsiveLayout.heroPanel]}>
                   <View style={styles.heroCopy}>
-                    <Text style={styles.heroTitle}>{t('home.hero')}</Text>
-                    <Text style={styles.heroSubtitle}>{t('home.subtitle')}</Text>
+                    <Text style={[styles.heroTitle, responsiveLayout.heroTitle]}>
+                      {t('home.hero')}
+                    </Text>
+                    <Text style={[styles.heroSubtitle, responsiveType.heroSubtitle]}>{t('home.subtitle')}</Text>
                   </View>
-                  <View style={styles.heroBusBadge}>
+                  <View style={[styles.heroBusBadge, responsiveLayout.heroBusBadge]}>
                     <MaterialCommunityIcons name="bus" size={25} color={colors.primary} />
                   </View>
                 </View>
               </>
             ) : null}
 
-            <View style={[styles.searchShell, isSearchMode && styles.searchShellFocused]}>
+            <View style={[
+              styles.searchShell,
+              responsiveLayout.searchShell,
+              isSearchMode && styles.searchShellFocused,
+            ]}>
               <MaterialCommunityIcons name="magnify" size={18} color={colors.inkSoft} />
               <TextInput
-                style={styles.searchInput}
+                style={[styles.searchInput, responsiveType.searchInput]}
                 value={searchQuery}
                 onChangeText={setSearchQuery}
                 onFocus={openSearch}
@@ -883,8 +1119,8 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
 
             {!isSearchMode ? (
               <>
-                <View style={styles.sectionHeading}>
-                  <Text style={styles.quickTitle}>{t('home.quick')}</Text>
+                <View style={[styles.sectionHeading, responsiveLayout.sectionHeading]}>
+                  <Text style={[styles.quickTitle, responsiveType.quickTitle]}>{t('home.quick')}</Text>
                   <View style={styles.headingRule} />
                   <TouchableOpacity
                     style={[styles.preferenceMode, preferenceView === 'recent' && styles.preferenceModeActive]}
@@ -895,6 +1131,7 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
                   >
                     <Text style={[
                       styles.preferenceModeText,
+                      responsiveType.preferenceModeText,
                       preferenceView === 'recent' && styles.preferenceModeTextActive,
                     ]}>{t('home.recents', { count: preferences.recentRoutes.length })}</Text>
                   </TouchableOpacity>
@@ -907,6 +1144,7 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
                   >
                     <Text style={[
                       styles.preferenceModeText,
+                      responsiveType.preferenceModeText,
                       preferenceView === 'favorite' && styles.preferenceModeTextActive,
                     ]}>{t('home.favorites', { count: preferences.favoriteRouteIds.length })}</Text>
                   </TouchableOpacity>
@@ -922,7 +1160,7 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
                       scrollEnabled={preferenceScrollEnabled}
                       nestedScrollEnabled
                       directionalLockEnabled
-                      snapToInterval={PREFERENCE_ROW_HEIGHT}
+                      snapToInterval={preferenceRowHeight}
                       snapToAlignment="start"
                       decelerationRate="fast"
                       disableIntervalMomentum
@@ -948,10 +1186,10 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
                           ? (recent.directionId === 0 ? labels.anada : labels.tornada)
                           : getRouteTitle(item, language);
                         const railInputRange = [
-                          (index - visiblePreferenceRows) * PREFERENCE_ROW_HEIGHT,
-                          (index - visiblePreferenceRows + 1) * PREFERENCE_ROW_HEIGHT,
-                          index * PREFERENCE_ROW_HEIGHT,
-                          (index + 1) * PREFERENCE_ROW_HEIGHT,
+                          (index - visiblePreferenceRows) * preferenceRowHeight,
+                          (index - visiblePreferenceRows + 1) * preferenceRowHeight,
+                          index * preferenceRowHeight,
+                          (index + 1) * preferenceRowHeight,
                         ];
                         const animatedRailStyle = reduceMotion ? undefined : {
                           opacity: preferenceScrollY.interpolate({
@@ -971,7 +1209,11 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
                         return (
                           <TouchableOpacity
                             key={`${preferenceView}-${item.route_id}`}
-                            style={[styles.preferenceRow, selected && styles.preferenceRowSelected]}
+                            style={[
+                              styles.preferenceRow,
+                              responsiveType.preferenceRow,
+                              selected && styles.preferenceRowSelected,
+                            ]}
                             onPress={() => selectRoute(item, recent?.directionId)}
                             activeOpacity={0.72}
                             accessibilityRole="button"
@@ -988,18 +1230,24 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
                           >
                             <View style={[
                               styles.quickRouteBadge,
+                              responsiveType.quickRouteBadge,
                               { backgroundColor: safeHexColor(item.route_color, colors.primary) },
                             ]}>
                               <Text style={[
                                 styles.quickRouteBadgeText,
+                                responsiveType.quickRouteBadgeText,
                                 { color: safeHexColor(item.route_text_color, colors.white) },
                               ]}>{item.route_short_name || 'Bus'}</Text>
                             </View>
                             <Text
-                              style={[styles.preferenceDestination, selected && styles.preferenceDestinationSelected]}
+                              style={[
+                                styles.preferenceDestination,
+                                responsiveType.preferenceDestination,
+                                selected && styles.preferenceDestinationSelected,
+                              ]}
                               numberOfLines={1}
                             >{destination}</Text>
-                            <Text style={styles.preferenceTime} numberOfLines={1}>
+                            <Text style={[styles.preferenceTime, responsiveType.preferenceTime]} numberOfLines={1}>
                               {recent
                                 ? formatRecentTime(recent.usedAt, language)
                                 : getAgencyLabel(getAgencyFilter(item), language)}
@@ -1040,41 +1288,61 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
           <View
             onLayout={(event) => setResultsBlockTop(event.nativeEvent.layout.y)}
           >
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.agencyRow}
+          <View
+            style={styles.agencyRow}
+            onLayout={(event) => {
+              const measuredWidth = Math.floor(event.nativeEvent.layout.width);
+              setAgencyViewportWidth((current) => (
+                Math.abs(current - measuredWidth) > 1 ? measuredWidth : current
+              ));
+            }}
           >
             {availableAgencies.map((agency) => {
               const active = selectedAgency === agency;
               return (
                 <TouchableOpacity
                   key={agency}
-                  style={[styles.agencyChip, active && styles.agencyChipActive]}
+                  style={[
+                    styles.agencyChip,
+                    { width: agencyLayout.width },
+                    agencyLayout.compact && styles.agencyChipCompact,
+                    active && styles.agencyChipActive,
+                  ]}
                   onPress={() => setSelectedAgency(agency)}
+                  hitSlop={{ top: 6, bottom: 6, left: 2, right: 2 }}
                   accessibilityRole="button"
                   accessibilityState={{ selected: active }}
                 >
                   {renderAgencyVisual(agency, active)}
-                  <Text style={[styles.agencyText, active && styles.agencyTextActive]}>
+                  <Text style={[
+                    styles.agencyText,
+                    responsiveType.agencyText,
+                    agencyLayout.compact && styles.agencyTextCompact,
+                    active && styles.agencyTextActive,
+                  ]}
+                    numberOfLines={1}
+                    adjustsFontSizeToFit
+                    minimumFontScale={0.82}
+                  >
                     {getAgencyLabel(agency, language)}
                   </Text>
                 </TouchableOpacity>
               );
             })}
-          </ScrollView>
+          </View>
 
           <View style={styles.routesHeading} onLayout={handleRoutesHeadingLayout}>
-            <Text style={styles.sectionTitle}>
+            <Text style={[styles.sectionTitle, responsiveType.sectionTitle]}>
               {t(isSearchMode || searchQuery || selectedAgency !== 'Tots' ? 'common.results' : 'home.lines')}
             </Text>
             <TouchableOpacity
               style={styles.catalogButton}
               onPress={() => navigation.navigate('Routes')}
+              hitSlop={8}
               accessibilityRole="button"
               accessibilityLabel={t('home.openAll')}
             >
-              <Text style={styles.catalogButtonText}>{t('home.all')}</Text>
+              <Text style={[styles.catalogButtonText, responsiveType.catalogButtonText]}>{t('home.all')}</Text>
               <MaterialCommunityIcons name="arrow-top-right" size={15} color={colors.primary} />
             </TouchableOpacity>
           </View>
@@ -1096,7 +1364,11 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
         </ScrollView>
 
         {!isSearchMode ? (
-          <View style={[styles.servicePanel, isLandscape && styles.servicePanelLandscape]}>
+          <View style={[
+            styles.servicePanel,
+            responsiveLayout.servicePanel,
+            isLandscape && styles.servicePanelLandscape,
+          ]}>
           {isLandscape ? (
             <View style={styles.serviceHeader}>
               {selectedRoute ? (
@@ -1115,22 +1387,30 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
                 </View>
               )}
               <View style={styles.serviceHeaderCopy}>
-                <Text style={styles.serviceTitle} numberOfLines={1}>
+                <Text style={[styles.serviceTitle, responsiveType.serviceTitle]} numberOfLines={1}>
                   {selectedRoute ? getRouteTitle(selectedRoute, language) : t('home.selectLine')}
                 </Text>
               </View>
             </View>
           ) : null}
 
-          <Text style={styles.directionLabel}>{t('home.direction')}</Text>
-          <View style={[styles.directionSelector, isLandscape && styles.directionSelectorLandscape]}>
+          <Text style={[styles.directionLabel, responsiveType.directionLabel]}>{t('home.direction')}</Text>
+          <View style={[
+            styles.directionSelector,
+            responsiveLayout.directionSelector,
+            isLandscape && styles.directionSelectorLandscape,
+          ]}>
             {([0, 1] as const).map((value) => {
               const label = value === 0 ? directionNames.anada : directionNames.tornada;
               const selected = directionId === value;
               return (
                 <TouchableOpacity
                   key={value}
-                  style={[styles.directionOption, selected && styles.directionOptionSelected]}
+                  style={[
+                    styles.directionOption,
+                    responsiveLayout.directionOption,
+                    selected && styles.directionOptionSelected,
+                  ]}
                   onPress={() => {
                     autoSelectedRouteRef.current = null;
                     setDirectionId(value);
@@ -1141,11 +1421,19 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
                   accessibilityState={{ selected, disabled: !selectedRoute }}
                 >
                   <View style={[styles.directionNumber, selected && styles.directionNumberSelected]}>
-                    <Text style={[styles.directionNumberText, selected && styles.directionNumberTextSelected]}>
+                    <Text style={[
+                      styles.directionNumberText,
+                      responsiveType.directionNumberText,
+                      selected && styles.directionNumberTextSelected,
+                    ]}>
                       {value + 1}
                     </Text>
                   </View>
-                  <Text style={[styles.directionText, selected && styles.directionTextSelected]} numberOfLines={2}>
+                  <Text style={[
+                    styles.directionText,
+                    responsiveType.directionText,
+                    selected && styles.directionTextSelected,
+                  ]} numberOfLines={2}>
                     {label || t('home.chooseLine')}
                   </Text>
                 </TouchableOpacity>
@@ -1156,6 +1444,7 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
           <TouchableOpacity
             style={[
               styles.startButton,
+              responsiveLayout.startButton,
               (!selectedRoute || directionId === null) && styles.startButtonDisabled,
             ]}
             disabled={!selectedRoute || directionId === null || isLoadingTrips}
@@ -1166,8 +1455,8 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
           >
             <MaterialCommunityIcons name="bus-marker" size={22} color={colors.white} />
             <View style={styles.startButtonCopy}>
-              <Text style={styles.startButtonText}>{t('home.start')}</Text>
-              <Text style={styles.startButtonMeta} numberOfLines={1}>
+              <Text style={[styles.startButtonText, responsiveType.startButtonText]}>{t('home.start')}</Text>
+              <Text style={[styles.startButtonMeta, responsiveType.startButtonMeta]} numberOfLines={1}>
                 {selectedRoute && directionId !== null
                   ? `${selectedRoute.route_short_name} · ${directionId === 0 ? directionNames.anada : directionNames.tornada}`
                   : t('home.pendingSelection')}
@@ -1185,86 +1474,26 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
         insets={insets}
         selectedRoute={selectedRoute}
         upcomingTrips={upcomingTrips}
+        mode={assignmentMode}
+        candidate={reliefCandidate}
+        nearbyStopName={nearbyReliefStopName}
         loading={isLoadingTrips}
         manualVehicle={manualVehicle}
         onManualVehicleChange={(value) => setManualVehicle(sanitizeVehicleId(value))}
-        onClose={() => setShowAssignModal(false)}
+        onClose={closeAssignmentModal}
         onConfirm={handleConfirmAssignment}
+        onChooseDeparture={() => {
+          reliefAbortRef.current?.abort();
+          reliefAbortRef.current = null;
+          setReliefCandidate(null);
+          setAssignmentMode('departures');
+        }}
         onSkip={() => {
-          setShowAssignModal(false);
+          closeAssignmentModal();
           navigateToMap();
         }}
       />
-      </Animated.View>
-
-      {showIntro ? (
-        <Animated.View
-          style={[styles.introOverlay, { opacity: introOpacity }]}
-          accessibilityRole="progressbar"
-          accessibilityLiveRegion="polite"
-          accessibilityLabel={t('app.loading')}
-        >
-          <View style={styles.introMark}>
-            <MaterialCommunityIcons name="transit-connection-horizontal" size={22} color={colors.primary} />
-          </View>
-          <Text style={styles.introTitle}>{t('app.loading')}</Text>
-          <View style={styles.introScene}>
-            <View style={[styles.introTrack, styles.introTrackTop]} />
-            <View style={[styles.introTrack, styles.introTrackBottom]} />
-            <Animated.View style={[
-              styles.introStop,
-              styles.introStopTop,
-              {
-                opacity: introPulse.interpolate({ inputRange: [0, 1], outputRange: [0.45, 1] }),
-                transform: [{ scale: introPulse.interpolate({ inputRange: [0, 1], outputRange: [0.85, 1.2] }) }],
-              },
-            ]} />
-            <Animated.View style={[
-              styles.introStop,
-              styles.introStopBottom,
-              {
-                opacity: introPulse.interpolate({ inputRange: [0, 1], outputRange: [1, 0.45] }),
-                transform: [{ scale: introPulse.interpolate({ inputRange: [0, 1], outputRange: [1.2, 0.85] }) }],
-              },
-            ]} />
-            <Animated.View style={[
-              styles.introMovingBus,
-              styles.introMovingBusTop,
-              {
-                transform: [
-                  { translateX: introBusForward.interpolate({ inputRange: [0, 1], outputRange: [-126, 126] }) },
-                  { rotate: '90deg' },
-                ],
-              },
-            ]}>
-              <IntroBus />
-            </Animated.View>
-            <Animated.View style={[
-              styles.introMovingBus,
-              styles.introMovingBusBottom,
-              {
-                transform: [
-                  { translateX: introBusReverse.interpolate({ inputRange: [0, 1], outputRange: [126, -126] }) },
-                  { rotate: '-90deg' },
-                ],
-              },
-            ]}>
-              <IntroBus accent={colors.warning} />
-            </Animated.View>
-          </View>
-          <Text style={styles.introHint}>{t('app.loadingHint')}</Text>
-          <View style={styles.introProgressTrack}>
-            <Animated.View style={[
-              styles.introProgress,
-              {
-                transform: [{
-                  translateX: introBusForward.interpolate({ inputRange: [0, 1], outputRange: [-80, 80] }),
-                }],
-              },
-            ]} />
-          </View>
-        </Animated.View>
-      ) : null}
+      </View>
     </SafeAreaView>
   );
 }
@@ -1426,7 +1655,6 @@ const styles = StyleSheet.create({
   preferenceList: { paddingRight: 38 },
   preferenceRow: {
     position: 'relative',
-    height: PREFERENCE_ROW_HEIGHT,
     paddingHorizontal: 2,
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
@@ -1493,14 +1721,17 @@ const styles = StyleSheet.create({
     lineHeight: 13,
   },
   agencyRow: {
-    gap: 6,
-    paddingRight: spacing.lg,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    columnGap: 6,
+    rowGap: 6,
     paddingVertical: spacing.xs,
     marginBottom: spacing.xs,
   },
   agencyChip: {
     height: 32,
-    minWidth: 62,
+    minWidth: 0,
     paddingHorizontal: spacing.sm,
     borderRadius: 6,
     borderWidth: StyleSheet.hairlineWidth,
@@ -1511,9 +1742,18 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 5,
   },
+  agencyChipCompact: { paddingHorizontal: 4, gap: 3 },
   agencyChipActive: { backgroundColor: colors.transitDark, borderColor: colors.transitDark },
   agencyLogo: { width: 20, height: 14 },
-  agencyText: { fontFamily: fonts.medium, color: colors.inkSoft, fontSize: 9.5, lineHeight: 12 },
+  agencyLogoCompact: { width: 17, height: 13 },
+  agencyText: {
+    flexShrink: 1,
+    fontFamily: fonts.medium,
+    color: colors.inkSoft,
+    fontSize: 9.5,
+    lineHeight: 12,
+  },
+  agencyTextCompact: { fontSize: 10.5, lineHeight: 14 },
   agencyTextActive: { fontFamily: fonts.label, color: colors.white },
   routesHeading: {
     minHeight: 26,
@@ -1688,131 +1928,5 @@ const styles = StyleSheet.create({
     fontSize: 9,
     lineHeight: 12,
     marginTop: 1,
-  },
-  introOverlay: {
-    position: 'absolute',
-    top: 0,
-    right: 0,
-    bottom: 0,
-    left: 0,
-    zIndex: 20,
-    backgroundColor: colors.background,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: spacing.xxl,
-  },
-  introMark: {
-    width: 46,
-    height: 46,
-    borderRadius: 23,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.primary,
-    backgroundColor: colors.surface,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: spacing.lg,
-  },
-  introTitle: {
-    fontFamily: fonts.hero,
-    color: colors.ink,
-    fontSize: 31,
-    lineHeight: 34,
-    letterSpacing: -0.7,
-    textAlign: 'center',
-  },
-  introHint: {
-    marginTop: spacing.md,
-    fontFamily: fonts.medium,
-    color: colors.muted,
-    fontSize: 10.5,
-    lineHeight: 14,
-    textAlign: 'center',
-  },
-  introScene: {
-    width: 292,
-    height: 104,
-    marginTop: spacing.xl,
-    position: 'relative',
-    overflow: 'hidden',
-  },
-  introTrack: {
-    position: 'absolute',
-    left: 8,
-    right: 8,
-    height: 1.5,
-    borderRadius: 1,
-    backgroundColor: colors.primary,
-    opacity: 0.38,
-  },
-  introTrackTop: { top: 31 },
-  introTrackBottom: { top: 73 },
-  introStop: {
-    position: 'absolute',
-    width: 9,
-    height: 9,
-    borderRadius: 5,
-    borderWidth: 1.5,
-    borderColor: colors.primary,
-    backgroundColor: colors.background,
-  },
-  introStopTop: { top: 27, left: 64 },
-  introStopBottom: { top: 69, right: 58 },
-  introMovingBus: { position: 'absolute', left: '50%', marginLeft: -9 },
-  introMovingBusTop: { top: 5 },
-  introMovingBusBottom: { top: 47 },
-  introBus: {
-    width: 18,
-    height: 52,
-    borderRadius: 5,
-    borderWidth: 1.4,
-    borderColor: '#111F38',
-    backgroundColor: colors.white,
-    overflow: 'hidden',
-    shadowColor: colors.ink,
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.28,
-    shadowRadius: 4,
-    elevation: 5,
-  },
-  introBusEnd: { position: 'absolute', left: 0, right: 0, height: 10 },
-  introBusFront: { top: 0 },
-  introBusBack: { bottom: 0 },
-  introBusStripe: { position: 'absolute', top: 10, bottom: 10, width: 3 },
-  introBusStripeLeft: { left: 0 },
-  introBusStripeRight: { right: 0 },
-  introBusGlass: {
-    position: 'absolute',
-    top: 3,
-    left: 3,
-    right: 3,
-    height: 4,
-    borderRadius: 1,
-    backgroundColor: '#1E293B',
-  },
-  introBusRoof: {
-    position: 'absolute',
-    top: 18,
-    left: 5,
-    right: 5,
-    height: 11,
-    borderRadius: 2,
-    borderWidth: 0.7,
-    borderColor: '#94A3B8',
-    backgroundColor: '#E2E8F0',
-  },
-  introProgressTrack: {
-    width: 176,
-    height: 2,
-    marginTop: spacing.lg,
-    borderRadius: 1,
-    backgroundColor: colors.border,
-    overflow: 'hidden',
-  },
-  introProgress: {
-    alignSelf: 'center',
-    width: 56,
-    height: 2,
-    borderRadius: 1,
-    backgroundColor: colors.primary,
   },
 });

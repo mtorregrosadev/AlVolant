@@ -18,6 +18,7 @@ export type TelemetryEventName =
 export type TelemetryEndpoint =
   | 'live_websocket'
   | 'nearby_routes'
+  | 'relief_candidates'
   | 'route_shape'
   | 'route_stops'
   | 'route_updates'

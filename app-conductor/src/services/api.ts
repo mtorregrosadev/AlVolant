@@ -4,9 +4,16 @@ import {
   type TelemetryBatch,
   type TelemetryEndpoint,
 } from './telemetry';
+import {
+  parseReliefCandidates,
+  type ReliefCandidate,
+} from './reliefDetection';
 
 const BFF_PORT = 8000;
 const REQUEST_TIMEOUT_MS = 12_000;
+const STARTUP_TIMEOUT_MS = 15_000;
+const STARTUP_ATTEMPT_TIMEOUT_MS = 4_500;
+const STARTUP_RETRY_DELAY_MS = 750;
 const API_KEY = (process.env.EXPO_PUBLIC_BFF_API_KEY ?? '').trim();
 
 function getMetroHost() {
@@ -36,18 +43,18 @@ export const WS_URL = BASE_URL.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:
 
 function assertSecureConfiguration() {
   if (!API_KEY || API_KEY.length > 512 || /[\u0000-\u001F\u007F]/.test(API_KEY)) {
-    throw new ApiError('Falta la configuració segura del BFF.');
+    throw new ApiError('Falta la configuració segura del BFF.', undefined, 'configuration');
   }
 
   if (!__DEV__ && !BASE_URL.startsWith('https://')) {
-    throw new ApiError('El BFF de producció ha d’utilitzar HTTPS.');
+    throw new ApiError('El BFF de producció ha d’utilitzar HTTPS.', undefined, 'configuration');
   }
 }
 
 function encodePathSegment(value: string) {
   const normalized = value.trim();
   if (!normalized || normalized.length > 160 || /[\u0000-\u001F\u007F]/.test(normalized)) {
-    throw new ApiError('Identificador de ruta no vàlid.');
+    throw new ApiError('Identificador de ruta no vàlid.', undefined, 'validation');
   }
 
   return encodeURIComponent(normalized);
@@ -71,9 +78,35 @@ function isAbortError(error: unknown) {
 }
 
 export class ApiError extends Error {
-  constructor(message: string, readonly status?: number) {
+  constructor(
+    message: string,
+    readonly status?: number,
+    readonly code: ApiErrorCode = status === undefined ? 'unknown' : 'http',
+  ) {
     super(message);
     this.name = 'ApiError';
+  }
+}
+
+export type ApiErrorCode =
+  | 'configuration'
+  | 'validation'
+  | 'http'
+  | 'invalid_response'
+  | 'timeout'
+  | 'network'
+  | 'unknown';
+
+export type StartupErrorKind =
+  | 'offline'
+  | 'unavailable'
+  | 'invalid_response'
+  | 'configuration';
+
+export class StartupError extends Error {
+  constructor(readonly kind: StartupErrorKind) {
+    super('Application startup failed.');
+    this.name = 'StartupError';
   }
 }
 
@@ -83,18 +116,19 @@ type JsonRequestOptions = {
   endpoint?: TelemetryEndpoint;
   reportTelemetry?: boolean;
   signal?: AbortSignal;
+  timeoutMs?: number;
 };
 
 async function requestJson<T>(path: string, options: JsonRequestOptions = {}): Promise<T> {
   assertSecureConfiguration();
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeoutMs = Math.max(1, options.timeoutMs ?? REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const abortFromCaller = () => controller.abort();
-  if (options.signal?.aborted) {
-    controller.abort();
-  } else {
+  if (options.signal) {
     options.signal?.addEventListener('abort', abortFromCaller, { once: true });
+    if (options.signal.aborted) controller.abort();
   }
   const method = options.method ?? 'GET';
   const startedAt = Date.now();
@@ -124,7 +158,7 @@ async function requestJson<T>(path: string, options: JsonRequestOptions = {}): P
         });
         reportedError = true;
       }
-      throw new ApiError('El BFF no ha pogut completar la petició.', response.status);
+      throw new ApiError('El BFF no ha pogut completar la petició.', response.status, 'http');
     }
 
     try {
@@ -149,7 +183,7 @@ async function requestJson<T>(path: string, options: JsonRequestOptions = {}): P
         });
         reportedError = true;
       }
-      throw new ApiError('El BFF ha retornat una resposta no vàlida.');
+      throw new ApiError('El BFF ha retornat una resposta no vàlida.', undefined, 'invalid_response');
     }
   } catch (error) {
     if (isAbortError(error)) {
@@ -163,7 +197,7 @@ async function requestJson<T>(path: string, options: JsonRequestOptions = {}): P
           error_type: 'TimeoutError',
         });
       }
-      throw new ApiError('El BFF ha trigat massa a respondre.');
+      throw new ApiError('El BFF ha trigat massa a respondre.', undefined, 'timeout');
     }
 
     if (error instanceof ApiError) {
@@ -179,7 +213,7 @@ async function requestJson<T>(path: string, options: JsonRequestOptions = {}): P
         error_type: error instanceof Error ? error.name : 'NetworkError',
       });
     }
-    throw new ApiError('No s’ha pogut connectar amb el BFF.');
+    throw new ApiError('No s’ha pogut connectar amb el BFF.', undefined, 'network');
   } finally {
     clearTimeout(timeout);
     options.signal?.removeEventListener('abort', abortFromCaller);
@@ -221,6 +255,123 @@ export interface RouteInfo {
   route_ids?: string[];
   direction_destinations?: DirectionDestination[];
   display_name?: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isBoundedString(value: unknown, maxLength = 512): value is string {
+  return typeof value === 'string'
+    && value.length <= maxLength
+    && !/[\u0000-\u001F\u007F]/.test(value);
+}
+
+function isDirectionDestination(value: unknown): value is DirectionDestination {
+  if (!isRecord(value)) return false;
+  return (value.direction_id === 0 || value.direction_id === 1)
+    && isBoundedString(value.destination_name)
+    && isBoundedString(value.label);
+}
+
+function isRouteInfo(value: unknown): value is RouteInfo {
+  if (!isRecord(value)) return false;
+  if (
+    !isBoundedString(value.route_id, 160)
+    || value.route_id.trim().length === 0
+    || !isBoundedString(value.route_short_name, 160)
+    || !isBoundedString(value.route_long_name)
+    || !isBoundedString(value.route_color, 16)
+    || !isBoundedString(value.route_text_color, 16)
+    || !Number.isInteger(value.route_type)
+    || !isBoundedString(value.agency_id, 160)
+  ) return false;
+
+  if (
+    value.route_ids !== undefined
+    && (!Array.isArray(value.route_ids)
+      || value.route_ids.length > 256
+      || !value.route_ids.every((routeId) => isBoundedString(routeId, 160)))
+  ) return false;
+
+  if (
+    value.direction_destinations !== undefined
+    && (!Array.isArray(value.direction_destinations)
+      || value.direction_destinations.length > 4
+      || !value.direction_destinations.every(isDirectionDestination))
+  ) return false;
+
+  return value.display_name === undefined || isBoundedString(value.display_name);
+}
+
+function parseRoutesPayload(value: unknown): RouteInfo[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 10_000) {
+    throw new ApiError('El catàleg de línies no és vàlid.', undefined, 'invalid_response');
+  }
+
+  if (!value.every(isRouteInfo)) {
+    throw new ApiError('El catàleg de línies no és vàlid.', undefined, 'invalid_response');
+  }
+
+  return value;
+}
+
+function parseReadinessPayload(value: unknown) {
+  if (!isRecord(value) || !isRecord(value.checks)) {
+    throw new ApiError('La resposta d’estat no és vàlida.', undefined, 'invalid_response');
+  }
+
+  const redis = value.checks.redis;
+  const gtfs = value.checks.gtfs;
+  if (
+    (value.status !== 'ready' && value.status !== 'not_ready')
+    || !isRecord(redis)
+    || typeof redis.connected !== 'boolean'
+    || !isRecord(gtfs)
+    || typeof gtfs.loaded !== 'boolean'
+  ) {
+    throw new ApiError('La resposta d’estat no és vàlida.', undefined, 'invalid_response');
+  }
+
+  return value.status === 'ready' && redis.connected && gtfs.loaded;
+}
+
+function startupErrorKind(error: unknown): StartupErrorKind {
+  if (error instanceof StartupError) return error.kind;
+  if (!(error instanceof ApiError)) return 'offline';
+  if (error.code === 'configuration' || error.status === 401 || error.status === 403) {
+    return 'configuration';
+  }
+  if (error.code === 'invalid_response') return 'invalid_response';
+  if (error.code === 'network' || error.code === 'timeout') return 'offline';
+  return 'unavailable';
+}
+
+function createAbortError() {
+  const error = new Error('Aborted');
+  error.name = 'AbortError';
+  return error;
+}
+
+function waitForRetry(delayMs: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onAbort = () => {
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      reject(createAbortError());
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+
+    timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, delayMs);
+  });
 }
 
 export interface NearbyRouteDistance {
@@ -343,24 +494,84 @@ function isFreshRealtimeTimestamp(timestamp: number) {
 }
 
 let routesRequest: Promise<RouteInfo[]> | null = null;
+let preloadedRoutes: RouteInfo[] | null = null;
 
 export const apiService = {
+  async waitUntilReady(signal?: AbortSignal) {
+    const deadline = Date.now() + STARTUP_TIMEOUT_MS;
+    let lastErrorKind: StartupErrorKind = 'unavailable';
+
+    while (!signal?.aborted && Date.now() < deadline) {
+      try {
+        const readinessTimeout = Math.min(
+          STARTUP_ATTEMPT_TIMEOUT_MS,
+          Math.max(1, deadline - Date.now()),
+        );
+        const readiness = await requestJson<unknown>('/health/ready', {
+          reportTelemetry: false,
+          signal,
+          timeoutMs: readinessTimeout,
+        });
+        if (!parseReadinessPayload(readiness)) {
+          throw new StartupError('unavailable');
+        }
+
+        const catalogTimeout = Math.min(
+          STARTUP_ATTEMPT_TIMEOUT_MS,
+          Math.max(1, deadline - Date.now()),
+        );
+        const catalog = await requestJson<unknown>('/api/v1/gtfs/routes', {
+          reportTelemetry: false,
+          signal,
+          timeoutMs: catalogTimeout,
+        });
+        preloadedRoutes = parseRoutesPayload(catalog);
+        return;
+      } catch (error) {
+        if (signal?.aborted || isAbortError(error)) throw error;
+        lastErrorKind = startupErrorKind(error);
+        if (lastErrorKind === 'configuration') break;
+
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) break;
+        await waitForRetry(Math.min(STARTUP_RETRY_DELAY_MS, remainingMs), signal);
+      }
+    }
+
+    if (signal?.aborted) throw createAbortError();
+    throw new StartupError(lastErrorKind);
+  },
+
   fetchRouteShape(routeId: string, directionId?: number, tripId?: string) {
     const route = encodePathSegment(routeId);
     const query = createQuery({ direction_id: directionId, trip_id: tripId });
     return requestJson<any>(`/api/v1/gtfs/shapes/${route}${query}`, { endpoint: 'route_shape' });
   },
 
-  fetchRouteStops(routeId: string, directionId?: number, tripId?: string) {
+  fetchRouteStops(
+    routeId: string,
+    directionId?: number,
+    tripId?: string,
+    signal?: AbortSignal,
+  ) {
     const route = encodePathSegment(routeId);
     const query = createQuery({ direction_id: directionId, trip_id: tripId });
-    return requestJson<any>(`/api/v1/gtfs/stops/${route}${query}`, { endpoint: 'route_stops' });
+    return requestJson<any>(`/api/v1/gtfs/stops/${route}${query}`, {
+      endpoint: 'route_stops',
+      signal,
+    });
   },
 
   fetchRoutes(): Promise<RouteInfo[]> {
+    if (preloadedRoutes) {
+      const routes = preloadedRoutes;
+      preloadedRoutes = null;
+      return Promise.resolve(routes);
+    }
+
     if (!routesRequest) {
-      routesRequest = requestJson<RouteInfo[]>('/api/v1/gtfs/routes', { endpoint: 'routes' })
-        .then((routes) => Array.isArray(routes) ? routes : [])
+      routesRequest = requestJson<unknown>('/api/v1/gtfs/routes', { endpoint: 'routes' })
+        .then(parseRoutesPayload)
         .finally(() => {
           routesRequest = null;
         });
@@ -405,7 +616,11 @@ export const apiService = {
       : []);
   },
 
-  fetchUpcomingTrips(routeId: string, directionId: number): Promise<UpcomingTrip[]> {
+  fetchUpcomingTrips(
+    routeId: string,
+    directionId: number,
+    signal?: AbortSignal,
+  ): Promise<UpcomingTrip[]> {
     if (directionId !== 0 && directionId !== 1) {
       return Promise.reject(new ApiError('Direcció de ruta no vàlida.'));
     }
@@ -413,8 +628,45 @@ export const apiService = {
     const route = encodePathSegment(routeId);
     return requestJson<UpcomingTrip[]>(
       `/api/v1/gtfs/routes/${route}/upcoming-trips${createQuery({ direction_id: directionId })}`,
-      { endpoint: 'upcoming_trips' },
+      { endpoint: 'upcoming_trips', signal },
     ).then((trips) => Array.isArray(trips) ? trips : []);
+  },
+
+  fetchReliefCandidates(
+    routeId: string,
+    directionId: 0 | 1,
+    stopId: string,
+    signal?: AbortSignal,
+  ): Promise<ReliefCandidate[]> {
+    const route = encodePathSegment(routeId);
+    const stop = stopId.trim();
+    if (!stop || stop.length > 160 || /[\u0000-\u001F\u007F]/.test(stop)) {
+      return Promise.reject(new ApiError('Identificador de parada no vàlid.', undefined, 'validation'));
+    }
+    const query = createQuery({ direction_id: directionId, stop_id: stop, limit: 4 });
+
+    return requestJson<unknown>(`/api/v1/atm_rt/vehicles/${route}/near-stop${query}`, {
+      endpoint: 'relief_candidates',
+      signal,
+    }).then((payload) => {
+      if (!Array.isArray(payload)) {
+        throw new ApiError('Els vehicles de relleu no són vàlids.', undefined, 'invalid_response');
+      }
+
+      const receivedAt = Math.floor(Date.now() / 1000);
+      const contextualized = payload.map((value) => isRecord(value) ? {
+        ...value,
+        route_id: routeId,
+        direction_id: directionId,
+        stop_id: stopId,
+        observed_at: receivedAt,
+      } : value);
+      const candidates = parseReliefCandidates(contextualized);
+      if (!candidates) {
+        throw new ApiError('Els vehicles de relleu no són vàlids.', undefined, 'invalid_response');
+      }
+      return candidates;
+    });
   },
 
   fetchRouteVehicles(routeId: string): Promise<VehiclePosition[]> {

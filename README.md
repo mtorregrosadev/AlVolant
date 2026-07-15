@@ -1,5 +1,9 @@
 # AlVolant - BFF and APP
 
+https://github.com/user-attachments/assets/89d218e5-36ec-40dc-b13b-15113fd39b5f
+
+<p align="center"><sub><strong>Vídeo de presentació d’AlVolant.</strong></sub></p>
+
 Aplicació mòbil per preparar i seguir serveis d’autobús sobre la xarxa integrada de transport. El repositori inclou una app Expo/React Native orientada a iPhone i un Backend-for-Frontend FastAPI que agrega GTFS estàtic, GTFS-Realtime i informació de trànsit.
 
 <p align="center">
@@ -11,6 +15,50 @@ Aplicació mòbil per preparar i seguir serveis d’autobús sobre la xarxa inte
   &nbsp;
   <img src="docs/screenshots/map.png" width="22%" alt="Navegació sobre el mapa fosc">
 </p>
+
+## Exemples en vídeo
+
+<table>
+  <tr>
+    <td width="33%" align="center">
+      <a href="https://github.com/user-attachments/assets/1a83656e-7913-4b06-b8de-8b71b21d24ea">
+        <img src="docs/videos/01-cerca-m30-retrat.gif" width="100%" alt="Cerca de la línia M30 en retrat">
+      </a>
+      <br>
+      <sub><strong>1. Cerca de la M30</strong><br>Cerca i selecció d’una línia en retrat.</sub>
+    </td>
+    <td width="33%" align="center">
+      <a href="https://github.com/user-attachments/assets/10486bc3-349a-4a6b-8f4e-11726add6b3d">
+        <img src="docs/videos/02-inici-servei-retrat.gif" width="100%" alt="Inici d’un servei en retrat">
+      </a>
+      <br>
+      <sub><strong>2. Inici del servei</strong><br>Preparació i inici d’un servei en retrat.</sub>
+    </td>
+    <td width="33%" align="center">
+      <a href="https://github.com/user-attachments/assets/cc9737dd-e623-4af7-a777-2abd90f4b6ef">
+        <img src="docs/videos/03-simulacio-m30-retrat.gif" width="100%" alt="Simulació de la línia M30 en retrat">
+      </a>
+      <br>
+      <sub><strong>3. Simulació en retrat</strong><br>Navegació de la línia M30 durant el servei.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center">
+      <a href="https://mtorregrosa.is-a.dev/alvolant/videos/04-simulacio-m30-horitzontal.mp4">
+        <img src="docs/videos/04-simulacio-m30-horitzontal.gif" width="100%" alt="Simulació de la línia M30 en horitzontal">
+      </a>
+      <br>
+      <sub><strong>4. Simulació en horitzontal</strong><br>Navegació amb la interfície adaptada al mode horitzontal.</sub>
+    </td>
+    <td width="33%" align="center">
+      <a href="https://github.com/user-attachments/assets/636e2ddd-c81b-40c3-a20c-542b605f9bc2">
+        <img src="docs/videos/05-preferencies-retrat.gif" width="100%" alt="Preferències de l’aplicació en retrat">
+      </a>
+      <br>
+      <sub><strong>5. Preferències</strong><br>Configuració de les preferències de l’app.</sub>
+    </td>
+  </tr>
+</table>
 
 ## Què permet fer
 
@@ -77,6 +125,7 @@ app/                       BFF FastAPI
   services/                Ingesta, normalització i cache
 tests/                     Proves del backend
 docs/screenshots/          Captures reals de l’iPhone Simulator
+docs/videos/               Vídeo de presentació i exemples d’ús
 docs/design/               Handoff vectorial del vehicle
 docs/PRIVACY.md            Política i inventari de dades
 ```

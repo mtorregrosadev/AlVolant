@@ -497,6 +497,10 @@ let routesRequest: Promise<RouteInfo[]> | null = null;
 let preloadedRoutes: RouteInfo[] | null = null;
 
 export const apiService = {
+  getPreloadedRoutes(): RouteInfo[] | null {
+    return preloadedRoutes ? [...preloadedRoutes] : null;
+  },
+
   async waitUntilReady(signal?: AbortSignal) {
     const deadline = Date.now() + STARTUP_TIMEOUT_MS;
     let lastErrorKind: StartupErrorKind = 'unavailable';

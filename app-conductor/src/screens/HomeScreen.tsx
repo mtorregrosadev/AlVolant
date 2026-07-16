@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AccessibilityInfo,
-  ActivityIndicator,
   Animated,
   AppState,
   Image,
@@ -274,6 +273,10 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
   const preferenceScrollY = useRef(new Animated.Value(0)).current;
   const assignmentRequestRef = useRef(0);
   const reliefAbortRef = useRef<AbortController | null>(null);
+  const initialRoutesRef = useRef<RouteInfo[] | null | undefined>(undefined);
+  if (initialRoutesRef.current === undefined) {
+    initialRoutesRef.current = apiService.getPreloadedRoutes();
+  }
 
   const {
     ready: preferencesReady,
@@ -283,11 +286,11 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
   } = usePreferences();
   const { language, t } = useI18n();
 
-  const [routes, setRoutes] = useState<RouteInfo[]>([]);
+  const [routes, setRoutes] = useState<RouteInfo[]>(() => initialRoutesRef.current ?? []);
   const [selectedRoute, setSelectedRoute] = useState<RouteInfo | null>(null);
   const [directionId, setDirectionId] = useState<0 | 1 | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [isConnected, setIsConnected] = useState(false);
+  const [loading, setLoading] = useState(initialRoutesRef.current === null);
+  const [isConnected, setIsConnected] = useState(Boolean(initialRoutesRef.current?.length));
   const [nearbyDistances, setNearbyDistances] = useState<Record<string, number>>({});
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearchMode, setIsSearchMode] = useState(false);
@@ -384,7 +387,7 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
 
   useEffect(() => {
     mountedRef.current = true;
-    void loadRoutes(true);
+    void loadRoutes(initialRoutesRef.current === null);
 
     const subscription = AppState.addEventListener('change', (state) => {
       if (state === 'active' && Date.now() - lastRoutesFetchRef.current > FOREGROUND_REFRESH_MS) {
@@ -1347,12 +1350,7 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
             </TouchableOpacity>
           </View>
 
-          {loading && routes.length === 0 ? (
-            <View style={styles.loadingState}>
-              <ActivityIndicator color={colors.primary} />
-              <Text style={styles.loadingText}>{t('home.loadingLines')}</Text>
-            </View>
-          ) : displayedRoutes.length === 0 ? (
+          {loading && routes.length === 0 ? null : displayedRoutes.length === 0 ? (
             <View style={styles.emptyRoutes}>
               <MaterialCommunityIcons name="bus-alert" size={26} color={colors.transitDark} />
               <Text style={styles.emptyRoutesText}>{t('home.noMatches')}</Text>
@@ -1824,8 +1822,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   starButtonActive: { backgroundColor: colors.primarySoft },
-  loadingState: { minHeight: 70, alignItems: 'center', justifyContent: 'center' },
-  loadingText: { ...typography.body, color: colors.muted, marginTop: spacing.sm },
   emptyRoutes: { minHeight: 70, alignItems: 'center', justifyContent: 'center' },
   emptyRoutesText: { ...typography.body, color: colors.muted, marginTop: spacing.xs },
   servicePanel: {

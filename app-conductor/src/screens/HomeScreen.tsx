@@ -196,7 +196,9 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
       routeBadgeText: { fontSize: fontSize(12.5), lineHeight: lineHeight(16) },
       routeName: { fontSize: fontSize(13.5), lineHeight: lineHeight(18) },
       routeMeta: { fontSize: fontSize(11.5), lineHeight: lineHeight(15) },
-      serviceTitle: { fontSize: fontSize(15), lineHeight: lineHeight(20) },
+      selectedRouteLabel: { fontSize: fontSize(11.5), lineHeight: lineHeight(15) },
+      selectedRouteName: { fontSize: fontSize(13), lineHeight: lineHeight(17) },
+      selectedRouteMeta: { fontSize: fontSize(10.5), lineHeight: lineHeight(14) },
       directionLabel: { fontSize: fontSize(12), lineHeight: lineHeight(16) },
       directionNumberText: { fontSize: fontSize(11.5), lineHeight: lineHeight(15) },
       directionText: { fontSize: fontSize(13), lineHeight: lineHeight(17) },
@@ -249,6 +251,10 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
       paddingHorizontal: isLandscape ? spacing.xl : contentGutter,
       paddingTop: isCompactPortrait ? 6 : spacing.sm,
       paddingBottom: isCompactPortrait ? 6 : spacing.sm,
+    },
+    selectedRouteCard: {
+      minHeight: isCompactPortrait ? 38 : 42,
+      marginBottom: isCompactPortrait ? 6 : spacing.sm,
     },
     directionSelector: {
       minHeight: isCompactPortrait ? 44 : 48,
@@ -1383,27 +1389,49 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
             responsiveLayout.servicePanel,
             isLandscape && styles.servicePanelLandscape,
           ]}>
-          {isLandscape ? (
-            <View style={styles.serviceHeader}>
-              {selectedRoute ? (
+          {selectedRoute ? (
+            <View>
+              <Text style={[styles.selectedRouteLabel, responsiveType.selectedRouteLabel]}>
+                {t('home.selectedRoute')}
+              </Text>
+              <View
+                style={[
+                  styles.selectedRouteCard,
+                  responsiveLayout.selectedRouteCard,
+                  {
+                    backgroundColor: routePastelColor(selectedRoute.route_color, 0.11),
+                    borderLeftColor: safeHexColor(selectedRoute.route_color, colors.primary),
+                  },
+                ]}
+                accessible
+                accessibilityLabel={t('home.selectedRouteA11y', {
+                  line: selectedRoute.route_short_name || 'Bus',
+                  name: getRouteTitle(selectedRoute, language),
+                })}
+              >
                 <View style={[
-                  styles.serviceRouteBadge,
+                  styles.selectedRouteBadge,
                   { backgroundColor: safeHexColor(selectedRoute.route_color, colors.primary) },
                 ]}>
                   <Text style={[
-                    styles.serviceRouteBadgeText,
+                    styles.selectedRouteBadgeText,
                     { color: safeHexColor(selectedRoute.route_text_color, colors.white) },
                   ]}>{selectedRoute.route_short_name || 'Bus'}</Text>
                 </View>
-              ) : (
-                <View style={styles.serviceHeaderIcon}>
-                  <MaterialCommunityIcons name="bus" size={21} color={colors.white} />
+                <View style={styles.selectedRouteCopy}>
+                  <Text
+                    style={[styles.selectedRouteName, responsiveType.selectedRouteName]}
+                    numberOfLines={1}
+                  >
+                    {getRouteTitle(selectedRoute, language)}
+                  </Text>
+                  <Text style={[styles.selectedRouteMeta, responsiveType.selectedRouteMeta]}>
+                    {getAgencyLabel(getAgencyFilter(selectedRoute), language)}
+                  </Text>
                 </View>
-              )}
-              <View style={styles.serviceHeaderCopy}>
-                <Text style={[styles.serviceTitle, responsiveType.serviceTitle]} numberOfLines={1}>
-                  {selectedRoute ? getRouteTitle(selectedRoute, language) : t('home.selectLine')}
-                </Text>
+                <View style={styles.selectedRouteCheck}>
+                  <MaterialCommunityIcons name="check" size={15} color={colors.white} />
+                </View>
               </View>
             </View>
           ) : null}
@@ -1545,6 +1573,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
     alignItems: 'center',
     justifyContent: 'center',
+    transform: [{ translateY: -4 }],
   },
   connectionBadge: {
     height: 23,
@@ -1865,26 +1894,57 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignSelf: 'stretch',
   },
-  serviceHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.sm },
-  serviceHeaderIcon: {
-    width: 36,
-    height: 36,
-    borderRadius: 7,
-    backgroundColor: colors.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
+  selectedRouteLabel: {
+    fontFamily: fonts.medium,
+    color: colors.muted,
+    fontSize: 9,
+    lineHeight: 12,
+    marginBottom: 4,
   },
-  serviceHeaderCopy: { flex: 1, minWidth: 0 },
-  serviceTitle: { fontFamily: fonts.label, color: colors.ink, fontSize: 12, lineHeight: 16 },
-  serviceRouteBadge: {
-    minWidth: 44,
-    height: 34,
+  selectedRouteCard: {
+    minHeight: 42,
     paddingHorizontal: spacing.sm,
+    paddingVertical: 5,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    borderLeftWidth: 3,
+    borderRadius: radii.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  selectedRouteBadge: {
+    minWidth: 42,
+    height: 28,
+    paddingHorizontal: 7,
     borderRadius: 6,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  serviceRouteBadgeText: { ...typography.badge, fontSize: 11 },
+  selectedRouteBadgeText: { ...typography.badge, fontSize: 10.5 },
+  selectedRouteCopy: { flex: 1, minWidth: 0 },
+  selectedRouteName: {
+    fontFamily: fonts.label,
+    color: colors.ink,
+    fontSize: 10.5,
+    lineHeight: 14,
+  },
+  selectedRouteMeta: {
+    fontFamily: fonts.body,
+    color: colors.muted,
+    fontSize: 8.5,
+    lineHeight: 11,
+    marginTop: 1,
+  },
+  selectedRouteCheck: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   directionLabel: {
     fontFamily: fonts.medium,
     color: colors.muted,

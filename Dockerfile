@@ -13,7 +13,7 @@ WORKDIR /build
 
 # Install the exact audited dependency set with package hashes, then add the
 # local wheel without allowing its broad version ranges to re-resolve.
-COPY pyproject.toml README.md requirements.lock requirements-build.lock ./
+COPY pyproject.toml requirements.lock requirements-build.lock ./
 COPY app/ ./app/
 
 RUN python -m venv /opt/buildenv \

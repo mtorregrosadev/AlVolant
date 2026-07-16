@@ -2,7 +2,6 @@
 name = "route-tmb-bff"
 version = "0.1.0"
 description = "Backend-for-Frontend server for the Barcelona bus driver situational awareness tablet app"
-readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 

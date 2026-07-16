@@ -2,6 +2,8 @@ import React, { useEffect, useState, useRef } from 'react';
 import {
   Animated,
   Easing,
+  Modal,
+  ScrollView,
   StyleSheet,
   View,
   Text,
@@ -20,13 +22,12 @@ import {
 } from '@maplibre/maplibre-react-native';
 import * as Location from 'expo-location';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
-import * as ScreenOrientation from 'expo-screen-orientation';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   apiService,
   type LiveWebSocketMessage,
   type RTTripUpdate,
-  type TrafficSummary,
+  type ServiceAlert,
   type VehiclePosition,
 } from '../services/api';
 import { telemetry } from '../services/telemetry';
@@ -47,7 +48,14 @@ import {
   updateRouteMatch,
   type RouteMatchingState,
 } from '../services/routeMatching';
-import { colors, safeHexColor, vehicleAccentColor } from '../theme';
+import {
+  colors,
+  mapRouteLineColors,
+  routeLinePresetColors,
+  safeHexColor,
+  spacing,
+  vehicleAccentColor,
+} from '../theme';
 import { usePreferences } from '../PreferencesContext';
 import { translate, useI18n, type TranslationKey } from '../i18n';
 import type { AppLanguage } from '../services/userPreferences';
@@ -76,11 +84,6 @@ type RouteStopInfo = SelectedStop & {
   coordinates: Coordinate;
   distanceAlong: number | null;
   sequence: number;
-};
-type PaceInfo = {
-  label: string;
-  icon: IconName;
-  tone: 'good' | 'warning' | 'danger' | 'neutral';
 };
 type GpsFix = {
   coordinate: Coordinate;
@@ -116,7 +119,7 @@ type RouteProjectionOptions = {
 
 type MapScreenProps = NativeStackScreenProps<RootStackParamList, 'Map'>;
 type MapTheme = 'dark' | 'light' | 'satellite';
-type MapOrientation = 'course' | 'northUp';
+type MapViewMode = 'perspective' | 'topDown';
 type MapThemeOption = {
   labelKey: TranslationKey;
   icon: IconName;
@@ -205,23 +208,6 @@ function shortestHeadingDelta(from: number, to: number) {
   return ((normalizeHeading(to) - normalizeHeading(from) + 540) % 360) - 180;
 }
 
-function headingOffsetForScreenOrientation(
-  orientation: ScreenOrientation.Orientation,
-): number | null {
-  switch (orientation) {
-    case ScreenOrientation.Orientation.PORTRAIT_UP:
-      return 0;
-    case ScreenOrientation.Orientation.PORTRAIT_DOWN:
-      return 180;
-    case ScreenOrientation.Orientation.LANDSCAPE_LEFT:
-      return 90;
-    case ScreenOrientation.Orientation.LANDSCAPE_RIGHT:
-      return -90;
-    default:
-      return null;
-  }
-}
-
 function selectDeviceHeading(
   heading: Location.LocationHeadingObject,
 ): DeviceHeading | null {
@@ -307,6 +293,50 @@ function coordinateAtRouteDistance(
     ? clamp((target - segment.startDistance) / segment.length, 0, 1)
     : 0;
   return interpolateCoordinate(segment.start, segment.end, ratio);
+}
+
+function completedRouteFeature(
+  routePath: RoutePath,
+  distanceAlong: number | null,
+) {
+  if (
+    distanceAlong === null
+    || routePath.segments.length === 0
+    || distanceAlong < 3
+  ) {
+    return null;
+  }
+
+  const target = clamp(distanceAlong, 0, routePath.totalDistance);
+  const coordinates: Coordinate[] = [routePath.segments[0].start];
+
+  for (const segment of routePath.segments) {
+    const segmentEnd = segment.startDistance + segment.length;
+    if (target >= segmentEnd) {
+      coordinates.push(segment.end);
+      continue;
+    }
+
+    const ratio = segment.length > 0
+      ? clamp((target - segment.startDistance) / segment.length, 0, 1)
+      : 0;
+    coordinates.push(interpolateCoordinate(segment.start, segment.end, ratio));
+    break;
+  }
+
+  if (coordinates.length < 2) return null;
+
+  return {
+    type: 'FeatureCollection' as const,
+    features: [{
+      type: 'Feature' as const,
+      properties: {},
+      geometry: {
+        type: 'LineString' as const,
+        coordinates,
+      },
+    }],
+  };
 }
 
 function poseAtRouteDistance(routePath: RoutePath, distanceAlong: number): VisualPose | null {
@@ -509,33 +539,21 @@ function formatEstimatedArrival(minutes: number | null) {
   return `${hours}:${mins}`;
 }
 
-function formatFleetGap(minutes: number | null, language: AppLanguage) {
-  if (minutes === null) {
-    return translate(language, 'map.noData');
-  }
-
-  if (minutes <= 1) {
-    return '<1 min';
-  }
-
-  return `${Math.round(minutes)} min`;
+function formatDelayDuration(seconds: number) {
+  return `${Math.max(1, Math.round(Math.abs(seconds) / 60))} min`;
 }
 
-function formatDelay(seconds: number | null, language: AppLanguage) {
-  if (seconds === null) {
-    return null;
-  }
+function fulfilledRealtimeValues<T>(results: PromiseSettledResult<T[]>[]) {
+  return results.flatMap((result) => result.status === 'fulfilled' ? result.value : []);
+}
 
-  const minutes = Math.round(seconds / 60);
-  if (minutes > 0) {
-    return `+${minutes} min`;
-  }
-
-  if (minutes < 0) {
-    return `${minutes} min`;
-  }
-
-  return translate(language, 'map.onTime');
+function deduplicateRealtimeItems<T>(items: T[], keyForItem: (item: T) => string) {
+  const latest = new globalThis.Map<string, T>();
+  items.forEach((item) => {
+    const key = keyForItem(item);
+    if (key) latest.set(key, item);
+  });
+  return [...latest.values()];
 }
 
 function normalizeCoordinates(value: unknown): Coordinate | null {
@@ -551,57 +569,26 @@ function normalizeCoordinates(value: unknown): Coordinate | null {
   return null;
 }
 
-function delayForStop(routeTripUpdates: RTTripUpdate[], activeTripId: string | undefined, stop: SelectedStop | RouteStopInfo | null) {
-  if (!activeTripId || !stop) {
-    return null;
-  }
-
-  const tripUpdate = routeTripUpdates.find((update) => update.trip_id === activeTripId);
-  if (!tripUpdate) {
-    return null;
-  }
-
-  const stopId = stop.stop_id ? String(stop.stop_id) : '';
-  const stopSequence = Number(stop.stop_sequence ?? (stop as RouteStopInfo).sequence);
-  const stopUpdate = tripUpdate.stop_time_updates.find((update) => {
-    const sameStopId = stopId && update.stop_id === stopId;
-    const sameSequence = Number.isFinite(stopSequence) && update.stop_sequence === stopSequence;
+function stopUpdateForVehicle(update: RTTripUpdate, vehicle: VehiclePosition) {
+  const stopId = vehicle.stop_id ? String(vehicle.stop_id) : '';
+  const stopSequence = Number(vehicle.current_stop_sequence);
+  return update.stop_time_updates.find((candidate) => {
+    const sameStopId = stopId && candidate.stop_id === stopId;
+    const sameSequence = Number.isFinite(stopSequence) && candidate.stop_sequence === stopSequence;
     return sameStopId || sameSequence;
-  });
-
-  if (!stopUpdate) {
-    return null;
-  }
-
-  if (typeof stopUpdate.arrival_delay === 'number') {
-    return stopUpdate.arrival_delay;
-  }
-
-  if (typeof stopUpdate.departure_delay === 'number') {
-    return stopUpdate.departure_delay;
-  }
-
-  return null;
+  }) ?? null;
 }
 
-function getPaceInfo(delaySeconds: number | null, language: AppLanguage): PaceInfo | null {
-  if (delaySeconds === null) {
-    return null;
-  }
+function reportedVehicleDelay(update: RTTripUpdate | undefined, vehicle: VehiclePosition) {
+  if (!update) return null;
+  const stopUpdate = stopUpdateForVehicle(update, vehicle);
+  const delay = stopUpdate?.arrival_delay ?? stopUpdate?.departure_delay ?? null;
 
-  if (delaySeconds >= 300) {
-    return { label: translate(language, 'map.paceLate'), icon: 'speedometer-medium', tone: 'danger' };
-  }
-
-  if (delaySeconds >= 90) {
-    return { label: translate(language, 'map.paceSlightlyLate'), icon: 'speedometer-medium', tone: 'warning' };
-  }
-
-  if (delaySeconds <= -180) {
-    return { label: translate(language, 'map.paceEarly'), icon: 'speedometer-slow', tone: 'warning' };
-  }
-
-  return { label: translate(language, 'map.paceGood'), icon: 'check-circle-outline', tone: 'good' };
+  // ATM's current normalizer represents a missing delay as zero. A non-zero
+  // value is therefore the only deviation we can state without guessing.
+  return typeof delay === 'number' && Number.isFinite(delay) && delay !== 0
+    ? delay
+    : null;
 }
 
 const SATELLITE_MAP_STYLE = {
@@ -671,7 +658,6 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const { width: viewportWidth, height: viewportHeight } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const isLandscape = viewportWidth > viewportHeight;
-  const isCompactLandscape = isLandscape && viewportHeight < 520;
   const { preferences, setBackgroundLocationEnabled } = usePreferences();
   const { language, t } = useI18n();
 
@@ -707,7 +693,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const [error, setError] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [locationGranted, setLocationGranted] = useState(false);
-  const [mapOrientation, setMapOrientation] = useState<MapOrientation>('course');
+  const [mapViewMode, setMapViewMode] = useState<MapViewMode>('perspective');
   const [gpsFix, setGpsFix] = useState<GpsFix | null>(null);
   const [deviceHeading, setDeviceHeading] = useState<DeviceHeading | null>(null);
   const [visualPose, setVisualPose] = useState<VisualPose | null>(null);
@@ -718,7 +704,9 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const [routeInfo, setRouteInfo] = useState<any>(null);
   const [routeTripUpdates, setRouteTripUpdates] = useState<RTTripUpdate[]>([]);
   const [vehiclePositions, setVehiclePositions] = useState<VehiclePosition[]>([]);
-  const [trafficState, setTrafficState] = useState<TrafficSummary['status'] | 'loading'>('loading');
+  const [serviceAlerts, setServiceAlerts] = useState<ServiceAlert[]>([]);
+  const [isServiceAlertModalVisible, setIsServiceAlertModalVisible] = useState(false);
+  const [isServiceAlertTabDismissed, setIsServiceAlertTabDismissed] = useState(false);
   const [mapTheme, setMapTheme] = useState<MapTheme>('dark');
   const [isMapThemePickerOpen, setIsMapThemePickerOpen] = useState(false);
   const [pendingMapTheme, setPendingMapTheme] = useState<MapTheme | null>(null);
@@ -727,11 +715,12 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   );
   const [isCameraFollowing, setIsCameraFollowing] = useState(true);
   const [cameraTransitionDuration, setCameraTransitionDuration] = useState(0);
+  const mapRef = useRef<any>(null);
+  const cameraRef = useRef<any>(null);
   const animationFrameRef = useRef<number | null>(null);
   const simulationFrameRef = useRef<number | null>(null);
   const simulationTitleTapRef = useRef({ count: 0, lastTapAt: 0 });
   const smoothedDeviceHeadingRef = useRef<number | null>(null);
-  const screenHeadingOffsetRef = useRef(0);
   const lastDeviceHeadingUpdateRef = useRef(0);
   const deviceHeadingExpiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const orientationTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -745,14 +734,11 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const visualPoseRef = useRef<VisualPose | null>(null);
   const liveActivityPropsRef = useRef<RouteLiveActivityProps | null>(null);
   const liveActivityStartedRef = useRef(false);
+  const presentedServiceAlertKeyRef = useRef('');
   const lastSnappedProgressRef = useRef<number | null>(null);
   const routeMatchingStateRef = useRef<RouteMatchingState>(
     createRouteMatchingState('offRoute'),
   );
-  const lastTrafficLookupRef = useRef<{ coords: Coordinate | null; timestamp: number }>({
-    coords: null,
-    timestamp: 0,
-  });
   const userCoords = gpsFix?.coordinate ?? null;
   const userSpeedKmh = gpsFix?.speedKmh ?? null;
   const displayCoords = visualPose?.coordinate ?? null;
@@ -762,11 +748,14 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     && (gpsFix.speedKmh ?? 0) >= MIN_MOVING_SPEED_KMH
     ? normalizeHeading(gpsFix.headingDegrees)
     : null;
-  const vehicleWorldBearing = isSimulating
+  // A snapped route bearing is independent of the way the device is held.
+  // This keeps the vehicle centred and pointing ahead in landscape exactly as
+  // it does in portrait when the camera follows the route.
+  const vehicleWorldBearing = displayRouteProgress !== null
     ? displayRouteBearing
-    : deviceHeading?.degrees ?? gpsBearing ?? displayRouteBearing;
+    : gpsBearing ?? deviceHeading?.degrees ?? displayRouteBearing;
   const effectiveMapBearing = isCameraFollowing && cameraTransitionDuration === 0
-    ? mapOrientation === 'course' ? displayRouteBearing : 0
+    ? displayRouteBearing
     : mapBearing;
   const vehicleMarkerRotation = vehicleWorldBearing - effectiveMapBearing;
 
@@ -788,33 +777,50 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
 
   const routeShortName = routeInfo?.route_short_name || t('common.bus');
   const routeColor = safeHexColor(routeInfo?.route_color, colors.primary);
+  const routeLineColors = React.useMemo(
+    () => mapRouteLineColors(
+      preferences.routeLineDynamic
+        ? routeInfo?.route_color
+        : routeLinePresetColors[preferences.routeLineColor],
+    ),
+    [preferences.routeLineColor, preferences.routeLineDynamic, routeInfo?.route_color],
+  );
   const routeTextColor = safeHexColor(routeInfo?.route_text_color, colors.white);
   const vehicleAccent = vehicleAccentColor(preferences.vehicleColor, routeInfo?.route_color);
+  const activeServiceAlert = serviceAlerts[0] ?? null;
+  const serviceAlertKey = React.useMemo(
+    () => serviceAlerts.map((alert) => alert.alert_id).join('|'),
+    [serviceAlerts],
+  );
+  // Keep this symbol deliberately generic: provider-specific alert effects do
+  // not map consistently to Material icons, whereas an alert triangle stays
+  // clear at the small size of the persistent tab.
+  const serviceAlertIcon: IconName = 'alert-outline';
   const activeMapTheme = MAP_THEME_OPTIONS[mapTheme];
   const usesLightChrome = mapTheme === 'light';
   const chromeTextColor = usesLightChrome ? '#1F2937' : '#FFFFFF';
   const chromeMutedTextColor = usesLightChrome ? '#6B7280' : '#9FB0C8';
-  const mapPitch = mapTheme === 'satellite'
+  const perspectiveMapPitch = mapTheme === 'satellite'
     ? (isLandscape ? 36 : 40)
     : (isLandscape ? 52 : 58);
+  const mapPitch = mapViewMode === 'topDown' ? 0 : perspectiveMapPitch;
   const mapZoom = isLandscape ? 16.5 : 17;
   const mapSafeTop = Math.max(insets.top + 8, 12);
   const mapSafeLeft = Math.max(insets.left + 12, 12);
   const mapSafeRight = Math.max(insets.right + 12, 12);
-  const driverPanelClearance = isLandscape ? 104 : 118;
-  const mapOrnamentBottom = Math.max(
-    insets.bottom + driverPanelClearance,
-    driverPanelClearance,
-  );
+  const portraitDriverPanelHeight = Math.max(164, Math.round(viewportHeight * 0.25));
+  const standardBuildingOpacity = mapTheme === 'satellite'
+    ? 0.18
+    : usesLightChrome ? 0.78 : 0.68;
   const buildingExtrusionPaint = React.useMemo(() => ({
     'fill-extrusion-color': mapTheme === 'satellite'
       ? '#F8FAFC'
       : usesLightChrome ? '#94A3B8' : '#334155',
     'fill-extrusion-height': ['coalesce', ['get', 'render_height'], 8],
     'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], 0],
-    'fill-extrusion-opacity': mapTheme === 'satellite' ? 0.18 : usesLightChrome ? 0.78 : 0.68,
+    'fill-extrusion-opacity': standardBuildingOpacity,
     'fill-extrusion-vertical-gradient': mapTheme !== 'satellite',
-  }), [mapTheme, usesLightChrome]);
+  }), [mapTheme, standardBuildingOpacity, usesLightChrome]);
   const routeCoordinates = React.useMemo(() => extractRouteCoordinates(routeFeature), [routeFeature]);
   const routePath = React.useMemo(() => buildRoutePath(routeCoordinates), [routeCoordinates]);
   const routeSource = React.useMemo(() => routeFeature
@@ -823,6 +829,10 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
       features: [routeFeature],
     }
     : null, [routeFeature]);
+  const completedRouteSource = React.useMemo(
+    () => completedRouteFeature(routePath, displayRouteProgress),
+    [displayRouteProgress, routePath],
+  );
   const initialCameraCenter = displayCoords ?? routeCoordinates[0] ?? null;
   const stopsOnRoute = React.useMemo(
     () => extractStopsOnRoute(stopsFeature, routeCoordinates),
@@ -849,6 +859,16 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
 
     return null;
   }, [assignedVehicle, tripId, vehiclePositions]);
+  const trackedVehicleProgress = React.useMemo(() => {
+    if (!matchedVehicle || !routeCoordinates.length) {
+      return null;
+    }
+
+    return projectPointOnRoute(
+      [matchedVehicle.longitude, matchedVehicle.latitude],
+      routeCoordinates,
+    )?.distanceAlong ?? null;
+  }, [matchedVehicle, routeCoordinates]);
   const realtimeSpeedKmh = typeof matchedVehicle?.speed === 'number'
     ? matchedVehicle.speed * MS_TO_KMH
     : null;
@@ -862,25 +882,41 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     ? currentSpeedKmh
     : FALLBACK_CITY_SPEED_KMH;
   const currentRouteProgress = displayRouteProgress;
-  const nextStop = React.useMemo(() => {
+  const upcomingStops = React.useMemo(() => {
     if (!stopsOnRoute.length) {
-      return null;
+      return [];
     }
 
     if (currentRouteProgress === null) {
-      return stopsOnRoute[0];
+      return stopsOnRoute;
     }
 
-    return stopsOnRoute.find((stop) => (
+    const remainingStops = stopsOnRoute.filter((stop) => (
       stop.distanceAlong !== null && stop.distanceAlong > currentRouteProgress + 12
-    )) ?? stopsOnRoute[stopsOnRoute.length - 1];
+    ));
+    return remainingStops.length ? remainingStops : [stopsOnRoute[stopsOnRoute.length - 1]];
   }, [currentRouteProgress, stopsOnRoute]);
+  const nextStop = upcomingStops[0] ?? null;
+  const followingStop = upcomingStops[1] ?? null;
   const nextStopDistanceMeters = nextStop?.distanceAlong !== null && nextStop?.distanceAlong !== undefined && currentRouteProgress !== null
     ? Math.max(0, nextStop.distanceAlong - currentRouteProgress)
     : (nextStop ? distanceMeters(displayCoords, nextStop.coordinates) : null);
   const nextStopEtaMinutes = nextStopDistanceMeters === null
     ? null
     : ((nextStopDistanceMeters / 1000) / effectiveSpeedKmh) * 60;
+  const routeProgressPercent = routePath.totalDistance > 0 && currentRouteProgress !== null
+    ? clamp((currentRouteProgress / routePath.totalDistance) * 100, 0, 100)
+    : 0;
+  const journeyStops = React.useMemo(() => stopsOnRoute.flatMap((stop) => {
+    if (stop.distanceAlong === null || routePath.totalDistance <= 0) return [];
+    return [{
+      key: `${stop.stop_id ?? stop.sequence}-${stop.sequence}`,
+      progress: clamp((stop.distanceAlong / routePath.totalDistance) * 100, 0, 100),
+      isPassed: currentRouteProgress !== null && stop.distanceAlong <= currentRouteProgress + 12,
+      isNext: stop === nextStop,
+      isFollowing: stop === followingStop,
+    }];
+  }), [currentRouteProgress, followingStop, nextStop, routePath.totalDistance, stopsOnRoute]);
   const liveActivityProps = React.useMemo<RouteLiveActivityProps>(() => {
     const updatedAtEpochMs = Date.now();
     const hasValidEta = nextStopEtaMinutes !== null
@@ -918,6 +954,21 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     && Boolean(routeInfo);
 
   useEffect(() => {
+    if (!serviceAlertKey) {
+      presentedServiceAlertKeyRef.current = '';
+      setIsServiceAlertModalVisible(false);
+      setIsServiceAlertTabDismissed(false);
+      return;
+    }
+
+    if (presentedServiceAlertKeyRef.current !== serviceAlertKey) {
+      presentedServiceAlertKeyRef.current = serviceAlertKey;
+      setIsServiceAlertTabDismissed(false);
+      setIsServiceAlertModalVisible(true);
+    }
+  }, [serviceAlertKey]);
+
+  useEffect(() => {
     const initialProps = liveActivityPropsRef.current;
     if (!liveActivityReady || !initialProps) {
       liveActivityStartedRef.current = false;
@@ -945,8 +996,6 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     void updateRouteLiveActivity(liveActivityProps);
   }, [liveActivityProps, liveActivityReady]);
 
-  const nextStopDelaySeconds = delayForStop(routeTripUpdates, tripId, nextStop);
-  const paceInfo = getPaceInfo(nextStopDelaySeconds, language);
   const estimatedArrival = formatEstimatedArrival(nextStopEtaMinutes);
   const selectedStopCoords = selectedStop?.coordinates ?? null;
   const selectedStopProjection = projectPointOnRoute(selectedStopCoords, routeCoordinates);
@@ -956,64 +1005,104 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const selectedStopEtaMinutes = selectedStopDistanceMeters === null
     ? null
     : ((selectedStopDistanceMeters / 1000) / effectiveSpeedKmh) * 60;
-  const fleetGaps = React.useMemo(() => {
-    if (!routeCoordinates.length || currentRouteProgress === null || !vehiclePositions.length) {
-      return { aheadMinutes: null, behindMinutes: null, hasFleetData: false };
+  // A manually entered vehicle *or a scheduled trip once ATM assigns it a
+  // vehicle* must be the fleet reference. Without the trip-id branch,
+  // selecting a departure would silently keep using the phone GPS instead of
+  // the vehicle that is actually serving that departure.
+  const tracksRealtimeVehicle = Boolean(matchedVehicle && (assignedVehicle || tripId));
+  const fleetReferenceProgress = tracksRealtimeVehicle
+    ? trackedVehicleProgress
+    : currentRouteProgress;
+  const fleetMetrics = React.useMemo(() => {
+    if (!routeCoordinates.length || fleetReferenceProgress === null || !vehiclePositions.length) {
+      return [];
     }
 
-    let aheadDistance: number | null = null;
-    let behindDistance: number | null = null;
+    type FleetVehicle = { vehicle: VehiclePosition; update?: RTTripUpdate; deltaMeters: number };
+    let previous: FleetVehicle | null = null;
+    let next: FleetVehicle | null = null;
 
     vehiclePositions.forEach((vehicle) => {
       const isOwnVehicle = Boolean(
         (assignedVehicle && vehicle.vehicle_id === assignedVehicle)
         || (tripId && vehicle.trip_id === tripId)
       );
+      const update = routeTripUpdates.find((candidate) => (
+        candidate.trip_id === vehicle.trip_id
+        || (vehicle.vehicle_id && candidate.vehicle_id === vehicle.vehicle_id)
+      ));
+      const vehicleDirection = vehicle.direction_id ?? update?.direction_id ?? null;
+      if (
+        isOwnVehicle
+        || vehicleDirection !== directionId
+        || !Number.isFinite(vehicle.latitude)
+        || !Number.isFinite(vehicle.longitude)
+      ) return;
+
       const projection = projectPointOnRoute([vehicle.longitude, vehicle.latitude], routeCoordinates);
+      if (!projection) return;
 
-      if (!projection) {
-        return;
+      const deltaMeters = projection.distanceAlong - fleetReferenceProgress;
+      if (Math.abs(deltaMeters) < 25) return;
+      const candidate = { vehicle, update, deltaMeters };
+
+      if (deltaMeters > 0 && (!previous || deltaMeters < previous.deltaMeters)) {
+        previous = candidate;
       }
-
-      const delta = projection.distanceAlong - currentRouteProgress;
-      if (isOwnVehicle || Math.abs(delta) < 25) {
-        return;
-      }
-
-      if (delta > 0) {
-        aheadDistance = aheadDistance === null ? delta : Math.min(aheadDistance, delta);
-      } else {
-        const absDelta = Math.abs(delta);
-        behindDistance = behindDistance === null ? absDelta : Math.min(behindDistance, absDelta);
+      if (deltaMeters < 0 && (!next || Math.abs(deltaMeters) < Math.abs(next.deltaMeters))) {
+        next = candidate;
       }
     });
 
-    return {
-      aheadMinutes: aheadDistance === null ? null : ((aheadDistance / 1000) / effectiveSpeedKmh) * 60,
-      behindMinutes: behindDistance === null ? null : ((behindDistance / 1000) / effectiveSpeedKmh) * 60,
-      hasFleetData: true,
+    const buildMetric = (candidate: FleetVehicle, kind: 'previous' | 'next') => {
+      const { vehicle, update, deltaMeters } = candidate;
+      const stop = stopsOnRoute.find((item) => (
+        Boolean(vehicle.stop_id) && item.stop_id === vehicle.stop_id
+      ) || (
+        vehicle.current_stop_sequence !== null
+        && (item.stop_sequence === vehicle.current_stop_sequence || item.sequence === vehicle.current_stop_sequence)
+      ));
+      const hasStopLocation = Boolean(stop?.stop_name && vehicle.current_status);
+      const location = hasStopLocation
+        ? vehicle.current_status === 'STOPPED_AT'
+          ? t('map.fleetAtStop', { stop: stop!.stop_name! })
+          : t('map.fleetTowards', { stop: stop!.stop_name! })
+        : t(deltaMeters > 0 ? 'map.fleetAhead' : 'map.fleetBehind', {
+          distance: formatDistance(Math.abs(deltaMeters), language),
+        });
+      const delaySeconds = reportedVehicleDelay(update, vehicle);
+      const delay = delaySeconds === null
+        ? null
+        : delaySeconds > 0
+          ? t('map.delayLate', { time: formatDelayDuration(delaySeconds) })
+          : t('map.delayEarly', { time: formatDelayDuration(delaySeconds) });
+
+      return {
+        icon: (kind === 'previous' ? 'arrow-up' : 'arrow-down') as IconName,
+        title: t(kind === 'previous' ? 'map.fleetAheadVehicle' : 'map.fleetBehindVehicle', {
+          vehicle: vehicle.vehicle_id,
+        }),
+        location,
+        delay,
+      };
     };
-  }, [assignedVehicle, currentRouteProgress, effectiveSpeedKmh, routeCoordinates, tripId, vehiclePositions]);
-  const fleetLabel = fleetGaps.aheadMinutes !== null
-    ? t('map.ahead', { time: formatFleetGap(fleetGaps.aheadMinutes, language) })
-    : fleetGaps.behindMinutes !== null
-      ? t('map.behind', { time: formatFleetGap(fleetGaps.behindMinutes, language) })
-      : null;
-  const trafficKey: TranslationKey = trafficState === 'normal'
-    ? 'map.trafficNormal'
-    : trafficState === 'dense'
-      ? 'map.trafficDense'
-      : trafficState === 'slow'
-        ? 'map.trafficSlow'
-        : trafficState === 'jammed'
-          ? 'map.trafficJammed'
-          : trafficState === 'closed'
-            ? 'map.trafficClosed'
-            : trafficState === 'loading'
-              ? 'map.trafficLoading'
-              : 'map.trafficUnavailable';
-  const trafficStatus = t(trafficKey);
-  const hasTrafficData = trafficState !== 'loading' && trafficState !== 'unavailable';
+
+    return [
+      ...(previous ? [buildMetric(previous, 'previous')] : []),
+      ...(next ? [buildMetric(next, 'next')] : []),
+    ];
+  }, [
+    assignedVehicle,
+    directionId,
+    fleetReferenceProgress,
+    language,
+    routeCoordinates,
+    routeTripUpdates,
+    stopsOnRoute,
+    t,
+    tripId,
+    vehiclePositions,
+  ]);
   const driverMetrics = [
     { icon: 'speedometer' as IconName, label: `${currentSpeedLabel} km/h` },
     nextStopDistanceMeters !== null
@@ -1022,53 +1111,16 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     estimatedArrival
       ? { icon: 'clock-time-four-outline' as IconName, label: t('map.arrival', { time: estimatedArrival }) }
       : null,
-    nextStopDelaySeconds !== null
-      ? { icon: 'calendar-clock-outline' as IconName, label: formatDelay(nextStopDelaySeconds, language) || t('map.onTime') }
-      : null,
-    fleetLabel
-      ? { icon: 'bus-multiple' as IconName, label: fleetLabel }
-      : null,
-    hasTrafficData
-      ? { icon: 'traffic-light' as IconName, label: trafficStatus }
-      : null,
   ].filter((metric): metric is { icon: IconName; label: string } => metric !== null);
-  const visibleDriverMetrics = isLandscape
-    ? driverMetrics.slice(0, isCompactLandscape ? 3 : 4)
-    : driverMetrics.slice(0, paceInfo ? 1 : 2);
-
-  const mapRef = useRef<any>(null);
-  const cameraRef = useRef<any>(null);
-
-  useEffect(() => {
-    let active = true;
-
-    const applyOrientation = (orientation: ScreenOrientation.Orientation) => {
-      const nextOffset = headingOffsetForScreenOrientation(orientation);
-      if (nextOffset === null || nextOffset === screenHeadingOffsetRef.current) {
-        return;
-      }
-
-      screenHeadingOffsetRef.current = nextOffset;
-      smoothedDeviceHeadingRef.current = null;
-      lastDeviceHeadingUpdateRef.current = 0;
-      setDeviceHeading(null);
-    };
-
-    void ScreenOrientation.getOrientationAsync()
-      .then((orientation) => {
-        if (active) applyOrientation(orientation);
-      })
-      .catch(() => undefined);
-
-    const subscription = ScreenOrientation.addOrientationChangeListener((event) => {
-      if (active) applyOrientation(event.orientationInfo.orientation);
-    });
-
-    return () => {
-      active = false;
-      subscription.remove();
-    };
-  }, []);
+  const visibleDriverMetrics = driverMetrics;
+  const landscapeDriverPanelHeight = fleetMetrics.length > 0 ? 146 : 104;
+  const driverPanelClearance = isLandscape
+    ? landscapeDriverPanelHeight + 18
+    : portraitDriverPanelHeight + 20;
+  const mapOrnamentBottom = Math.max(
+    insets.bottom + driverPanelClearance,
+    driverPanelClearance,
+  );
 
   useEffect(() => {
     let active = true;
@@ -1145,10 +1197,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
       if (!active) return;
       const rawReading = selectDeviceHeading(heading);
       if (!rawReading) return;
-      const reading = {
-        ...rawReading,
-        degrees: normalizeHeading(rawReading.degrees + screenHeadingOffsetRef.current),
-      };
+      const reading = rawReading;
 
       refreshHeadingExpiry();
       const current = smoothedDeviceHeadingRef.current;
@@ -1530,45 +1579,6 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     };
   }, [isSimulating, routePath, stopsOnRoute]);
 
-  useEffect(() => {
-    if (!userCoords) {
-      return undefined;
-    }
-
-    const now = Date.now();
-    const lastLookup = lastTrafficLookupRef.current;
-    const movedMeters = distanceMeters(lastLookup.coords, userCoords);
-    const shouldSkip = lastLookup.coords
-      && movedMeters !== null
-      && movedMeters < 180
-      && now - lastLookup.timestamp < 60_000;
-
-    if (shouldSkip) {
-      return undefined;
-    }
-
-    let cancelled = false;
-    const controller = new AbortController();
-    lastTrafficLookupRef.current = { coords: userCoords, timestamp: now };
-
-    apiService.fetchTrafficSummary(userCoords[1], userCoords[0], controller.signal)
-      .then((summary) => {
-        if (!cancelled) {
-          setTrafficState(summary.status || 'unavailable');
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setTrafficState('unavailable');
-        }
-      });
-
-    return () => {
-      cancelled = true;
-      controller.abort();
-    };
-  }, [userCoords]);
-
   // Load route data and connect WebSocket
   useEffect(() => {
     let active = true;
@@ -1582,33 +1592,53 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     let lastTripUpdatesSuccessAt = 0;
     let lastVehiclesSuccessAt = 0;
 
-    async function refreshLiveData() {
+    async function refreshLiveData(candidateRouteIds = [routeId]) {
       if (!active) return;
       if (liveRefreshInFlight) {
         return;
       }
 
       liveRefreshInFlight = true;
-      const [tripUpdatesResult, vehiclesResult] = await Promise.allSettled([
-        apiService.fetchRouteTripUpdates(routeId),
-        apiService.fetchRouteVehicles(routeId),
+      const realtimeRouteIds = [...new Set(candidateRouteIds.filter(Boolean))];
+      const [tripUpdateResults, vehicleResults, alertResults] = await Promise.all([
+        Promise.allSettled(realtimeRouteIds.map((candidateRouteId) => (
+          apiService.fetchRouteTripUpdates(candidateRouteId)
+        ))),
+        Promise.allSettled(realtimeRouteIds.map((candidateRouteId) => (
+          apiService.fetchRouteVehicles(candidateRouteId)
+        ))),
+        Promise.allSettled(realtimeRouteIds.map((candidateRouteId) => (
+          apiService.fetchRouteServiceAlerts(candidateRouteId, directionId)
+        ))),
       ]);
       lastLiveRefreshAt = Date.now();
 
       if (active) {
         // Preserve the last-good component independently when one endpoint is
         // degraded; an ATM vehicle feed outage must not erase trip updates.
-        if (tripUpdatesResult.status === 'fulfilled') {
+        if (tripUpdateResults.some((result) => result.status === 'fulfilled')) {
           lastTripUpdatesSuccessAt = lastLiveRefreshAt;
-          setRouteTripUpdates(tripUpdatesResult.value);
+          setRouteTripUpdates(deduplicateRealtimeItems(
+            fulfilledRealtimeValues(tripUpdateResults),
+            (update) => update.trip_id,
+          ));
         } else if (lastLiveRefreshAt - lastTripUpdatesSuccessAt > LIVE_DATA_STALE_AFTER_MS) {
           setRouteTripUpdates([]);
         }
-        if (vehiclesResult.status === 'fulfilled') {
+        if (vehicleResults.some((result) => result.status === 'fulfilled')) {
           lastVehiclesSuccessAt = lastLiveRefreshAt;
-          setVehiclePositions(vehiclesResult.value);
+          setVehiclePositions(deduplicateRealtimeItems(
+            fulfilledRealtimeValues(vehicleResults),
+            (vehicle) => vehicle.vehicle_id,
+          ));
         } else if (lastLiveRefreshAt - lastVehiclesSuccessAt > LIVE_DATA_STALE_AFTER_MS) {
           setVehiclePositions([]);
+        }
+        if (alertResults.some((result) => result.status === 'fulfilled')) {
+          setServiceAlerts(deduplicateRealtimeItems(
+            fulfilledRealtimeValues(alertResults),
+            (alert) => alert.alert_id,
+          ));
         }
       }
 
@@ -1710,14 +1740,19 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
       setRouteInfo(null);
       setRouteTripUpdates([]);
       setVehiclePositions([]);
+      setServiceAlerts([]);
+      setIsServiceAlertModalVisible(false);
+      presentedServiceAlertKeyRef.current = '';
       try {
         const [data, stopsData] = await Promise.all([
           apiService.fetchRouteShape(routeId, directionId, tripId),
           apiService.fetchRouteStops(routeId, directionId, tripId),
         ]);
         if (!active) return;
+        let liveRouteIds = [routeId];
         if (data) {
           setRouteInfo(data);
+          liveRouteIds = [...new Set([routeId, ...(data.route_ids ?? [])])];
           if (data.geojson) {
             setRouteFeature(data.geojson);
           }
@@ -1727,7 +1762,9 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
           setStopsFeature(stopsData);
         }
 
-        await refreshLiveData();
+        // Alert failures are isolated inside the live refresh; a temporary
+        // incident-feed issue must not block the selected route.
+        await refreshLiveData(liveRouteIds);
         if (!active) return;
         connectLiveSocket();
         loadSucceeded = true;
@@ -1991,13 +2028,13 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     }
   };
 
-  const handleMapOrientation = () => {
-    const nextOrientation: MapOrientation = mapOrientation === 'course' ? 'northUp' : 'course';
+  const handleMapViewMode = () => {
+    const nextMode: MapViewMode = mapViewMode === 'perspective' ? 'topDown' : 'perspective';
     if (orientationTransitionTimerRef.current) {
       clearTimeout(orientationTransitionTimerRef.current);
     }
 
-    setMapOrientation(nextOrientation);
+    setMapViewMode(nextMode);
 
     if (isCameraFollowing) {
       setCameraTransitionDuration(500);
@@ -2009,7 +2046,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     }
 
     cameraRef.current?.setStop({
-      bearing: nextOrientation === 'course' ? displayRouteBearing : 0,
+      pitch: nextMode === 'topDown' ? 0 : perspectiveMapPitch,
       duration: 500,
       easing: 'ease',
     });
@@ -2086,9 +2123,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
               pitch: mapPitch,
             }}
             center={isCameraFollowing ? displayCoords ?? undefined : undefined}
-            bearing={isCameraFollowing
-              ? mapOrientation === 'course' ? displayRouteBearing : 0
-              : undefined}
+            bearing={isCameraFollowing ? displayRouteBearing : undefined}
             duration={isCameraFollowing ? cameraTransitionDuration : undefined}
             easing={isCameraFollowing
               ? cameraTransitionDuration > 0 ? 'ease' : 'linear'
@@ -2098,16 +2133,19 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
           />
         ) : null}
 
-        <Layer
-          id="routeBuildings3d"
-          type="fill-extrusion"
-          source="carto"
-          source-layer="building"
-          minzoom={15}
-          paint={buildingExtrusionPaint as any}
-        />
+        {preferences.buildings3dEnabled ? (
+          <Layer
+            id="routeBuildings3d"
+            type="fill-extrusion"
+            source="carto"
+            source-layer="building"
+            minzoom={15}
+            paint={buildingExtrusionPaint as any}
+          />
+        ) : null}
 
-        {/* Custom user location: Programmatic TMB Bus Marker */}
+        {/* The marker uses a route bearing whenever the vehicle is snapped, so
+            it remains screen-centred in either device orientation. */}
         {(locationGranted || isSimulating) && displayCoords && (
           <Marker
             id="userBusMarker"
@@ -2119,17 +2157,23 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
                 rotate: `${vehicleMarkerRotation}deg`,
               }],
             }}>
-              <View style={styles.busContainer}>
-                <View style={styles.busBody}>
-                  <View style={[styles.busRedFront, { backgroundColor: vehicleAccent }]} />
-                  <View style={[styles.busRedBack, { backgroundColor: vehicleAccent }]} />
-                  <View style={[styles.busStripeLeft, { backgroundColor: vehicleAccent }]} />
-                  <View style={[styles.busStripeRight, { backgroundColor: vehicleAccent }]} />
-                  <View style={styles.busWindshield} />
-                  <View style={styles.busRearWindow} />
-                  <View style={styles.busACUnit} />
+              {preferences.vehicleMarker === 'arrow' ? (
+                <View style={styles.vehicleArrow}>
+                  <MaterialCommunityIcons name="navigation" size={22} color={vehicleAccent} />
                 </View>
-              </View>
+              ) : (
+                <View style={styles.busContainer}>
+                  <View style={styles.busBody}>
+                    <View style={[styles.busRedFront, { backgroundColor: vehicleAccent }]} />
+                    <View style={[styles.busRedBack, { backgroundColor: vehicleAccent }]} />
+                    <View style={[styles.busStripeLeft, { backgroundColor: vehicleAccent }]} />
+                    <View style={[styles.busStripeRight, { backgroundColor: vehicleAccent }]} />
+                    <View style={styles.busWindshield} />
+                    <View style={styles.busRearWindow} />
+                    <View style={styles.busACUnit} />
+                  </View>
+                </View>
+              )}
             </View>
           </Marker>
         )}
@@ -2145,9 +2189,9 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
                 'line-cap': 'round',
               }}
               paint={{
-                'line-color': '#DC2626',
+                'line-color': routeLineColors.activeGlow,
                 'line-width': 10,
-                'line-opacity': 0.2,
+                'line-opacity': 0.62,
               }}
             />
             <Layer
@@ -2158,7 +2202,37 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
                 'line-cap': 'round',
               }}
               paint={{
-                'line-color': '#DC2626',
+                'line-color': routeLineColors.active,
+                'line-width': 4.5,
+              }}
+            />
+          </GeoJSONSource>
+        )}
+
+        {completedRouteSource && (
+          <GeoJSONSource id="completedRouteSource" data={completedRouteSource as any}>
+            <Layer
+              id="completedRouteLineGlow"
+              type="line"
+              layout={{
+                'line-join': 'round',
+                'line-cap': 'round',
+              }}
+              paint={{
+                'line-color': routeLineColors.completedGlow,
+                'line-width': 10,
+                'line-opacity': 0.34,
+              }}
+            />
+            <Layer
+              id="completedRouteLine"
+              type="line"
+              layout={{
+                'line-join': 'round',
+                'line-cap': 'round',
+              }}
+              paint={{
+                'line-color': routeLineColors.completed,
                 'line-width': 4,
               }}
             />
@@ -2175,7 +2249,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
                 'circle-radius': 5,
                 'circle-color': '#FFFFFF',
                 'circle-stroke-width': 2,
-                'circle-stroke-color': '#DC2626',
+                'circle-stroke-color': routeColor,
               }}
             />
           </GeoJSONSource>
@@ -2329,17 +2403,15 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
         <TouchableOpacity
           style={[
             styles.mapRecenterTrigger,
-            mapOrientation === 'course' && styles.mapRecenterTriggerActive,
+            mapViewMode === 'perspective' && styles.mapRecenterTriggerActive,
           ]}
-          onPress={handleMapOrientation}
+          onPress={handleMapViewMode}
           accessibilityRole="button"
-          accessibilityLabel={mapOrientation === 'course'
-            ? t('map.orientationNorthUp')
-            : t('map.orientationCourse')}
-          accessibilityState={{ selected: mapOrientation === 'northUp' }}
+          accessibilityLabel={mapViewMode === 'perspective' ? t('map.viewFlat') : t('map.view3d')}
+          accessibilityState={{ selected: mapViewMode === 'perspective' }}
         >
           <MaterialCommunityIcons
-            name={mapOrientation === 'course' ? 'compass-outline' : 'navigation-variant'}
+            name={mapViewMode === 'perspective' ? 'cube-outline' : 'map-outline'}
             size={22}
             color="#FFFFFF"
           />
@@ -2363,55 +2435,220 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
         </TouchableOpacity>
       </View>
 
+      {activeServiceAlert && !isServiceAlertTabDismissed ? (
+        <View
+          style={[
+            styles.serviceAlertTab,
+            activeServiceAlert.severity === 'SEVERE' && styles.serviceAlertTabSevere,
+            activeServiceAlert.severity === 'WARNING' && styles.serviceAlertTabWarning,
+            {
+              top: mapSafeTop + 58,
+              left: mapSafeLeft,
+            },
+          ]}
+        >
+          <TouchableOpacity
+            style={styles.serviceAlertTabOpen}
+            onPress={() => setIsServiceAlertModalVisible(true)}
+            accessibilityRole="button"
+            accessibilityLabel={t('map.serviceAlertTab')}
+          >
+            <MaterialCommunityIcons name={serviceAlertIcon} size={22} color="#FFFFFF" />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.serviceAlertTabClose}
+            onPress={() => {
+              setIsServiceAlertModalVisible(false);
+              setIsServiceAlertTabDismissed(true);
+            }}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel={t('map.closeServiceAlert')}
+          >
+            <MaterialCommunityIcons name="close" size={16} color="#FFFFFF" />
+          </TouchableOpacity>
+        </View>
+      ) : null}
+
+      <Modal
+        visible={isServiceAlertModalVisible && serviceAlerts.length > 0}
+        transparent
+        animationType="fade"
+        statusBarTranslucent
+        onRequestClose={() => setIsServiceAlertModalVisible(false)}
+      >
+        <View style={styles.serviceAlertModalBackdrop}>
+          <View style={[styles.serviceAlertModalCard, { maxHeight: Math.round(viewportHeight * 0.74) }]}>
+            <View style={styles.serviceAlertModalHeader}>
+              <View style={styles.serviceAlertModalHeaderIcon}>
+                <MaterialCommunityIcons name={serviceAlertIcon} size={21} color={colors.primary} />
+              </View>
+              <Text style={styles.serviceAlertModalTitle}>{t('map.serviceAlert')}</Text>
+              <TouchableOpacity
+                style={styles.serviceAlertModalClose}
+                onPress={() => setIsServiceAlertModalVisible(false)}
+                accessibilityRole="button"
+                accessibilityLabel={t('map.closeServiceAlertPopup')}
+              >
+                <MaterialCommunityIcons name="close" size={21} color={colors.ink} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView
+              style={styles.serviceAlertModalScroll}
+              contentContainerStyle={styles.serviceAlertModalScrollContent}
+              showsVerticalScrollIndicator
+            >
+              {serviceAlerts.map((alert, index) => {
+                const title = alert.header_text.trim() || t('map.serviceAlert');
+                const description = alert.description_text.trim();
+                const severityStyle = alert.severity === 'SEVERE'
+                  ? styles.serviceAlertDetailSevere
+                  : alert.severity === 'WARNING'
+                    ? styles.serviceAlertDetailWarning
+                    : styles.serviceAlertDetailInfo;
+                return (
+                  <View
+                    key={alert.alert_id}
+                    style={[
+                      styles.serviceAlertDetail,
+                      severityStyle,
+                      index > 0 && styles.serviceAlertDetailWithGap,
+                    ]}
+                  >
+                    <Text style={styles.serviceAlertDetailTitle}>{title}</Text>
+                    {description ? (
+                      <Text style={styles.serviceAlertDetailDescription}>{description}</Text>
+                    ) : null}
+                  </View>
+                );
+              })}
+            </ScrollView>
+            <TouchableOpacity
+              style={styles.serviceAlertModalButton}
+              onPress={() => setIsServiceAlertModalVisible(false)}
+              accessibilityRole="button"
+              accessibilityLabel={t('map.closeServiceAlertPopup')}
+            >
+              <Text style={styles.serviceAlertModalButtonText}>{t('map.closeServiceAlertPopup')}</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
       <View style={[
         styles.driverPanel,
         usesLightChrome && styles.mapChromeLight,
+        !isLandscape && styles.driverPanelPortrait,
         isLandscape && styles.driverPanelLandscape,
         {
           left: mapSafeLeft,
           right: mapSafeRight,
           bottom: Math.max(insets.bottom + (isLandscape ? 14 : 18), isLandscape ? 14 : 18),
+          height: isLandscape ? landscapeDriverPanelHeight : portraitDriverPanelHeight,
         },
       ]}>
-        <View style={[styles.driverContent, isLandscape && styles.driverContentLandscape]}>
+        <View style={[
+          styles.driverContent,
+          !isLandscape && styles.driverContentPortrait,
+          isLandscape && styles.driverContentLandscape,
+        ]}>
           <View style={[styles.driverPrimaryRow, isLandscape && styles.driverPrimaryRowLandscape]}>
             <View style={styles.driverStopIcon}>
               <MaterialCommunityIcons name="bus-stop" size={18} color="#FFFFFF" />
             </View>
             <View style={styles.driverStopInfo}>
+              {isLandscape ? (
+                <Text style={[styles.driverStopLabel, { color: chromeMutedTextColor }]}>
+                  {t('map.nextStop')}
+                </Text>
+              ) : null}
               <Text style={[styles.driverStopName, { color: chromeTextColor }]} numberOfLines={1}>
                 {nextStop?.stop_name || t('map.calculatingStop')}
               </Text>
             </View>
+            {isLandscape && followingStop ? (
+              <View style={styles.driverFollowingStop}>
+                <Text style={[styles.driverStopLabel, { color: chromeMutedTextColor }]}>
+                  {t('map.followingStop')}
+                </Text>
+                <Text style={[styles.driverFollowingStopName, { color: chromeTextColor }]} numberOfLines={1}>
+                  {followingStop.stop_name || t('map.unknownStop')}
+                </Text>
+              </View>
+            ) : null}
             <View style={styles.driverEtaPill}>
               <MaterialCommunityIcons name="timer-outline" size={13} color="#FFFFFF" />
               <Text style={styles.driverEtaText}>{formatEta(nextStopEtaMinutes, language)}</Text>
             </View>
           </View>
 
-          <View style={[styles.driverStatusRow, isLandscape && styles.driverStatusRowLandscape]}>
-            {paceInfo ? (
-              <View
-                style={[
-                  styles.driverPacePill,
-                  isLandscape && styles.driverPacePillLandscape,
-                  paceInfo.tone === 'good' && styles.driverPaceGood,
-                  paceInfo.tone === 'warning' && styles.driverPaceWarning,
-                  paceInfo.tone === 'danger' && styles.driverPaceDanger,
-                ]}
-              >
-                <MaterialCommunityIcons
-                  name={paceInfo.icon}
-                  size={14}
-                  color="#FFFFFF"
-                />
-                <Text style={styles.driverPaceText} numberOfLines={1}>{paceInfo.label}</Text>
+          {!isLandscape && (directionName || nextStop) ? (
+            <View style={[styles.driverJourneySummary, isLandscape && styles.driverJourneySummaryLandscape]}>
+              {directionName ? (
+                <View style={styles.driverJourneyCaption}>
+                  <MaterialCommunityIcons name="map-marker-path" size={13} color={colors.primary} />
+                  <Text style={[styles.driverJourneyText, { color: chromeMutedTextColor }]} numberOfLines={1}>
+                    {directionName}
+                  </Text>
+                </View>
+              ) : null}
+              <View style={styles.driverJourneyRail}>
+                <View style={styles.driverJourneyTrack} />
+                <View style={[styles.driverJourneyProgress, { width: `${Math.max(2, routeProgressPercent)}%` }]} />
+                <View style={styles.driverJourneyStart} />
+                {journeyStops.map((stop) => (
+                  <View
+                    key={stop.key}
+                    style={[
+                      styles.driverJourneyStop,
+                      stop.isPassed && styles.driverJourneyStopPassed,
+                      stop.isNext && styles.driverJourneyStopNext,
+                      stop.isFollowing && styles.driverJourneyStopFollowing,
+                      { left: `${stop.progress}%` },
+                    ]}
+                  />
+                ))}
+                <View style={[styles.driverJourneyVehicle, { left: `${Math.min(96, Math.max(2, routeProgressPercent))}%` }]} />
+                <View style={styles.driverJourneyEnd} />
               </View>
-            ) : null}
-            {visibleDriverMetrics.map((metric) => (
+              {nextStop ? (
+                <View style={styles.driverUpcomingStops}>
+                  <View style={styles.driverUpcomingStop}>
+                    <Text style={[styles.driverUpcomingLabel, { color: chromeMutedTextColor }]}>
+                      {t('map.nextStop')}
+                    </Text>
+                    <Text style={[styles.driverUpcomingName, { color: chromeTextColor }]} numberOfLines={1}>
+                      {nextStop.stop_name || t('map.unknownStop')}
+                    </Text>
+                  </View>
+                  {followingStop ? (
+                    <View style={styles.driverUpcomingStop}>
+                      <Text style={[styles.driverUpcomingLabel, { color: chromeMutedTextColor }]}>
+                        {t('map.followingStop')}
+                      </Text>
+                      <Text style={[styles.driverUpcomingName, { color: chromeTextColor }]} numberOfLines={1}>
+                        {followingStop.stop_name || t('map.unknownStop')}
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+              ) : null}
+            </View>
+          ) : null}
+
+          <View style={[
+            styles.driverStatusRow,
+            !isLandscape && styles.driverStatusRowPortrait,
+            isLandscape && styles.driverStatusRowLandscape,
+          ]}>
+            {visibleDriverMetrics.map((metric, index) => (
               <View
                 key={`${metric.icon}-${metric.label}`}
-                style={[styles.driverMetric, isLandscape && styles.driverMetricLandscape]}
+                style={[
+                  styles.driverMetric,
+                  index > 0 && styles.driverMetricWithDivider,
+                  isLandscape && styles.driverMetricLandscape,
+                ]}
               >
                 <MaterialCommunityIcons name={metric.icon} size={14} color={colors.primary} />
                 <Text style={[styles.driverMetricText, { color: chromeTextColor }]} numberOfLines={1}>
@@ -2420,6 +2657,31 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
               </View>
             ))}
           </View>
+          {fleetMetrics.length > 0 ? (
+            <View style={[
+              styles.driverFleetRow,
+              isLandscape && styles.driverFleetRowLandscape,
+            ]}>
+              {fleetMetrics.map((metric) => (
+                <View key={`${metric.icon}-${metric.title}`} style={styles.driverFleetMetric}>
+                  <View style={styles.driverFleetIcon}>
+                    <MaterialCommunityIcons name={metric.icon} size={14} color={colors.primary} />
+                  </View>
+                  <View style={styles.driverFleetCopy}>
+                    <Text style={[styles.driverFleetTitle, { color: chromeTextColor }]} numberOfLines={1}>
+                      {metric.title}
+                    </Text>
+                    <Text style={[styles.driverFleetLocation, { color: chromeMutedTextColor }]} numberOfLines={1}>
+                      {metric.location}
+                    </Text>
+                  </View>
+                  {metric.delay ? (
+                    <Text style={styles.driverFleetDelay} numberOfLines={1}>{metric.delay}</Text>
+                  ) : null}
+                </View>
+              ))}
+            </View>
+          ) : null}
         </View>
       </View>
 
@@ -2547,6 +2809,145 @@ const styles = StyleSheet.create({
     height: 10,
     borderRadius: 5,
   },
+  serviceAlertTab: {
+    position: 'absolute',
+    height: 44,
+    width: 88,
+    borderTopLeftRadius: 14,
+    borderBottomLeftRadius: 14,
+    borderTopRightRadius: 14,
+    borderBottomRightRadius: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    backgroundColor: 'rgba(30, 96, 87, 0.96)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+    shadowColor: '#020617',
+    shadowOpacity: 0.32,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 5 },
+    elevation: 10,
+  },
+  serviceAlertTabOpen: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+  },
+  serviceAlertTabWarning: {
+    backgroundColor: 'rgba(154, 91, 18, 0.97)',
+  },
+  serviceAlertTabSevere: {
+    backgroundColor: 'rgba(172, 45, 45, 0.97)',
+  },
+  serviceAlertTabClose: {
+    width: 36,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderLeftWidth: StyleSheet.hairlineWidth,
+    borderLeftColor: 'rgba(255,255,255,0.22)',
+  },
+  serviceAlertModalBackdrop: {
+    flex: 1,
+    padding: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(2, 10, 23, 0.64)',
+  },
+  serviceAlertModalCard: {
+    width: '100%',
+    maxWidth: 460,
+    borderRadius: 22,
+    overflow: 'hidden',
+    backgroundColor: '#FAFBF8',
+    shadowColor: '#020617',
+    shadowOpacity: 0.35,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 12 },
+    elevation: 18,
+  },
+  serviceAlertModalHeader: {
+    minHeight: 66,
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#DCE5DF',
+  },
+  serviceAlertModalHeaderIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.primarySoft,
+  },
+  serviceAlertModalTitle: {
+    flex: 1,
+    minWidth: 0,
+    color: colors.ink,
+    fontSize: 18,
+    lineHeight: 22,
+    fontWeight: '900',
+  },
+  serviceAlertModalClose: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#EEF2EF',
+  },
+  serviceAlertModalScroll: { flexGrow: 0 },
+  serviceAlertModalScrollContent: { paddingHorizontal: 18, paddingVertical: 6 },
+  serviceAlertDetail: {
+    padding: 15,
+    borderRadius: 14,
+  },
+  serviceAlertDetailWithGap: {
+    marginTop: 9,
+  },
+  serviceAlertDetailSevere: {
+    backgroundColor: '#FCE8E8',
+  },
+  serviceAlertDetailWarning: {
+    backgroundColor: '#FFF0D6',
+  },
+  serviceAlertDetailInfo: {
+    backgroundColor: '#E5F4EF',
+  },
+  serviceAlertDetailTitle: {
+    color: colors.ink,
+    fontSize: 15,
+    lineHeight: 21,
+    fontWeight: '900',
+  },
+  serviceAlertDetailDescription: {
+    color: colors.inkSoft,
+    fontSize: 14,
+    lineHeight: 21,
+    fontWeight: '500',
+    marginTop: 8,
+  },
+  serviceAlertModalButton: {
+    height: 48,
+    marginHorizontal: 18,
+    marginBottom: 18,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.primary,
+  },
+  serviceAlertModalButtonText: {
+    color: colors.white,
+    fontSize: 15,
+    lineHeight: 18,
+    fontWeight: '900',
+  },
   mapThemeDock: {
     position: 'absolute',
     alignItems: 'flex-end',
@@ -2601,40 +3002,162 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 16,
     right: 16,
-    backgroundColor: 'rgba(10, 22, 40, 0.85)',
-    borderRadius: 14,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    backgroundColor: 'rgba(8, 21, 39, 0.93)',
+    borderRadius: 18,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.1)',
+    borderColor: 'rgba(255,255,255,0.13)',
+    shadowColor: '#020617',
+    shadowOpacity: 0.36,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 12,
   },
   driverPanelLandscape: {
     left: 18,
     right: 18,
-    borderRadius: 12,
+    borderRadius: 16,
     paddingVertical: 8,
+  },
+  driverPanelPortrait: {
+    paddingVertical: spacing.md,
   },
   driverContent: {
     minWidth: 0,
   },
+  driverContentPortrait: {
+    flex: 1,
+    justifyContent: 'space-between',
+  },
   driverContentLandscape: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 14,
+    flex: 1,
+    justifyContent: 'space-between',
   },
   driverPrimaryRow: {
-    minHeight: 36,
+    minHeight: 38,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 10,
   },
   driverPrimaryRowLandscape: {
+    flex: 0,
+    minWidth: 0,
+  },
+  driverJourneySummary: {
+    height: 66,
+    justifyContent: 'space-between',
+  },
+  driverJourneySummaryLandscape: {
+    height: 26,
+  },
+  driverJourneyCaption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    minWidth: 0,
+  },
+  driverJourneyText: {
     flex: 1,
+    minWidth: 0,
+    fontSize: 11,
+    lineHeight: 14,
+    fontWeight: '800',
+  },
+  driverJourneyRail: {
+    height: 10,
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  driverJourneyTrack: {
+    height: 3,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+  },
+  driverJourneyProgress: {
+    position: 'absolute',
+    left: 0,
+    height: 3,
+    borderRadius: 999,
+    backgroundColor: colors.primary,
+  },
+  driverJourneyStop: {
+    position: 'absolute',
+    width: 4,
+    height: 4,
+    marginLeft: -2,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.45)',
+  },
+  driverJourneyStopPassed: {
+    backgroundColor: colors.primary,
+  },
+  driverJourneyStopNext: {
+    width: 8,
+    height: 8,
+    marginLeft: -4,
+    borderWidth: 2,
+    borderColor: colors.primary,
+    backgroundColor: '#FFFFFF',
+  },
+  driverJourneyStopFollowing: {
+    width: 6,
+    height: 6,
+    marginLeft: -3,
+    backgroundColor: '#A7F3D0',
+  },
+  driverJourneyStart: {
+    position: 'absolute',
+    left: 0,
+    width: 7,
+    height: 7,
+    borderRadius: 999,
+    backgroundColor: colors.primary,
+  },
+  driverJourneyVehicle: {
+    position: 'absolute',
+    width: 9,
+    height: 9,
+    marginLeft: -4,
+    borderRadius: 999,
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+    backgroundColor: colors.primary,
+  },
+  driverJourneyEnd: {
+    position: 'absolute',
+    right: 0,
+    width: 8,
+    height: 8,
+    borderRadius: 999,
+    borderWidth: 2,
+    borderColor: colors.primary,
+    backgroundColor: 'rgba(8, 21, 39, 0.93)',
+  },
+  driverUpcomingStops: {
+    flexDirection: 'row',
+    gap: 10,
+    minWidth: 0,
+  },
+  driverUpcomingStop: {
+    flex: 1,
+    minWidth: 0,
+  },
+  driverUpcomingLabel: {
+    fontSize: 9,
+    lineHeight: 11,
+    fontWeight: '800',
+  },
+  driverUpcomingName: {
+    fontSize: 11,
+    lineHeight: 14,
+    fontWeight: '900',
+    marginTop: 1,
   },
   driverStopIcon: {
-    width: 32,
-    height: 32,
-    borderRadius: 9,
+    width: 36,
+    height: 36,
+    borderRadius: 11,
     backgroundColor: colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
@@ -2643,17 +3166,34 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 0,
   },
+  driverStopLabel: {
+    fontSize: 9,
+    lineHeight: 11,
+    fontWeight: '800',
+  },
   driverStopName: {
-    fontSize: 14,
-    lineHeight: 18,
+    fontSize: 16,
+    lineHeight: 20,
     fontWeight: '900',
-    marginTop: 2,
+  },
+  driverFollowingStop: {
+    maxWidth: 172,
+    minWidth: 92,
+    paddingLeft: 10,
+    borderLeftWidth: StyleSheet.hairlineWidth,
+    borderLeftColor: 'rgba(255,255,255,0.14)',
+  },
+  driverFollowingStopName: {
+    fontSize: 12,
+    lineHeight: 15,
+    fontWeight: '900',
+    marginTop: 1,
   },
   driverEtaPill: {
-    height: 30,
-    minWidth: 76,
-    borderRadius: 9,
-    paddingHorizontal: 9,
+    height: 34,
+    minWidth: 82,
+    borderRadius: 11,
+    paddingHorizontal: 10,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -2666,69 +3206,82 @@ const styles = StyleSheet.create({
     lineHeight: 15,
     fontWeight: '900',
   },
-  driverPacePill: {
-    height: 30,
-    borderRadius: 9,
-    paddingHorizontal: 10,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 7,
-    backgroundColor: '#334155',
-    flexGrow: 1,
-    flexBasis: '46%',
-    minWidth: 0,
-  },
-  driverPacePillLandscape: {
-    flexBasis: 144,
-  },
-  driverPaceGood: {
-    backgroundColor: '#16A34A',
-  },
-  driverPaceWarning: {
-    backgroundColor: '#D97706',
-  },
-  driverPaceDanger: {
-    backgroundColor: '#DC2626',
-  },
-  driverPaceText: {
-    flex: 1,
-    minWidth: 0,
-    color: '#FFFFFF',
-    fontSize: 12,
-    lineHeight: 16,
-    fontWeight: '900',
-  },
   driverStatusRow: {
+    height: 38,
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 7,
-    marginTop: 9,
+    flexWrap: 'nowrap',
     minWidth: 0,
+    overflow: 'hidden',
+    borderRadius: 11,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    backgroundColor: 'rgba(255,255,255,0.07)',
   },
   driverStatusRowLandscape: {
-    flex: 1,
-    marginTop: 0,
+    flex: 0,
+    width: '100%',
+    flexWrap: 'nowrap',
+    alignItems: 'center',
+  },
+  driverStatusRowPortrait: {
+    flex: 0,
   },
   driverMetric: {
-    height: 30,
+    height: '100%',
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    borderRadius: 8,
+    gap: 5,
     paddingHorizontal: 8,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    flexGrow: 1,
-    flexBasis: '46%',
+    flex: 1,
+    flexBasis: 0,
     minWidth: 0,
   },
   driverMetricLandscape: {
-    flexBasis: 98,
+    flex: 1,
+    flexBasis: 0,
+    minWidth: 0,
+    paddingHorizontal: 7,
+  },
+  driverMetricWithDivider: {
+    borderLeftWidth: StyleSheet.hairlineWidth,
+    borderLeftColor: 'rgba(255,255,255,0.12)',
   },
   driverMetricText: {
     fontSize: 12,
     lineHeight: 16,
     fontWeight: '800',
   },
+  driverFleetRow: {
+    flexDirection: 'row',
+    gap: 7,
+    width: '100%',
+  },
+  driverFleetRowLandscape: { marginTop: 0 },
+  driverFleetMetric: {
+    flex: 1,
+    minWidth: 0,
+    height: 42,
+    paddingHorizontal: 8,
+    borderRadius: 11,
+    backgroundColor: 'rgba(255,255,255,0.07)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+  },
+  driverFleetIcon: {
+    width: 24,
+    height: 24,
+    borderRadius: 8,
+    backgroundColor: 'rgba(27, 159, 140, 0.17)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  driverFleetCopy: { flex: 1, minWidth: 0 },
+  driverFleetTitle: { fontSize: 10, lineHeight: 12, fontWeight: '900' },
+  driverFleetLocation: { fontSize: 10, lineHeight: 13, fontWeight: '700', marginTop: 1 },
+  driverFleetDelay: { color: '#FCD34D', fontSize: 10, lineHeight: 12, fontWeight: '900' },
   // ── Programmatic Bus Marker Styles ──
   busContainer: {
     width: 16,
@@ -2810,6 +3363,19 @@ const styles = StyleSheet.create({
     borderRadius: 2,
     borderWidth: 0.5,
     borderColor: '#94A3B8',
+  },
+  vehicleArrow: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: 'rgba(255,255,255,0.97)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 6,
   },
 
   stopCallout: {

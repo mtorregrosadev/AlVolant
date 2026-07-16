@@ -1,4 +1,4 @@
-import type { VehicleColor } from './services/userPreferences';
+import type { RouteLineColor, VehicleColor } from './services/userPreferences';
 
 export const colors = {
   background: '#F1EFE8',
@@ -33,6 +33,14 @@ export const vehicleColors = {
   green: '#176B5A',
   route: '#1551B5',
 } as const;
+
+export const routeLinePresetColors: Record<RouteLineColor, string> = {
+  red: '#EF4444',
+  yellow: '#FACC15',
+  green: '#22C55E',
+  blue: '#38BDF8',
+  white: '#F8FAFC',
+};
 
 export const spacing = {
   xs: 4,
@@ -135,8 +143,96 @@ export function safeHexColor(value: string | null | undefined, fallback: string)
   return HEX_COLOR.test(normalized) ? `#${normalized.toUpperCase()}` : fallback;
 }
 
+export function darkenHexColor(
+  value: string | null | undefined,
+  fallback: string,
+  amount = 0.38,
+) {
+  const factor = 1 - Math.max(0, Math.min(0.85, amount));
+  const channels = hexChannels(safeHexColor(value, fallback));
+  return `#${channels
+    .map((channel) => Math.round(channel * factor).toString(16).padStart(2, '0'))
+    .join('')
+    .toUpperCase()}`;
+}
+
 function hexChannels(value: string) {
   return [1, 3, 5].map((index) => Number.parseInt(value.slice(index, index + 2), 16));
+}
+
+function relativeLuminance(value: string) {
+  return hexChannels(value)
+    .map((channel) => {
+      const normalized = channel / 255;
+      return normalized <= 0.04045
+        ? normalized / 12.92
+        : ((normalized + 0.055) / 1.055) ** 2.4;
+    })
+    .reduce((sum, channel, index) => sum + channel * [0.2126, 0.7152, 0.0722][index], 0);
+}
+
+function contrastRatio(foreground: string, background: string) {
+  const foregroundLuminance = relativeLuminance(foreground);
+  const backgroundLuminance = relativeLuminance(background);
+  const lighter = Math.max(foregroundLuminance, backgroundLuminance);
+  const darker = Math.min(foregroundLuminance, backgroundLuminance);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+function mixHexColors(from: string, to: string, amount: number) {
+  const ratio = Math.max(0, Math.min(1, amount));
+  const fromChannels = hexChannels(from);
+  const toChannels = hexChannels(to);
+  return `#${fromChannels.map((channel, index) => (
+    Math.round(channel + (toChannels[index] - channel) * ratio)
+      .toString(16)
+      .padStart(2, '0')
+  )).join('').toUpperCase()}`;
+}
+
+function readableOnDarkMap(color: string, minimumContrast: number) {
+  if (contrastRatio(color, colors.mapBackground) >= minimumContrast) return color;
+
+  for (let ratio = 0.05; ratio <= 1; ratio += 0.05) {
+    const candidate = mixHexColors(color, colors.white, ratio);
+    if (contrastRatio(candidate, colors.mapBackground) >= minimumContrast) {
+      return candidate;
+    }
+  }
+
+  return colors.white;
+}
+
+/**
+ * Makes every agency colour legible on the dark map. In particular, a black
+ * route keeps a neutral, high-contrast active line rather than disappearing
+ * into the basemap; the travelled segment remains deliberately subdued.
+ */
+export function mapRouteLineColors(value: string | null | undefined) {
+  const routeColor = safeHexColor(value, colors.primary);
+  const sourceContrast = contrastRatio(routeColor, colors.mapBackground);
+
+  // A black (or nearly black) operator colour is indistinguishable from the
+  // dark basemap even after a modest lightening. Give it a consistent pale
+  // core and blue halo instead: it reads as a route, not as another street.
+  if (sourceContrast < 2.35) {
+    return {
+      active: '#EAF4FF',
+      activeGlow: '#60A5FA',
+      completed: '#64748B',
+      completedGlow: '#3B82A0',
+    };
+  }
+
+  const active = readableOnDarkMap(routeColor, 3.2);
+  const completed = readableOnDarkMap(darkenHexColor(active, active, 0.48), 1.9);
+
+  return {
+    active,
+    activeGlow: active,
+    completed,
+    completedGlow: completed,
+  };
 }
 
 export function routePastelColor(

@@ -18,6 +18,7 @@ import {
 import { Newsreader_500Medium } from '@expo-google-fonts/newsreader';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useFonts } from 'expo-font';
+import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import {
   createNavigationContainerRef,
@@ -61,6 +62,9 @@ export type RootStackParamList = {
 const Stack = createNativeStackNavigator<RootStackParamList>();
 const navigationRef = createNavigationContainerRef<RootStackParamList>();
 const appBootStartedAt = Date.now();
+
+void SplashScreen.preventAutoHideAsync().catch(() => undefined);
+SplashScreen.setOptions({ duration: 220, fade: true });
 
 type StartupState =
   | { status: 'checking' }
@@ -106,6 +110,7 @@ const startupErrorCopy: Record<StartupErrorKind, {
 const STARTUP_BUS_WIDTH = 38;
 const STARTUP_BUS_DURATION_MS = 3_200;
 const STARTUP_BUS_EXIT_GAP = 8;
+const STARTUP_BUS_INITIAL_PROGRESS = 0.25;
 const STARTUP_MINIMUM_VISIBLE_MS = 1_100;
 
 function StartupBus({ returning = false }: { returning?: boolean }) {
@@ -132,7 +137,7 @@ function StartupTransitLoader() {
   const { width } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const trackWidth = Math.max(236, width - insets.left - insets.right);
-  const busProgress = useRef(new Animated.Value(0)).current;
+  const busProgress = useRef(new Animated.Value(STARTUP_BUS_INITIAL_PROGRESS)).current;
   // Stay still until the system preference is known, avoiding a flash of
   // motion for users who have Reduce Motion enabled.
   const [reduceMotionEnabled, setReduceMotionEnabled] = useState(true);
@@ -159,9 +164,10 @@ function StartupTransitLoader() {
 
   useEffect(() => {
     busProgress.stopAnimation();
-    busProgress.setValue(0);
+    busProgress.setValue(STARTUP_BUS_INITIAL_PROGRESS);
     if (reduceMotionEnabled) return undefined;
 
+    let active = true;
     const loop = Animated.loop(
       Animated.timing(busProgress, {
         toValue: 1,
@@ -171,9 +177,22 @@ function StartupTransitLoader() {
       }),
       { resetBeforeIteration: true },
     );
-    loop.start();
+    const firstLeg = Animated.timing(busProgress, {
+      toValue: 1,
+      duration: STARTUP_BUS_DURATION_MS * (1 - STARTUP_BUS_INITIAL_PROGRESS),
+      easing: Easing.linear,
+      useNativeDriver: true,
+    });
+
+    firstLeg.start(({ finished }) => {
+      if (!active || !finished) return;
+      busProgress.setValue(0);
+      loop.start();
+    });
 
     return () => {
+      active = false;
+      firstLeg.stop();
       loop.stop();
       busProgress.stopAnimation();
     };
@@ -254,11 +273,18 @@ function StartupGate({
   onRetry: () => void;
 }) {
   const { t } = useI18n();
+  const nativeSplashHiddenRef = useRef(false);
   const isChecking = state.status === 'checking';
   const errorCopy = state.status === 'error' ? startupErrorCopy[state.kind] : null;
 
+  const handleLayout = () => {
+    if (nativeSplashHiddenRef.current) return;
+    nativeSplashHiddenRef.current = true;
+    void SplashScreen.hideAsync().catch(() => undefined);
+  };
+
   return (
-    <SafeAreaView style={styles.startupSafeArea}>
+    <SafeAreaView style={styles.startupSafeArea} onLayout={handleLayout}>
       <StatusBar style="dark" />
       <View
         style={styles.startupContent}
@@ -375,19 +401,14 @@ function AppContent() {
     });
   }, [appReady, preferences.language]);
 
-  if (!localStateReady) {
-    return (
-      <StartupGate
-        state={{ status: 'checking' }}
-        onRetry={() => setStartupAttempt((attempt) => attempt + 1)}
-      />
-    );
-  }
+  if (!appReady) {
+    const visibleStartupState = localStateReady && startupState.status === 'error'
+      ? startupState
+      : { status: 'checking' as const };
 
-  if (startupState.status !== 'ready') {
     return (
       <StartupGate
-        state={startupState}
+        state={visibleStartupState}
         onRetry={() => {
           setStartupState({ status: 'checking' });
           setStartupAttempt((attempt) => attempt + 1);

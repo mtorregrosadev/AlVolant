@@ -74,6 +74,15 @@
     },
     "plugins": [
       "./plugins/withLocalLiveActivities",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#F1EFE8",
+          "image": "./assets/startup-buses.png",
+          "imageWidth": 390,
+          "resizeMode": "contain"
+        }
+      ],
       "@maplibre/maplibre-react-native",
       "expo-dev-client",
       [

@@ -1,9 +1,9 @@
 import type { RouteInfo } from './api';
 import { formatDirectionLabel } from './directionLabel';
 import { translate } from '../i18n';
-import type { AppLanguage } from './userPreferences';
+import type { AppLanguage, HomeAgency } from './userPreferences';
 
-export type AgencyFilter = 'Tots' | 'TMB' | 'AMB' | 'FGC' | 'Rodalies' | 'Altres';
+export type AgencyFilter = 'Tots' | HomeAgency;
 
 export const AGENCY_OPTIONS: readonly AgencyFilter[] = [
   'Tots',
@@ -14,14 +14,18 @@ export const AGENCY_OPTIONS: readonly AgencyFilter[] = [
   'Altres',
 ];
 
-export function getAgencyFilter(route: RouteInfo): AgencyFilter {
+function hasAgencyPrefix(value: string, prefix: string) {
+  return value === prefix || value.startsWith(`${prefix}_`);
+}
+
+export function getAgencyFilter(route: RouteInfo): HomeAgency {
   const agencyId = (route.agency_id || '').toUpperCase();
   const routeId = (route.route_id || '').toUpperCase();
 
-  if (agencyId.includes('TMB') || routeId.startsWith('TMB')) return 'TMB';
-  if (agencyId.includes('AMB') || routeId.startsWith('AMB')) return 'AMB';
-  if (agencyId.includes('FGC') || routeId.startsWith('FGC')) return 'FGC';
-  if (agencyId.includes('ROD') || routeId.startsWith('ROD')) return 'Rodalies';
+  if (hasAgencyPrefix(agencyId, 'TMB') || hasAgencyPrefix(routeId, 'TMB')) return 'TMB';
+  if (hasAgencyPrefix(agencyId, 'AMB') || hasAgencyPrefix(routeId, 'AMB')) return 'AMB';
+  if (hasAgencyPrefix(agencyId, 'FGC') || hasAgencyPrefix(routeId, 'FGC')) return 'FGC';
+  if (hasAgencyPrefix(agencyId, 'ROD') || hasAgencyPrefix(routeId, 'ROD')) return 'Rodalies';
   return 'Altres';
 }
 

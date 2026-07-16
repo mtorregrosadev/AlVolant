@@ -1,4 +1,5 @@
 import { AppState, Platform, type NativeEventSubscription } from 'react-native';
+import type { AppLanguage } from './userPreferences';
 
 export type TelemetryEventName =
   | 'app_started'
@@ -21,6 +22,7 @@ export type TelemetryEndpoint =
   | 'relief_candidates'
   | 'route_shape'
   | 'route_stops'
+  | 'route_alerts'
   | 'route_updates'
   | 'route_vehicles'
   | 'routes'
@@ -128,14 +130,14 @@ class TelemetryClient {
   private flushing = false;
   private retryAttempt = 0;
   private retryAt = 0;
-  private language: 'ca' | 'es' = 'ca';
+  private language: AppLanguage = 'ca';
   private readonly recentErrors = new Map<string, number>();
 
   setTransport(transport: TelemetryTransport) {
     this.transport = transport;
   }
 
-  start(options: { language: 'ca' | 'es'; durationMs: number; appVersion: string }) {
+  start(options: { language: AppLanguage; durationMs: number; appVersion: string }) {
     this.language = options.language;
     if (this.started) return;
 
@@ -160,7 +162,7 @@ class TelemetryClient {
     this.flushTimer = setInterval(() => void this.flush(), FLUSH_INTERVAL_MS);
   }
 
-  setLanguage(language: 'ca' | 'es') {
+  setLanguage(language: AppLanguage) {
     this.language = language;
   }
 

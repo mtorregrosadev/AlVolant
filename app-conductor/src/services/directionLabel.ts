@@ -13,7 +13,16 @@ export function formatDirectionLabel(
   const destination = cleanLabel
     .replace(/^Towards\s+/i, '')
     .replace(/^Cap a\s+/i, '')
-    .replace(/^Hacia\s+/i, '');
+    .replace(/^Hacia\s+/i, '')
+    .replace(/^Cara a\s+/i, '')
+    .replace(/^Norabidean\s+/i, '');
 
-  return `${language === 'es' ? 'Hacia' : 'Cap a'} ${destination}`;
+  const prefix = {
+    ca: 'Cap a',
+    es: 'Hacia',
+    gl: 'Cara a',
+    eu: 'Norabidean',
+  }[language];
+
+  return `${prefix} ${destination}`;
 }

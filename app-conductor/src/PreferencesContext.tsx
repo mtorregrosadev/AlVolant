@@ -15,8 +15,11 @@ import {
   withRecordedRecent,
   withToggledFavorite,
   type AppLanguage,
+  type HomeAgency,
+  type RouteLineColor,
   type UserPreferences,
   type VehicleColor,
+  type VehicleMarker,
 } from './services/userPreferences';
 import { telemetry } from './services/telemetry';
 
@@ -27,9 +30,14 @@ type PreferencesContextValue = {
   recordRecent: (routeId: string, directionId: 0 | 1) => void;
   setLanguage: (language: AppLanguage) => void;
   setVehicleColor: (vehicleColor: VehicleColor) => void;
+  setVehicleMarker: (vehicleMarker: VehicleMarker) => void;
+  setHomeAgencies: (homeAgencyIds: HomeAgency[]) => void;
   setBackgroundLocationEnabled: (enabled: boolean) => void;
   setKeepAwakeEnabled: (enabled: boolean) => void;
   setLiveActivitiesEnabled: (enabled: boolean) => void;
+  setBuildings3dEnabled: (enabled: boolean) => void;
+  setRouteLineDynamic: (enabled: boolean) => void;
+  setRouteLineColor: (color: RouteLineColor) => void;
 };
 
 const PreferencesContext = createContext<PreferencesContextValue | null>(null);
@@ -90,6 +98,26 @@ export function PreferencesProvider({ children }: PropsWithChildren) {
     updatePreferences((current) => ({ ...current, vehicleColor }));
   }, [updatePreferences]);
 
+  const setVehicleMarker = useCallback((vehicleMarker: VehicleMarker) => {
+    telemetry.capture('preference_changed', { setting: 'vehicle_marker', value: vehicleMarker });
+    updatePreferences((current) => ({ ...current, vehicleMarker }));
+  }, [updatePreferences]);
+
+  const setHomeAgencies = useCallback((homeAgencyIds: HomeAgency[]) => {
+    const normalized = Array.from(new Set(homeAgencyIds));
+    if (!normalized.length) return;
+
+    telemetry.capture('preference_changed', {
+      setting: 'home_agencies',
+      value: normalized.join(','),
+    });
+    updatePreferences((current) => ({
+      ...current,
+      homeAgencyIds: normalized,
+      hasCompletedOnboarding: true,
+    }));
+  }, [updatePreferences]);
+
   const setBackgroundLocationEnabled = useCallback((enabled: boolean) => {
     telemetry.capture('preference_changed', { setting: 'background_location', value: enabled });
     updatePreferences((current) => ({ ...current, backgroundLocationEnabled: enabled }));
@@ -105,6 +133,21 @@ export function PreferencesProvider({ children }: PropsWithChildren) {
     updatePreferences((current) => ({ ...current, liveActivitiesEnabled: enabled }));
   }, [updatePreferences]);
 
+  const setBuildings3dEnabled = useCallback((enabled: boolean) => {
+    telemetry.capture('preference_changed', { setting: 'buildings_3d', value: enabled });
+    updatePreferences((current) => ({ ...current, buildings3dEnabled: enabled }));
+  }, [updatePreferences]);
+
+  const setRouteLineDynamic = useCallback((enabled: boolean) => {
+    telemetry.capture('preference_changed', { setting: 'route_line_dynamic', value: enabled });
+    updatePreferences((current) => ({ ...current, routeLineDynamic: enabled }));
+  }, [updatePreferences]);
+
+  const setRouteLineColor = useCallback((routeLineColor: RouteLineColor) => {
+    telemetry.capture('preference_changed', { setting: 'route_line_color', value: routeLineColor });
+    updatePreferences((current) => ({ ...current, routeLineColor }));
+  }, [updatePreferences]);
+
   const value = useMemo<PreferencesContextValue>(() => ({
     ready,
     preferences,
@@ -112,9 +155,14 @@ export function PreferencesProvider({ children }: PropsWithChildren) {
     recordRecent,
     setLanguage,
     setVehicleColor,
+    setVehicleMarker,
+    setHomeAgencies,
     setBackgroundLocationEnabled,
     setKeepAwakeEnabled,
     setLiveActivitiesEnabled,
+    setBuildings3dEnabled,
+    setRouteLineDynamic,
+    setRouteLineColor,
   }), [
     preferences,
     ready,
@@ -122,8 +170,13 @@ export function PreferencesProvider({ children }: PropsWithChildren) {
     setBackgroundLocationEnabled,
     setKeepAwakeEnabled,
     setLiveActivitiesEnabled,
+    setBuildings3dEnabled,
+    setRouteLineDynamic,
+    setRouteLineColor,
     setLanguage,
     setVehicleColor,
+    setVehicleMarker,
+    setHomeAgencies,
     toggleFavorite,
   ]);
 

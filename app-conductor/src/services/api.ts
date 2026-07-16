@@ -400,27 +400,49 @@ export interface VehiclePosition {
   vehicle_id: string;
   route_id: string;
   trip_id: string;
+  direction_id: 0 | 1 | null;
   latitude: number;
   longitude: number;
   bearing: number | null;
   speed: number | null;
+  current_stop_sequence: number | null;
+  stop_id: string;
+  current_status: 'INCOMING_AT' | 'STOPPED_AT' | 'IN_TRANSIT_TO' | null;
   timestamp: number;
 }
 
 export interface RTStopTimeUpdate {
   stop_id: string;
   stop_sequence: number;
-  arrival_delay: number;
-  departure_delay: number;
+  arrival_delay: number | null;
+  departure_delay: number | null;
+  arrival_time: number | null;
+  departure_time: number | null;
 }
 
 export interface RTTripUpdate {
   trip_id: string;
   route_id: string;
   vehicle_id: string;
+  direction_id: 0 | 1 | null;
   start_date: string;
   stop_time_updates: RTStopTimeUpdate[];
   timestamp: number;
+}
+
+export interface ServiceAlert {
+  alert_id: string;
+  header_text: string;
+  description_text: string;
+  cause: string;
+  effect: string;
+  url: string;
+  active_period_start: string | null;
+  active_period_end: string | null;
+  affected_route_ids: string[];
+  affected_stop_ids: string[];
+  alert_type: 'DETOUR' | 'STOP_CANCELLATION' | 'SCHEDULE_INFO' | 'SERVICE_CHANGE' | 'GENERAL_INFO';
+  severity: 'INFO' | 'WARNING' | 'SEVERE';
 }
 
 export interface TrafficSummary {
@@ -624,14 +646,23 @@ export const apiService = {
     routeId: string,
     directionId: number,
     signal?: AbortSignal,
+    pastMinutes?: number,
   ): Promise<UpcomingTrip[]> {
     if (directionId !== 0 && directionId !== 1) {
       return Promise.reject(new ApiError('Direcció de ruta no vàlida.'));
     }
 
     const route = encodePathSegment(routeId);
+    const normalizedPastMinutes = typeof pastMinutes === 'number'
+      && Number.isFinite(pastMinutes)
+      && pastMinutes > 5
+      ? Math.min(180, Math.round(pastMinutes))
+      : undefined;
     return requestJson<UpcomingTrip[]>(
-      `/api/v1/gtfs/routes/${route}/upcoming-trips${createQuery({ direction_id: directionId })}`,
+      `/api/v1/gtfs/routes/${route}/upcoming-trips${createQuery({
+        direction_id: directionId,
+        ...(normalizedPastMinutes ? { past_minutes: normalizedPastMinutes, limit: 12 } : {}),
+      })}`,
       { endpoint: 'upcoming_trips', signal },
     ).then((trips) => Array.isArray(trips) ? trips : []);
   },
@@ -685,6 +716,32 @@ export const apiService = {
     const route = encodePathSegment(routeId);
     return requestJson<RTTripUpdate[]>(`/api/v1/atm_rt/trips/${route}`, { endpoint: 'route_updates' })
       .then((updates) => Array.isArray(updates) ? updates : []);
+  },
+
+  fetchRouteServiceAlerts(
+    routeId: string,
+    directionId?: number,
+    signal?: AbortSignal,
+  ): Promise<ServiceAlert[]> {
+    if (directionId !== undefined && directionId !== 0 && directionId !== 1) {
+      return Promise.reject(new ApiError('Direcció de ruta no vàlida.', undefined, 'validation'));
+    }
+
+    const route = encodePathSegment(routeId);
+    const query = createQuery({ direction_id: directionId });
+    return requestJson<ServiceAlert[]>(`/api/v1/atm_rt/alerts/${route}${query}`, {
+      endpoint: 'route_alerts',
+      signal,
+    }).then((alerts) => Array.isArray(alerts)
+      ? alerts.filter((alert) => (
+        isBoundedString(alert?.alert_id, 160)
+        && isBoundedString(alert?.header_text, 1_000)
+        && isBoundedString(alert?.description_text, 10_000)
+        && isBoundedString(alert?.effect, 64)
+        && isBoundedString(alert?.alert_type, 64)
+        && isBoundedString(alert?.severity, 64)
+      )).slice(0, 20)
+      : []);
   },
 
   fetchTrafficSummary(

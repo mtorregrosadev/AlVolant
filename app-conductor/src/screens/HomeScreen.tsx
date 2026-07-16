@@ -3,7 +3,6 @@ import {
   AccessibilityInfo,
   Animated,
   AppState,
-  Image,
   Keyboard,
   LayoutAnimation,
   ScrollView,
@@ -13,7 +12,6 @@ import {
   TouchableOpacity,
   useWindowDimensions,
   View,
-  type ImageSourcePropType,
   type LayoutChangeEvent,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
@@ -26,8 +24,16 @@ import * as Location from 'expo-location';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../../App';
+import AgencyLogo from '../components/AgencyLogo';
+import LanguageFlag from '../components/LanguageFlag';
 import ServiceAssignmentModal from '../components/ServiceAssignmentModal';
-import { apiService, type RouteInfo, type UpcomingTrip } from '../services/api';
+import {
+  apiService,
+  type RouteInfo,
+  type RTTripUpdate,
+  type UpcomingTrip,
+  type VehiclePosition,
+} from '../services/api';
 import {
   parseReliefStopsGeoJson,
   selectNearbyReliefStop,
@@ -36,16 +42,16 @@ import {
 } from '../services/reliefDetection';
 import { telemetry } from '../services/telemetry';
 import {
-  AGENCY_OPTIONS,
   formatRecentTime,
   getAgencyFilter,
   getAgencyLabel,
   getDirectionNames,
   getRouteTitle,
   routeMatchesSearch,
-  type AgencyFilter,
 } from '../services/routePresentation';
 import {
+  HOME_AGENCIES,
+  type HomeAgency,
   type RecentRoute,
 } from '../services/userPreferences';
 import { usePreferences } from '../PreferencesContext';
@@ -63,22 +69,9 @@ import {
 type HomeScreenProps = NativeStackScreenProps<RootStackParamList, 'Home'>;
 type PreferenceView = 'recent' | 'favorite';
 type AssignmentMode = 'detecting' | 'candidate' | 'departures';
-type ChipVisual = {
-  icon?: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
-  image?: ImageSourcePropType;
-};
 type PreferenceRoute = {
   route: RouteInfo;
   recent?: RecentRoute;
-};
-
-const AGENCY_VISUALS: Record<AgencyFilter, ChipVisual> = {
-  Tots: { icon: 'transit-connection-variant' },
-  TMB: { image: require('../../assets/logo-tmb.png') },
-  AMB: { image: require('../../assets/logo-amb.png') },
-  FGC: { image: require('../../assets/logo_fgc.png') },
-  Rodalies: { image: require('../../assets/logo_rodalies.png') },
-  Altres: { icon: 'bus-multiple' },
 };
 
 const FOREGROUND_REFRESH_MS = 15 * 60 * 1000;
@@ -121,6 +114,17 @@ function sanitizeVehicleId(value: string) {
   return value.toLocaleUpperCase('ca').replace(/[^A-Z0-9-]/g, '').slice(0, 12);
 }
 
+function matchesVehicleNumber(realtimeVehicleId: string, requestedVehicleId: string) {
+  const normalizedRealtimeId = sanitizeVehicleId(realtimeVehicleId);
+  if (normalizedRealtimeId === requestedVehicleId) return true;
+
+  // Operators sometimes expose a prefixed realtime id while drivers enter
+  // the fleet number printed on the bus (for example, "3042"). Accept that
+  // unambiguous numeric suffix without weakening named-id matching.
+  return /^\d{3,}$/.test(requestedVehicleId)
+    && normalizedRealtimeId.endsWith(requestedVehicleId);
+}
+
 function routeNearbyDistance(
   route: RouteInfo,
   distances: Record<string, number>,
@@ -146,7 +150,151 @@ function haveSameDistances(
     && nextIds.every((routeId) => current[routeId] === next[routeId]);
 }
 
-export default function HomeScreen({ navigation, route }: HomeScreenProps) {
+export default function HomeScreen(props: HomeScreenProps) {
+  const { ready, preferences } = usePreferences();
+
+  return ready && !preferences.hasCompletedOnboarding
+    ? <FirstRunScreen />
+    : <HomeContent {...props} />;
+}
+
+function FirstRunScreen() {
+  const { preferences, setHomeAgencies, setLanguage } = usePreferences();
+  const { language, t } = useI18n();
+  const [step, setStep] = useState<'language' | 'agencies'>('language');
+  const [selectedAgencies, setSelectedAgencies] = useState<HomeAgency[]>(
+    preferences.homeAgencyIds,
+  );
+
+  const toggleAgency = (agency: HomeAgency) => {
+    setSelectedAgencies((current) => current.includes(agency)
+      ? current.filter((item) => item !== agency)
+      : [...current, agency]);
+  };
+
+  return (
+    <SafeAreaView style={styles.onboardingScreen} edges={['top', 'right', 'bottom', 'left']}>
+      <StatusBar style="dark" />
+      {step === 'language' ? (
+        <View style={styles.onboardingContent}>
+          <View style={styles.onboardingBody}>
+            <View style={styles.welcomeIcon}>
+            <MaterialCommunityIcons name="translate" size={26} color={colors.primary} />
+            </View>
+            <Text style={styles.welcomeTitle}>{t('onboarding.languageTitle')}</Text>
+            <Text style={styles.welcomeSubtitle}>{t('onboarding.languageSubtitle')}</Text>
+
+            <View style={[styles.welcomeAgencyGrid, styles.welcomeLanguageGrid]}>
+            {([
+              { value: 'ca', label: 'Català' },
+              { value: 'es', label: 'Castellano' },
+              { value: 'gl', label: 'Galego' },
+              { value: 'eu', label: 'Euskara' },
+            ] as const).map((option) => {
+              const selected = language === option.value;
+              return (
+                <TouchableOpacity
+                  key={option.value}
+                  style={[
+                    styles.welcomeAgencyOption,
+                    styles.welcomeLanguageOption,
+                    selected && styles.welcomeAgencyOptionSelected,
+                  ]}
+                  onPress={() => setLanguage(option.value)}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected }}
+                  accessibilityLabel={option.label}
+                >
+                  <LanguageFlag language={option.value} />
+                  <Text style={[styles.welcomeAgencyText, selected && styles.welcomeAgencyTextSelected]}>
+                    {option.label}
+                  </Text>
+                  {selected ? (
+                    <MaterialCommunityIcons
+                      name="check-circle"
+                      size={19}
+                      color={colors.white}
+                      style={styles.welcomeAgencyCheck}
+                    />
+                  ) : null}
+                </TouchableOpacity>
+              );
+            })}
+            </View>
+
+            <TouchableOpacity
+              style={styles.welcomeContinueButton}
+              onPress={() => setStep('agencies')}
+              accessibilityRole="button"
+              accessibilityLabel={t('onboarding.continue')}
+            >
+              <Text style={styles.welcomeContinueText}>{t('onboarding.continue')}</Text>
+              <MaterialCommunityIcons name="arrow-right" size={20} color={colors.white} />
+            </TouchableOpacity>
+          </View>
+        </View>
+      ) : (
+        <View style={styles.onboardingContent}>
+          <View style={styles.onboardingBody}>
+            <View style={styles.welcomeIcon}>
+              <MaterialCommunityIcons name="hand-wave-outline" size={26} color={colors.primary} />
+            </View>
+            <Text style={styles.welcomeTitle}>{t('onboarding.title')}</Text>
+            <Text style={styles.welcomeSubtitle}>{t('onboarding.subtitle')}</Text>
+
+            <View style={styles.welcomeAgencyGrid}>
+            {HOME_AGENCIES.map((agency) => {
+              const selected = selectedAgencies.includes(agency);
+              return (
+                <TouchableOpacity
+                  key={agency}
+                  style={[styles.welcomeAgencyOption, selected && styles.welcomeAgencyOptionSelected]}
+                  onPress={() => toggleAgency(agency)}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected }}
+                  accessibilityLabel={getAgencyLabel(agency, language)}
+                >
+                  <AgencyLogo agency={agency} color={selected ? colors.white : colors.primary} size="large" />
+                  <Text style={[styles.welcomeAgencyText, selected && styles.welcomeAgencyTextSelected]}>
+                    {getAgencyLabel(agency, language)}
+                  </Text>
+                  {selected ? (
+                    <MaterialCommunityIcons
+                      name="check-circle"
+                      size={19}
+                      color={colors.white}
+                      style={styles.welcomeAgencyCheck}
+                    />
+                  ) : null}
+                </TouchableOpacity>
+              );
+            })}
+            </View>
+
+            <TouchableOpacity
+              style={[
+                styles.welcomeContinueButton,
+                selectedAgencies.length === 0 && styles.welcomeContinueButtonDisabled,
+              ]}
+              disabled={selectedAgencies.length === 0}
+              onPress={() => setHomeAgencies(selectedAgencies)}
+              accessibilityRole="button"
+              accessibilityState={{ disabled: selectedAgencies.length === 0 }}
+              accessibilityLabel={selectedAgencies.length === 0
+                ? t('onboarding.selectionRequired')
+                : t('onboarding.continue')}
+            >
+              <Text style={styles.welcomeContinueText}>{t('onboarding.continue')}</Text>
+              <MaterialCommunityIcons name="arrow-right" size={20} color={colors.white} />
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+    </SafeAreaView>
+  );
+}
+
+function HomeContent({ navigation, route }: HomeScreenProps) {
   const {
     width: screenWidth,
     height: screenHeight,
@@ -190,7 +338,6 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
         fontSize: fontSize(12),
         lineHeight: lineHeight(16),
       },
-      agencyText: { fontSize: fontSize(12.5), lineHeight: lineHeight(17) },
       sectionTitle: { fontSize: fontSize(19), lineHeight: lineHeight(23) },
       catalogButtonText: { fontSize: fontSize(12.5), lineHeight: lineHeight(17) },
       routeBadgeText: { fontSize: fontSize(12.5), lineHeight: lineHeight(16) },
@@ -305,17 +452,21 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
   const [isSearchMode, setIsSearchMode] = useState(false);
   const [isClosingSearch, setIsClosingSearch] = useState(false);
   const [searchVisibleCount, setSearchVisibleCount] = useState(4);
-  const [selectedAgency, setSelectedAgency] = useState<AgencyFilter>('Tots');
   const [preferenceView, setPreferenceView] = useState<PreferenceView>('recent');
   const [showAssignModal, setShowAssignModal] = useState(false);
   const [manualVehicle, setManualVehicle] = useState('');
+  const [manualVehicleError, setManualVehicleError] = useState<
+    'not_found' | 'wrong_direction' | 'unavailable' | null
+  >(null);
+  const [isCheckingManualVehicle, setIsCheckingManualVehicle] = useState(false);
   const [upcomingTrips, setUpcomingTrips] = useState<UpcomingTrip[]>([]);
   const [isLoadingTrips, setIsLoadingTrips] = useState(false);
+  const [isLoadingPastDepartures, setIsLoadingPastDepartures] = useState(false);
+  const [hasLoadedPastDepartures, setHasLoadedPastDepartures] = useState(false);
   const [assignmentMode, setAssignmentMode] = useState<AssignmentMode>('departures');
   const [reliefCandidate, setReliefCandidate] = useState<ReliefCandidate | null>(null);
   const [nearbyReliefStopName, setNearbyReliefStopName] = useState('');
   const [discoveryViewportHeight, setDiscoveryViewportHeight] = useState(0);
-  const [agencyViewportWidth, setAgencyViewportWidth] = useState(0);
   const [resultsBlockTop, setResultsBlockTop] = useState(0);
   const [routesHeadingBottom, setRoutesHeadingBottom] = useState(0);
   const [reduceMotion, setReduceMotion] = useState(false);
@@ -492,13 +643,18 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
       || route.params?.selectedRouteId
     ) return;
 
+    const homeRoutes = routes.filter(
+      (candidate) => preferences.homeAgencyIds.includes(getAgencyFilter(candidate)),
+    );
+    if (!homeRoutes.length) return;
+
     const recent = preferences.recentRoutes.find((item) =>
-      routes.some((candidate) => candidate.route_id === item.routeId));
+      homeRoutes.some((candidate) => candidate.route_id === item.routeId));
     const favoriteId = preferences.favoriteRouteIds.find((id) =>
-      routes.some((candidate) => candidate.route_id === id));
-    const initialRoute = routes.find((candidate) => candidate.route_id === recent?.routeId)
-      ?? routes.find((candidate) => candidate.route_id === favoriteId)
-      ?? routes[0];
+      homeRoutes.some((candidate) => candidate.route_id === id));
+    const initialRoute = homeRoutes.find((candidate) => candidate.route_id === recent?.routeId)
+      ?? homeRoutes.find((candidate) => candidate.route_id === favoriteId)
+      ?? homeRoutes[0];
 
     autoSelectedRouteRef.current = recent || favoriteId ? null : initialRoute.route_id;
     setSelectedRoute(initialRoute);
@@ -514,57 +670,10 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
     [preferences.favoriteRouteIds],
   );
 
-  const availableAgencies = useMemo(() => {
-    const present = new Set<AgencyFilter>();
-    routes.forEach((item) => present.add(getAgencyFilter(item)));
-    return AGENCY_OPTIONS.filter((agency) => agency === 'Tots' || present.has(agency));
-  }, [routes]);
-
-  const agencyLayout = useMemo(() => {
-    const itemCount = Math.max(1, availableAgencies.length);
-    const safeContentWidth = Math.max(0, screenWidth - insets.left - insets.right);
-    let estimatedWidth = safeContentWidth - (contentGutter * 2);
-
-    if (isLandscape) {
-      const landscapeOuterPadding = spacing.lg * 2;
-      const serviceWidth = Math.min(400, Math.max(290, safeContentWidth * 0.39));
-      estimatedWidth = Math.max(
-        220,
-        safeContentWidth - landscapeOuterPadding - spacing.lg - serviceWidth,
-      );
-    }
-
-    const availableWidth = Math.max(1, agencyViewportWidth || estimatedWidth);
-    const singleRowItemWidth = (
-      availableWidth - (Math.max(1, itemCount) - 1) * 6
-    ) / itemCount;
-    const singleRowFits = singleRowItemWidth >= 72;
-    const columns = singleRowFits ? itemCount : Math.min(3, itemCount);
-    const width = Math.floor((availableWidth - (Math.max(1, columns) - 1) * 6) / columns);
-
-    return {
-      columns,
-      width,
-      compact: width < 76,
-    };
-  }, [
-    agencyViewportWidth,
-    availableAgencies.length,
-    contentGutter,
-    insets.left,
-    insets.right,
-    isLandscape,
-    screenWidth,
-  ]);
-
-  useEffect(() => {
-    if (!availableAgencies.includes(selectedAgency)) setSelectedAgency('Tots');
-  }, [availableAgencies, selectedAgency]);
-
   const filteredRoutes = useMemo(() => {
     const matches = routes
       .filter((item) => routeMatchesSearch(item, searchQuery))
-      .filter((item) => selectedAgency === 'Tots' || getAgencyFilter(item) === selectedAgency);
+      .filter((item) => preferences.homeAgencyIds.includes(getAgencyFilter(item)));
 
     if (searchQuery.trim()) return matches;
 
@@ -578,7 +687,7 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
         return a.index - b.index;
       })
       .map(({ item }) => item);
-  }, [nearbyDistances, routes, searchQuery, selectedAgency]);
+  }, [nearbyDistances, preferences.homeAgencyIds, routes, searchQuery]);
 
   useEffect(() => {
     const autoSelectedRouteId = autoSelectedRouteRef.current;
@@ -588,7 +697,9 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
       return;
     }
 
-    const nearestRoute = routes.reduce<{
+    const nearestRoute = routes
+      .filter((candidate) => preferences.homeAgencyIds.includes(getAgencyFilter(candidate)))
+      .reduce<{
       candidate: RouteInfo | null;
       distance: number;
     }>((nearest, candidate) => {
@@ -600,7 +711,7 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
     if (nearestRoute && nearestRoute.route_id !== selectedRoute.route_id) {
       setSelectedRoute(nearestRoute);
     }
-  }, [directionId, nearbyDistances, routes, selectedRoute]);
+  }, [directionId, nearbyDistances, preferences.homeAgencyIds, routes, selectedRoute]);
 
   const preferenceRoutes = useMemo<PreferenceRoute[]>(() => {
     const byId = new Map(routes.map((item) => [item.route_id, item]));
@@ -609,13 +720,16 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
       return preferences.favoriteRouteIds
         .map((routeId) => byId.get(routeId))
         .filter((item): item is RouteInfo => Boolean(item))
+        .filter((item) => preferences.homeAgencyIds.includes(getAgencyFilter(item)))
         .map((item) => ({ route: item }));
     }
 
     return preferences.recentRoutes
       .flatMap((recent): PreferenceRoute[] => {
         const item = byId.get(recent.routeId);
-        return item ? [{ route: item, recent }] : [];
+        return item && preferences.homeAgencyIds.includes(getAgencyFilter(item))
+          ? [{ route: item, recent }]
+          : [];
       })
       .slice(0, MAX_RECENT_ROUTES);
   }, [preferenceView, preferences, routes]);
@@ -815,6 +929,8 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
     telemetry.capture('route_selected', { direction: directionId, source: 'home' });
     setUpcomingTrips([]);
     setIsLoadingTrips(true);
+    setIsLoadingPastDepartures(false);
+    setHasLoadedPastDepartures(false);
     setAssignmentMode('detecting');
     setReliefCandidate(null);
     setNearbyReliefStopName('');
@@ -940,6 +1056,10 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
     setShowAssignModal(false);
     setIsLoadingTrips(false);
     setManualVehicle('');
+    setManualVehicleError(null);
+    setIsCheckingManualVehicle(false);
+    setIsLoadingPastDepartures(false);
+    setHasLoadedPastDepartures(false);
   }, []);
 
   const handleConfirmAssignment = useCallback((vehicleId: string, tripId?: string) => {
@@ -947,27 +1067,92 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
     navigateToMap(sanitizeVehicleId(vehicleId) || undefined, tripId);
   }, [closeAssignmentModal, navigateToMap]);
 
-  const renderAgencyVisual = (agency: AgencyFilter, active: boolean) => {
-    const visual = AGENCY_VISUALS[agency];
-    if (visual.image) {
-      return (
-        <Image
-          source={visual.image}
-          style={[styles.agencyLogo, agencyLayout.compact && styles.agencyLogoCompact]}
-          resizeMode="contain"
-          accessible={false}
-        />
-      );
-    }
+  const handleManualVehicleSync = useCallback(() => {
+    if (!selectedRoute || directionId === null) return;
 
-    return (
-      <MaterialCommunityIcons
-        name={visual.icon || 'bus'}
-        size={agencyLayout.compact ? 16 : 17}
-        color={active ? colors.white : colors.transitDark}
-      />
-    );
-  };
+    const requestedVehicleId = sanitizeVehicleId(manualVehicle);
+    if (!requestedVehicleId) return;
+
+    const routeSnapshot = selectedRoute;
+    const directionSnapshot = directionId;
+    const routeIds = Array.from(new Set([
+      routeSnapshot.route_id,
+      ...(routeSnapshot.route_ids ?? []),
+    ]));
+
+    setIsCheckingManualVehicle(true);
+    setManualVehicleError(null);
+
+    void Promise.all([
+      Promise.all(routeIds.map((routeId) => apiService.fetchRouteVehicles(routeId))),
+      Promise.all(routeIds.map((routeId) => apiService.fetchRouteTripUpdates(routeId))),
+    ]).then(([vehicleGroups, tripGroups]) => {
+      if (!mountedRef.current) return;
+
+      const vehicles = vehicleGroups.flat() as VehiclePosition[];
+      const updates = tripGroups.flat() as RTTripUpdate[];
+      const matchingVehicles = vehicles.filter((vehicle) => (
+        matchesVehicleNumber(vehicle.vehicle_id, requestedVehicleId)
+      ));
+      const directionFor = (vehicle: VehiclePosition) => {
+        if (vehicle.direction_id !== null) return vehicle.direction_id;
+        const update = updates.find((candidate) => (
+          candidate.trip_id === vehicle.trip_id
+          || (vehicle.vehicle_id && candidate.vehicle_id === vehicle.vehicle_id)
+        ));
+        return update?.direction_id ?? null;
+      };
+      const matchedVehicle = matchingVehicles.find((vehicle) => (
+        directionFor(vehicle) === directionSnapshot
+      ));
+
+      if (!matchedVehicle) {
+        setManualVehicleError(matchingVehicles.length ? 'wrong_direction' : 'not_found');
+        return;
+      }
+
+      const matchingUpdate = updates.find((candidate) => (
+        candidate.trip_id === matchedVehicle.trip_id
+        || (candidate.vehicle_id && candidate.vehicle_id === matchedVehicle.vehicle_id)
+      ));
+      handleConfirmAssignment(matchedVehicle.vehicle_id, matchedVehicle.trip_id || matchingUpdate?.trip_id);
+    }).catch(() => {
+      if (mountedRef.current) setManualVehicleError('unavailable');
+    }).finally(() => {
+      if (mountedRef.current) setIsCheckingManualVehicle(false);
+    });
+  }, [directionId, handleConfirmAssignment, manualVehicle, selectedRoute]);
+
+  const handleLoadPastDepartures = useCallback(() => {
+    if (!selectedRoute || directionId === null || isLoadingPastDepartures) return;
+
+    const routeSnapshot = selectedRoute;
+    const directionSnapshot = directionId;
+    setIsLoadingPastDepartures(true);
+    void apiService.fetchUpcomingTrips(
+      routeSnapshot.route_id,
+      directionSnapshot,
+      undefined,
+      120,
+    ).then((pastTrips) => {
+      if (!mountedRef.current) return;
+      const pastCutoffEpoch = Math.floor(Date.now() / 1000) - 5 * 60;
+      if (pastTrips.some((trip) => trip.scheduled_epoch < pastCutoffEpoch)) {
+        setHasLoadedPastDepartures(true);
+      }
+      setUpcomingTrips((currentTrips) => {
+        const ids = new Set(currentTrips.map((trip) => trip.trip_id));
+        const uniquePastTrips = pastTrips.filter((trip) => (
+          trip.scheduled_epoch < pastCutoffEpoch && !ids.has(trip.trip_id)
+        ));
+        return [...uniquePastTrips, ...currentTrips];
+      });
+    }).catch(() => {
+      // Keep the button available when the optional history request fails.
+    }).finally(() => {
+      if (mountedRef.current) setIsLoadingPastDepartures(false);
+    });
+  }, [directionId, isLoadingPastDepartures, selectedRoute]);
 
   const renderRouteRow = (item: RouteInfo) => {
     const selected = selectedRoute?.route_id === item.route_id;
@@ -1313,52 +1498,15 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
           <View
             onLayout={(event) => setResultsBlockTop(event.nativeEvent.layout.y)}
           >
-          <View
-            style={styles.agencyRow}
-            onLayout={(event) => {
-              const measuredWidth = Math.floor(event.nativeEvent.layout.width);
-              setAgencyViewportWidth((current) => (
-                Math.abs(current - measuredWidth) > 1 ? measuredWidth : current
-              ));
-            }}
-          >
-            {availableAgencies.map((agency) => {
-              const active = selectedAgency === agency;
-              return (
-                <TouchableOpacity
-                  key={agency}
-                  style={[
-                    styles.agencyChip,
-                    { width: agencyLayout.width },
-                    agencyLayout.compact && styles.agencyChipCompact,
-                    active && styles.agencyChipActive,
-                  ]}
-                  onPress={() => setSelectedAgency(agency)}
-                  hitSlop={{ top: 6, bottom: 6, left: 2, right: 2 }}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected: active }}
-                >
-                  {renderAgencyVisual(agency, active)}
-                  <Text style={[
-                    styles.agencyText,
-                    responsiveType.agencyText,
-                    agencyLayout.compact && styles.agencyTextCompact,
-                    active && styles.agencyTextActive,
-                  ]}
-                    numberOfLines={1}
-                    adjustsFontSizeToFit
-                    minimumFontScale={0.82}
-                  >
-                    {getAgencyLabel(agency, language)}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-
           <View style={styles.routesHeading} onLayout={handleRoutesHeadingLayout}>
             <Text style={[styles.sectionTitle, responsiveType.sectionTitle]}>
-              {t(isSearchMode || searchQuery || selectedAgency !== 'Tots' ? 'common.results' : 'home.lines')}
+              {t(isSearchMode || searchQuery
+                ? 'common.results'
+                : preferences.homeAgencyIds.length === 1
+                  ? 'home.companyLines'
+                  : 'home.selectedCompaniesLines', preferences.homeAgencyIds.length === 1
+                  ? { company: getAgencyLabel(preferences.homeAgencyIds[0], language) }
+                  : undefined)}
             </Text>
             <TouchableOpacity
               style={styles.catalogButton}
@@ -1520,8 +1668,17 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
         candidate={reliefCandidate}
         nearbyStopName={nearbyReliefStopName}
         loading={isLoadingTrips}
+        isLoadingPastDepartures={isLoadingPastDepartures}
+        hasLoadedPastDepartures={hasLoadedPastDepartures}
         manualVehicle={manualVehicle}
-        onManualVehicleChange={(value) => setManualVehicle(sanitizeVehicleId(value))}
+        manualVehicleError={manualVehicleError}
+        isCheckingManualVehicle={isCheckingManualVehicle}
+        onManualVehicleChange={(value) => {
+          setManualVehicle(sanitizeVehicleId(value));
+          setManualVehicleError(null);
+        }}
+        onManualVehicleSync={handleManualVehicleSync}
+        onLoadPastDepartures={handleLoadPastDepartures}
         onClose={closeAssignmentModal}
         onConfirm={handleConfirmAssignment}
         onChooseDeparture={() => {
@@ -1575,6 +1732,93 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     transform: [{ translateY: -4 }],
   },
+  onboardingScreen: {
+    flex: 1,
+    backgroundColor: colors.background,
+  },
+  onboardingContent: {
+    flex: 1,
+    width: '100%',
+    maxWidth: 560,
+    alignSelf: 'center',
+    padding: spacing.xl,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  onboardingBody: {
+    width: '100%',
+    alignItems: 'center',
+  },
+  welcomeIcon: {
+    width: 48,
+    height: 48,
+    marginBottom: spacing.md,
+    borderRadius: 24,
+    backgroundColor: colors.primarySoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  welcomeTitle: {
+    fontFamily: fonts.display,
+    color: colors.ink,
+    fontSize: 24,
+    lineHeight: 29,
+    letterSpacing: -0.4,
+    textAlign: 'center',
+  },
+  welcomeSubtitle: {
+    ...typography.body,
+    color: colors.muted,
+    fontSize: 14,
+    lineHeight: 20,
+    marginTop: spacing.sm,
+    textAlign: 'center',
+  },
+  welcomeAgencyGrid: {
+    marginTop: spacing.xl,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    alignSelf: 'stretch',
+    gap: spacing.sm,
+  },
+  welcomeLanguageGrid: { width: '100%', maxWidth: 360, alignSelf: 'center' },
+  welcomeAgencyOption: {
+    width: '31%',
+    flexShrink: 0,
+    aspectRatio: 1,
+    minHeight: 100,
+    padding: spacing.md,
+    borderRadius: radii.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    backgroundColor: colors.primaryWash,
+    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+  },
+  welcomeAgencyOptionSelected: { backgroundColor: colors.primary, borderColor: colors.primary },
+  welcomeLanguageOption: { width: '48%' },
+  welcomeAgencyText: { ...typography.control, color: colors.ink, fontSize: 13, lineHeight: 17, textAlign: 'center' },
+  welcomeAgencyTextSelected: { color: colors.white },
+  welcomeAgencyCheck: { position: 'absolute', top: 8, right: 8 },
+  welcomeContinueButton: {
+    minHeight: 52,
+    width: '100%',
+    maxWidth: 360,
+    alignSelf: 'center',
+    marginTop: spacing.md,
+    paddingHorizontal: spacing.lg,
+    borderRadius: radii.md,
+    backgroundColor: colors.primary,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+  },
+  welcomeContinueButtonDisabled: { backgroundColor: colors.borderStrong },
+  welcomeContinueText: { ...typography.button, color: colors.white, fontSize: 15 },
   connectionBadge: {
     height: 23,
     paddingHorizontal: spacing.sm,
@@ -1770,41 +2014,6 @@ const styles = StyleSheet.create({
     fontSize: 9.5,
     lineHeight: 13,
   },
-  agencyRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'center',
-    columnGap: 6,
-    rowGap: 6,
-    paddingVertical: spacing.xs,
-    marginBottom: spacing.xs,
-  },
-  agencyChip: {
-    height: 32,
-    minWidth: 0,
-    paddingHorizontal: spacing.sm,
-    borderRadius: 6,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-    backgroundColor: colors.surface,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 5,
-  },
-  agencyChipCompact: { paddingHorizontal: 4, gap: 3 },
-  agencyChipActive: { backgroundColor: colors.transitDark, borderColor: colors.transitDark },
-  agencyLogo: { width: 20, height: 14 },
-  agencyLogoCompact: { width: 17, height: 13 },
-  agencyText: {
-    flexShrink: 1,
-    fontFamily: fonts.medium,
-    color: colors.inkSoft,
-    fontSize: 9.5,
-    lineHeight: 12,
-  },
-  agencyTextCompact: { fontSize: 10.5, lineHeight: 14 },
-  agencyTextActive: { fontFamily: fonts.label, color: colors.white },
   routesHeading: {
     minHeight: 26,
     flexDirection: 'row',

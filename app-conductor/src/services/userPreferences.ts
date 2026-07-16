@@ -14,17 +14,34 @@ export type RecentRoute = {
   usedAt: number;
 };
 
-export type AppLanguage = 'ca' | 'es';
+export type AppLanguage = 'ca' | 'es' | 'gl' | 'eu';
 export type VehicleColor = 'red' | 'yellow' | 'green' | 'route';
+export type VehicleMarker = 'bus' | 'arrow';
+export type RouteLineColor = 'red' | 'yellow' | 'green' | 'blue' | 'white';
+export type HomeAgency = 'TMB' | 'AMB' | 'FGC' | 'Rodalies' | 'Altres';
+
+export const HOME_AGENCIES: readonly HomeAgency[] = [
+  'TMB',
+  'AMB',
+  'FGC',
+  'Rodalies',
+  'Altres',
+];
 
 export type UserPreferences = {
   favoriteRouteIds: string[];
   recentRoutes: RecentRoute[];
   language: AppLanguage;
   vehicleColor: VehicleColor;
+  vehicleMarker: VehicleMarker;
+  homeAgencyIds: HomeAgency[];
+  hasCompletedOnboarding: boolean;
   backgroundLocationEnabled: boolean;
   keepAwakeEnabled: boolean;
   liveActivitiesEnabled: boolean;
+  buildings3dEnabled: boolean;
+  routeLineDynamic: boolean;
+  routeLineColor: RouteLineColor;
 };
 
 type StoredPreferences = UserPreferences & {
@@ -36,9 +53,15 @@ export const EMPTY_USER_PREFERENCES: UserPreferences = {
   recentRoutes: [],
   language: 'ca',
   vehicleColor: 'red',
+  vehicleMarker: 'bus',
+  homeAgencyIds: [],
+  hasCompletedOnboarding: false,
   backgroundLocationEnabled: true,
   keepAwakeEnabled: true,
   liveActivitiesEnabled: true,
+  buildings3dEnabled: true,
+  routeLineDynamic: true,
+  routeLineColor: 'blue',
 };
 
 let writeQueue: Promise<void> = Promise.resolve();
@@ -58,6 +81,12 @@ function normalizeRouteId(value: unknown): string | null {
   }
 
   return normalized;
+}
+
+function normalizeHomeAgency(value: unknown): HomeAgency | null {
+  return typeof value === 'string' && HOME_AGENCIES.includes(value as HomeAgency)
+    ? value as HomeAgency
+    : null;
 }
 
 function normalizePreferences(value: unknown): UserPreferences {
@@ -102,21 +131,44 @@ function normalizePreferences(value: unknown): UserPreferences {
 
   recentRoutes.sort((a, b) => b.usedAt - a.usedAt);
 
-  const language: AppLanguage = value.language === 'es' ? 'es' : 'ca';
+  const language: AppLanguage = (
+    value.language === 'es' || value.language === 'gl' || value.language === 'eu'
+  ) ? value.language : 'ca';
   const vehicleColor: VehicleColor = (
     value.vehicleColor === 'yellow'
     || value.vehicleColor === 'green'
     || value.vehicleColor === 'route'
   ) ? value.vehicleColor : 'red';
+  const vehicleMarker: VehicleMarker = value.vehicleMarker === 'arrow' ? 'arrow' : 'bus';
+  const routeLineColor: RouteLineColor = (
+    value.routeLineColor === 'red'
+    || value.routeLineColor === 'yellow'
+    || value.routeLineColor === 'green'
+    || value.routeLineColor === 'white'
+  ) ? value.routeLineColor : 'blue';
+  const storedHomeAgencies = Array.isArray(value.homeAgencyIds)
+    ? value.homeAgencyIds
+    : [value.homeAgency]; // Migrate the single-company preference introduced in v1.
+  const homeAgencyIds = Array.from(new Set(
+    storedHomeAgencies
+      .map(normalizeHomeAgency)
+      .filter((agency): agency is HomeAgency => Boolean(agency)),
+  ));
 
   return {
     favoriteRouteIds,
     recentRoutes: recentRoutes.slice(0, MAX_RECENTS),
     language,
     vehicleColor,
+    vehicleMarker,
+    homeAgencyIds,
+    hasCompletedOnboarding: value.hasCompletedOnboarding === true,
     backgroundLocationEnabled: value.backgroundLocationEnabled !== false,
     keepAwakeEnabled: value.keepAwakeEnabled !== false,
     liveActivitiesEnabled: value.liveActivitiesEnabled !== false,
+    buildings3dEnabled: value.buildings3dEnabled !== false,
+    routeLineDynamic: value.routeLineDynamic !== false,
+    routeLineColor,
   };
 }
 

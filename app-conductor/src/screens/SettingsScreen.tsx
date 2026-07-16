@@ -16,9 +16,19 @@ import { StatusBar } from 'expo-status-bar';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../../App';
+import AgencyLogo from '../components/AgencyLogo';
+import LanguageFlag from '../components/LanguageFlag';
 import { usePreferences } from '../PreferencesContext';
 import { useI18n, type TranslationKey } from '../i18n';
-import type { AppLanguage, VehicleColor } from '../services/userPreferences';
+import {
+  HOME_AGENCIES,
+  type AppLanguage,
+  type HomeAgency,
+  type RouteLineColor,
+  type VehicleColor,
+  type VehicleMarker,
+} from '../services/userPreferences';
+import { getAgencyLabel } from '../services/routePresentation';
 import {
   requestBackgroundRoutePermission,
   stopBackgroundRouteTracking,
@@ -29,6 +39,7 @@ import {
   radii,
   spacing,
   typography,
+  routeLinePresetColors,
   vehicleAccentColor,
 } from '../theme';
 
@@ -37,6 +48,8 @@ type SettingsScreenProps = NativeStackScreenProps<RootStackParamList, 'Settings'
 const LANGUAGE_OPTIONS: Array<{ value: AppLanguage; key: TranslationKey }> = [
   { value: 'ca', key: 'settings.catalan' },
   { value: 'es', key: 'settings.spanish' },
+  { value: 'gl', key: 'settings.galician' },
+  { value: 'eu', key: 'settings.basque' },
 ];
 
 const VEHICLE_OPTIONS: Array<{ value: VehicleColor; key: TranslationKey }> = [
@@ -46,21 +59,46 @@ const VEHICLE_OPTIONS: Array<{ value: VehicleColor; key: TranslationKey }> = [
   { value: 'route', key: 'settings.routeColor' },
 ];
 
-function BusPreview({ accent }: { accent: string }) {
+const ROUTE_LINE_OPTIONS: Array<{ value: RouteLineColor; key: TranslationKey }> = [
+  { value: 'red', key: 'settings.red' },
+  { value: 'yellow', key: 'settings.yellow' },
+  { value: 'green', key: 'settings.green' },
+  { value: 'blue', key: 'settings.blue' },
+  { value: 'white', key: 'settings.white' },
+];
+
+const MARKER_OPTIONS: Array<{
+  value: VehicleMarker;
+  key: TranslationKey;
+  icon: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
+}> = [
+  { value: 'bus', key: 'settings.vehicleMarker', icon: 'bus' },
+  { value: 'arrow', key: 'settings.arrowMarker', icon: 'navigation' },
+];
+
+function MapMarkerPreview({ accent, marker }: { accent: string; marker: VehicleMarker }) {
   return (
     <View style={styles.previewStage} accessible={false}>
       <View style={styles.previewTrack} />
       <View style={styles.previewTrackSecondary} />
-      <View style={styles.previewBusShadow} />
-      <View style={styles.previewBus}>
-        <View style={[styles.previewAccentFront, { backgroundColor: accent }]} />
-        <View style={[styles.previewAccentBack, { backgroundColor: accent }]} />
-        <View style={[styles.previewAccentLeft, { backgroundColor: accent }]} />
-        <View style={[styles.previewAccentRight, { backgroundColor: accent }]} />
-        <View style={styles.previewWindshield} />
-        <View style={styles.previewRearWindow} />
-        <View style={styles.previewRoofUnit} />
-      </View>
+      {marker === 'bus' ? (
+        <>
+          <View style={styles.previewBusShadow} />
+          <View style={styles.previewBus}>
+            <View style={[styles.previewAccentFront, { backgroundColor: accent }]} />
+            <View style={[styles.previewAccentBack, { backgroundColor: accent }]} />
+            <View style={[styles.previewAccentLeft, { backgroundColor: accent }]} />
+            <View style={[styles.previewAccentRight, { backgroundColor: accent }]} />
+            <View style={styles.previewWindshield} />
+            <View style={styles.previewRearWindow} />
+            <View style={styles.previewRoofUnit} />
+          </View>
+        </>
+      ) : (
+        <View style={styles.previewArrow}>
+          <MaterialCommunityIcons name="navigation" size={56} color={accent} />
+        </View>
+      )}
     </View>
   );
 }
@@ -73,12 +111,26 @@ export default function SettingsScreen({ navigation }: SettingsScreenProps) {
     setBackgroundLocationEnabled,
     setKeepAwakeEnabled,
     setLiveActivitiesEnabled,
+    setBuildings3dEnabled,
+    setRouteLineDynamic,
+    setRouteLineColor,
     setLanguage,
+    setHomeAgencies,
     setVehicleColor,
+    setVehicleMarker,
   } = usePreferences();
   const { t } = useI18n();
   const [requestingBackgroundPermission, setRequestingBackgroundPermission] = useState(false);
   const previewAccent = vehicleAccentColor(preferences.vehicleColor);
+
+  const toggleHomeAgency = (agency: HomeAgency) => {
+    const selected = preferences.homeAgencyIds.includes(agency);
+    if (selected && preferences.homeAgencyIds.length === 1) return;
+
+    setHomeAgencies(selected
+      ? preferences.homeAgencyIds.filter((item) => item !== agency)
+      : [...preferences.homeAgencyIds, agency]);
+  };
 
   const handleBackgroundLocationChange = async (enabled: boolean) => {
     if (!enabled) {
@@ -158,22 +210,71 @@ export default function SettingsScreen({ navigation }: SettingsScreenProps) {
               </View>
             </View>
 
-            <View style={styles.segmentedControl}>
+            <View style={styles.languageGrid}>
               {LANGUAGE_OPTIONS.map((option) => {
                 const selected = preferences.language === option.value;
                 const label = t(option.key);
                 return (
                   <TouchableOpacity
                     key={option.value}
-                    style={[styles.segment, selected && styles.segmentSelected]}
+                    style={[styles.languageOption, selected && styles.languageOptionSelected]}
                     onPress={() => setLanguage(option.value)}
                     accessibilityRole="button"
                     accessibilityState={{ selected }}
                     accessibilityLabel={selected ? t('settings.selected', { value: label }) : label}
                   >
-                    <Text style={[styles.segmentText, selected && styles.segmentTextSelected]}>{label}</Text>
+                    <LanguageFlag language={option.value} size="compact" />
+                    <Text style={[styles.languageOptionText, selected && styles.languageOptionTextSelected]}>{label}</Text>
                     {selected ? (
-                      <MaterialCommunityIcons name="check" size={16} color={colors.white} />
+                      <MaterialCommunityIcons
+                        name="check-circle"
+                        size={15}
+                        color={colors.white}
+                        style={styles.languageOptionCheck}
+                      />
+                    ) : null}
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+
+          <View style={[styles.card, isLandscape && styles.cardLandscape]}>
+            <View style={styles.cardHeading}>
+              <View style={styles.cardIcon}>
+                <MaterialCommunityIcons name="home-variant-outline" size={19} color={colors.primary} />
+              </View>
+              <View style={styles.cardHeadingCopy}>
+                <Text style={styles.cardTitle}>{t('settings.home')}</Text>
+                <Text style={styles.cardHint}>{t('settings.homeHint')}</Text>
+              </View>
+            </View>
+
+            <Text style={styles.homeAgencyLabel}>{t('settings.homeAgency')}</Text>
+            <View style={styles.homeAgencyGrid}>
+              {HOME_AGENCIES.map((agency: HomeAgency) => {
+                const selected = preferences.homeAgencyIds.includes(agency);
+                const label = getAgencyLabel(agency, preferences.language);
+                return (
+                  <TouchableOpacity
+                    key={agency}
+                    style={[styles.homeAgencyOption, selected && styles.homeAgencyOptionSelected]}
+                    onPress={() => toggleHomeAgency(agency)}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected }}
+                    accessibilityLabel={selected ? t('settings.selected', { value: label }) : label}
+                  >
+                    <AgencyLogo agency={agency} color={selected ? colors.white : colors.primary} size="large" />
+                    <Text style={[styles.homeAgencyText, selected && styles.homeAgencyTextSelected]}>
+                      {label}
+                    </Text>
+                    {selected ? (
+                      <MaterialCommunityIcons
+                        name="check-circle"
+                        size={16}
+                        color={colors.white}
+                        style={styles.homeAgencyCheck}
+                      />
                     ) : null}
                   </TouchableOpacity>
                 );
@@ -192,7 +293,35 @@ export default function SettingsScreen({ navigation }: SettingsScreenProps) {
               </View>
             </View>
 
-            <BusPreview accent={previewAccent} />
+            <MapMarkerPreview accent={previewAccent} marker={preferences.vehicleMarker} />
+
+            <View style={styles.markerControl}>
+              <Text style={styles.homeAgencyLabel}>{t('settings.mapMarker')}</Text>
+              <Text style={styles.markerHint}>{t('settings.mapMarkerHint')}</Text>
+              <View style={styles.segmentedControl}>
+                {MARKER_OPTIONS.map((option) => {
+                  const selected = preferences.vehicleMarker === option.value;
+                  const label = t(option.key);
+                  return (
+                    <TouchableOpacity
+                      key={option.value}
+                      style={[styles.segment, selected && styles.segmentSelected]}
+                      onPress={() => setVehicleMarker(option.value)}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected }}
+                      accessibilityLabel={selected ? t('settings.selected', { value: label }) : label}
+                    >
+                      <MaterialCommunityIcons
+                        name={option.icon}
+                        size={17}
+                        color={selected ? colors.white : colors.primary}
+                      />
+                      <Text style={[styles.segmentText, selected && styles.segmentTextSelected]}>{label}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
 
             <View style={styles.colorGrid}>
               {VEHICLE_OPTIONS.map((option) => {
@@ -216,6 +345,68 @@ export default function SettingsScreen({ navigation }: SettingsScreenProps) {
                 );
               })}
             </View>
+
+            <View style={[styles.preferenceRow, styles.buildingPreference]}>
+              <View style={styles.preferenceCopy}>
+                <Text style={styles.preferenceTitle}>{t('settings.buildingRelief')}</Text>
+                <Text style={styles.preferenceHint}>{t('settings.buildingReliefHint')}</Text>
+              </View>
+              <Switch
+                value={preferences.buildings3dEnabled}
+                onValueChange={setBuildings3dEnabled}
+                trackColor={{ false: '#AABEB4', true: colors.primary }}
+                thumbColor={colors.white}
+                ios_backgroundColor="#AABEB4"
+                accessibilityLabel={t('settings.buildingRelief')}
+              />
+            </View>
+
+            <View style={[styles.preferenceRow, styles.routeLinePreference]}>
+              <View style={styles.preferenceCopy}>
+                <Text style={styles.preferenceTitle}>{t('settings.dynamicRouteColor')}</Text>
+                <Text style={styles.preferenceHint}>{t('settings.dynamicRouteColorHint')}</Text>
+              </View>
+              <Switch
+                value={preferences.routeLineDynamic}
+                onValueChange={setRouteLineDynamic}
+                trackColor={{ false: '#AABEB4', true: colors.primary }}
+                thumbColor={colors.white}
+                ios_backgroundColor="#AABEB4"
+                accessibilityLabel={t('settings.dynamicRouteColor')}
+              />
+            </View>
+
+            {!preferences.routeLineDynamic ? (
+              <View style={styles.routeLineColorPicker}>
+                <Text style={styles.fixedRouteColorLabel}>{t('settings.fixedRouteColor')}</Text>
+                <View style={styles.colorGrid}>
+                  {ROUTE_LINE_OPTIONS.map((option) => {
+                    const selected = preferences.routeLineColor === option.value;
+                    const label = t(option.key);
+                    const color = routeLinePresetColors[option.value];
+                    return (
+                      <TouchableOpacity
+                        key={option.value}
+                        style={[styles.colorOption, selected && styles.colorOptionSelected]}
+                        onPress={() => setRouteLineColor(option.value)}
+                        accessibilityRole="button"
+                        accessibilityState={{ selected }}
+                        accessibilityLabel={selected ? t('settings.selected', { value: label }) : label}
+                      >
+                        <View style={[
+                          styles.colorSwatch,
+                          { backgroundColor: color },
+                          option.value === 'white' && styles.whiteColorSwatch,
+                        ]}>
+                          {selected ? <MaterialCommunityIcons name="check" size={15} color={option.value === 'yellow' || option.value === 'white' ? colors.ink : colors.white} /> : null}
+                        </View>
+                        <Text style={[styles.colorLabel, selected && styles.colorLabelSelected]}>{label}</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+            ) : null}
           </View>
 
           <View style={[
@@ -243,9 +434,9 @@ export default function SettingsScreen({ navigation }: SettingsScreenProps) {
                   value={preferences.backgroundLocationEnabled}
                   disabled={requestingBackgroundPermission}
                   onValueChange={(enabled) => { void handleBackgroundLocationChange(enabled); }}
-                  trackColor={{ false: colors.border, true: colors.primarySoft }}
-                  thumbColor={preferences.backgroundLocationEnabled ? colors.primary : colors.surface}
-                  ios_backgroundColor={colors.border}
+                  trackColor={{ false: '#AABEB4', true: colors.primary }}
+                  thumbColor={colors.white}
+                  ios_backgroundColor="#AABEB4"
                   accessibilityLabel={t('settings.backgroundLocation')}
                 />
               </View>
@@ -258,9 +449,9 @@ export default function SettingsScreen({ navigation }: SettingsScreenProps) {
                 <Switch
                   value={preferences.keepAwakeEnabled}
                   onValueChange={setKeepAwakeEnabled}
-                  trackColor={{ false: colors.border, true: colors.primarySoft }}
-                  thumbColor={preferences.keepAwakeEnabled ? colors.primary : colors.surface}
-                  ios_backgroundColor={colors.border}
+                  trackColor={{ false: '#AABEB4', true: colors.primary }}
+                  thumbColor={colors.white}
+                  ios_backgroundColor="#AABEB4"
                   accessibilityLabel={t('settings.keepScreenAwake')}
                 />
               </View>
@@ -274,9 +465,9 @@ export default function SettingsScreen({ navigation }: SettingsScreenProps) {
                   <Switch
                     value={preferences.liveActivitiesEnabled}
                     onValueChange={setLiveActivitiesEnabled}
-                    trackColor={{ false: colors.border, true: colors.primarySoft }}
-                    thumbColor={preferences.liveActivitiesEnabled ? colors.primary : colors.surface}
-                    ios_backgroundColor={colors.border}
+                    trackColor={{ false: '#AABEB4', true: colors.primary }}
+                    thumbColor={colors.white}
+                    ios_backgroundColor="#AABEB4"
                     accessibilityLabel={t('settings.liveActivities')}
                   />
                 </View>
@@ -374,6 +565,25 @@ const styles = StyleSheet.create({
   segmentSelected: { backgroundColor: colors.primary },
   segmentText: { ...typography.control, color: colors.inkSoft, fontSize: 13 },
   segmentTextSelected: { color: colors.white },
+  languageGrid: { marginTop: spacing.lg, flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs },
+  languageOption: {
+    width: '48.5%',
+    minHeight: 48,
+    paddingHorizontal: spacing.sm,
+    borderRadius: 9,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderStrong,
+    backgroundColor: colors.surface,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+    position: 'relative',
+  },
+  languageOptionSelected: { backgroundColor: colors.primary, borderColor: colors.primary },
+  languageOptionText: { ...typography.control, color: colors.inkSoft, fontSize: 12 },
+  languageOptionTextSelected: { color: colors.white },
+  languageOptionCheck: { position: 'absolute', top: 5, right: 5 },
   previewStage: {
     height: 146,
     marginTop: spacing.md,
@@ -418,6 +628,19 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     transform: [{ rotate: '13deg' }],
   },
+  previewArrow: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: colors.white,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#202520',
+    shadowOffset: { width: 0, height: 5 },
+    shadowOpacity: 0.14,
+    shadowRadius: 8,
+    elevation: 3,
+  },
   previewAccentFront: { position: 'absolute', top: 0, left: 0, right: 0, height: 17 },
   previewAccentBack: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 16 },
   previewAccentLeft: { position: 'absolute', top: 17, bottom: 16, left: 0, width: 5 },
@@ -433,6 +656,39 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: '#94A3B8', backgroundColor: '#E2E8F0',
   },
   colorGrid: { marginTop: spacing.md, flexDirection: 'row', gap: spacing.xs },
+  buildingPreference: { marginTop: spacing.md, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
+  routeLinePreference: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
+  routeLineColorPicker: { paddingBottom: spacing.xs },
+  fixedRouteColorLabel: { ...typography.control, color: colors.ink, fontSize: 13 },
+  markerControl: { marginTop: spacing.md },
+  markerHint: { ...typography.body, color: colors.muted, fontSize: 12, lineHeight: 16, marginTop: 2 },
+  homeAgencyLabel: { ...typography.control, color: colors.ink, fontSize: 13, lineHeight: 17, marginTop: spacing.lg },
+  homeAgencyGrid: {
+    marginTop: spacing.sm,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: spacing.xs,
+  },
+  homeAgencyOption: {
+    width: '31%',
+    flexShrink: 0,
+    aspectRatio: 1,
+    minHeight: 88,
+    padding: spacing.sm,
+    borderRadius: radii.sm,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderStrong,
+    backgroundColor: colors.surface,
+    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+  },
+  homeAgencyOptionSelected: { backgroundColor: colors.primary, borderColor: colors.primary },
+  homeAgencyText: { ...typography.control, color: colors.inkSoft, fontSize: 12, lineHeight: 15, textAlign: 'center' },
+  homeAgencyTextSelected: { color: colors.white },
+  homeAgencyCheck: { position: 'absolute', top: 7, right: 7 },
   colorOption: {
     flex: 1,
     minWidth: 0,
@@ -453,6 +709,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  whiteColorSwatch: { borderWidth: StyleSheet.hairlineWidth, borderColor: colors.borderStrong },
   colorLabel: { fontFamily: fonts.medium, color: colors.inkSoft, fontSize: 11, lineHeight: 14 },
   colorLabelSelected: { fontFamily: fonts.label, color: colors.ink },
   preferenceRows: { marginTop: spacing.md },

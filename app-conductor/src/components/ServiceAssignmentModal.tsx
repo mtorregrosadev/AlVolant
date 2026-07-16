@@ -27,8 +27,14 @@ type ServiceAssignmentModalProps = {
   candidate: ReliefCandidate | null;
   nearbyStopName: string;
   loading: boolean;
+  isLoadingPastDepartures: boolean;
+  hasLoadedPastDepartures: boolean;
   manualVehicle: string;
+  manualVehicleError: 'not_found' | 'wrong_direction' | 'unavailable' | null;
+  isCheckingManualVehicle: boolean;
   onManualVehicleChange: (value: string) => void;
+  onManualVehicleSync: () => void;
+  onLoadPastDepartures: () => void;
   onClose: () => void;
   onConfirm: (vehicleId: string, tripId?: string) => void;
   onChooseDeparture: () => void;
@@ -45,8 +51,14 @@ export default function ServiceAssignmentModal({
   candidate,
   nearbyStopName,
   loading,
+  isLoadingPastDepartures,
+  hasLoadedPastDepartures,
   manualVehicle,
+  manualVehicleError,
+  isCheckingManualVehicle,
   onManualVehicleChange,
+  onManualVehicleSync,
+  onLoadPastDepartures,
   onClose,
   onConfirm,
   onChooseDeparture,
@@ -260,6 +272,26 @@ export default function ServiceAssignmentModal({
                 );
               })}
 
+              {!hasLoadedPastDepartures ? (
+                <TouchableOpacity
+                  style={styles.pastDeparturesButton}
+                  onPress={onLoadPastDepartures}
+                  disabled={isLoadingPastDepartures}
+                  accessibilityRole="button"
+                >
+                  {isLoadingPastDepartures ? (
+                    <ActivityIndicator size="small" color={colors.primary} />
+                  ) : (
+                    <MaterialCommunityIcons name="history" size={18} color={colors.primary} />
+                  )}
+                  <Text style={styles.pastDeparturesText}>
+                    {t(isLoadingPastDepartures
+                      ? 'assignment.loadingPastDepartures'
+                      : 'assignment.loadPastDepartures')}
+                  </Text>
+                </TouchableOpacity>
+              ) : null}
+
               <View style={styles.manualCard}>
                 <View style={styles.manualHeading}>
                   <MaterialCommunityIcons name="bus" size={20} color={colors.transitDark} />
@@ -278,14 +310,30 @@ export default function ServiceAssignmentModal({
                     accessibilityLabel={t('assignment.vehicleA11y')}
                   />
                   <TouchableOpacity
-                    style={[styles.syncButton, !manualVehicle && styles.syncButtonDisabled]}
-                    disabled={!manualVehicle}
-                    onPress={() => onConfirm(manualVehicle)}
+                    style={[
+                      styles.syncButton,
+                      (!manualVehicle || isCheckingManualVehicle) && styles.syncButtonDisabled,
+                    ]}
+                    disabled={!manualVehicle || isCheckingManualVehicle}
+                    onPress={onManualVehicleSync}
                     accessibilityRole="button"
                   >
-                    <Text style={styles.syncText}>{t('assignment.sync')}</Text>
+                    {isCheckingManualVehicle ? (
+                      <ActivityIndicator size="small" color={colors.white} />
+                    ) : (
+                      <Text style={styles.syncText}>{t('assignment.sync')}</Text>
+                    )}
                   </TouchableOpacity>
                 </View>
+                {manualVehicleError ? (
+                  <Text style={styles.manualError}>
+                    {t(`assignment.vehicle${manualVehicleError === 'not_found'
+                      ? 'NotLive'
+                      : manualVehicleError === 'wrong_direction'
+                        ? 'WrongDirection'
+                        : 'LookupUnavailable'}`)}
+                  </Text>
+                ) : null}
               </View>
 
               <TouchableOpacity style={styles.skipButton} onPress={onSkip} accessibilityRole="button">
@@ -457,6 +505,16 @@ const styles = StyleSheet.create({
   },
   syncButtonDisabled: { opacity: 0.42 },
   syncText: { ...typography.control, color: colors.white },
+  manualError: { ...typography.meta, color: colors.danger, marginTop: spacing.sm },
+  pastDeparturesButton: {
+    minHeight: 44,
+    alignSelf: 'center',
+    paddingHorizontal: spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  pastDeparturesText: { ...typography.control, color: colors.primary },
   skipButton: {
     height: 44,
     alignSelf: 'center',

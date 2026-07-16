@@ -134,6 +134,12 @@ const LIVE_DATA_STALE_AFTER_MS = 180_000;
 const DEVICE_HEADING_STALE_AFTER_MS = 3_500;
 const DEVICE_HEADING_DEADBAND_DEGREES = 0.8;
 const DEVICE_HEADING_MIN_UPDATE_INTERVAL_MS = 80;
+const SIMULATION_TURN_SMOOTHING_METERS = 24;
+const SIMULATION_TRIPLE_TAP_WINDOW_MS = 650;
+const SIMULATION_MIN_CRUISE_SPEED_KMH = 24;
+const SIMULATION_MAX_CRUISE_SPEED_KMH = 44;
+const SIMULATION_ACCELERATION_MPS2 = 1.05;
+const SIMULATION_BRAKING_MPS2 = 1.65;
 
 function toRadians(value: number) {
   return (value * Math.PI) / 180;
@@ -141,6 +147,15 @@ function toRadians(value: number) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+function randomBetween(min: number, max: number) {
+  return min + Math.random() * (max - min);
+}
+
+function moveTowards(value: number, target: number, maximumDelta: number) {
+  if (value < target) return Math.min(value + maximumDelta, target);
+  return Math.max(value - maximumDelta, target);
 }
 
 function distanceMeters(from: Coordinate | null, to: Coordinate | null) {
@@ -292,6 +307,46 @@ function coordinateAtRouteDistance(
     ? clamp((target - segment.startDistance) / segment.length, 0, 1)
     : 0;
   return interpolateCoordinate(segment.start, segment.end, ratio);
+}
+
+function poseAtRouteDistance(routePath: RoutePath, distanceAlong: number): VisualPose | null {
+  if (!routePath.segments.length) return null;
+  const routeProgress = clamp(distanceAlong, 0, routePath.totalDistance);
+  let low = 0;
+  let high = routePath.segments.length - 1;
+
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    const segment = routePath.segments[middle];
+    if (routeProgress <= segment.startDistance + segment.length) high = middle;
+    else low = middle + 1;
+  }
+
+  const segment = routePath.segments[low];
+  const ratio = segment.length > 0
+    ? clamp((routeProgress - segment.startDistance) / segment.length, 0, 1)
+    : 0;
+  const coordinate = interpolateCoordinate(segment.start, segment.end, ratio);
+  const smoothingRadius = SIMULATION_TURN_SMOOTHING_METERS / 2;
+  const bearingFrom = coordinateAtRouteDistance(
+    routePath,
+    Math.max(0, routeProgress - smoothingRadius),
+  );
+  const bearingTo = coordinateAtRouteDistance(
+    routePath,
+    Math.min(routePath.totalDistance, routeProgress + smoothingRadius),
+  );
+  const smoothedBearing = bearingFrom
+    && bearingTo
+    && (distanceMeters(bearingFrom, bearingTo) ?? 0) > 0.1
+    ? bearingBetween(bearingFrom, bearingTo)
+    : bearingBetween(segment.start, segment.end);
+
+  return {
+    coordinate,
+    bearing: smoothedBearing,
+    routeProgress,
+  };
 }
 
 function angleDifferenceDegrees(first: number, second: number) {
@@ -657,6 +712,8 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const [deviceHeading, setDeviceHeading] = useState<DeviceHeading | null>(null);
   const [visualPose, setVisualPose] = useState<VisualPose | null>(null);
   const [displayRouteProgress, setDisplayRouteProgress] = useState<number | null>(null);
+  const [isSimulating, setIsSimulating] = useState(false);
+  const [simulationSpeedKmh, setSimulationSpeedKmh] = useState(0);
   const [mapBearing, setMapBearing] = useState<number>(0);
   const [routeInfo, setRouteInfo] = useState<any>(null);
   const [routeTripUpdates, setRouteTripUpdates] = useState<RTTripUpdate[]>([]);
@@ -671,6 +728,8 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const [isCameraFollowing, setIsCameraFollowing] = useState(true);
   const [cameraTransitionDuration, setCameraTransitionDuration] = useState(0);
   const animationFrameRef = useRef<number | null>(null);
+  const simulationFrameRef = useRef<number | null>(null);
+  const simulationTitleTapRef = useRef({ count: 0, lastTapAt: 0 });
   const smoothedDeviceHeadingRef = useRef<number | null>(null);
   const screenHeadingOffsetRef = useRef(0);
   const lastDeviceHeadingUpdateRef = useRef(0);
@@ -703,9 +762,9 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     && (gpsFix.speedKmh ?? 0) >= MIN_MOVING_SPEED_KMH
     ? normalizeHeading(gpsFix.headingDegrees)
     : null;
-  const vehicleWorldBearing = deviceHeading?.degrees
-    ?? gpsBearing
-    ?? displayRouteBearing;
+  const vehicleWorldBearing = isSimulating
+    ? displayRouteBearing
+    : deviceHeading?.degrees ?? gpsBearing ?? displayRouteBearing;
   const effectiveMapBearing = isCameraFollowing && cameraTransitionDuration === 0
     ? mapOrientation === 'course' ? displayRouteBearing : 0
     : mapBearing;
@@ -793,7 +852,9 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const realtimeSpeedKmh = typeof matchedVehicle?.speed === 'number'
     ? matchedVehicle.speed * MS_TO_KMH
     : null;
-  const currentSpeedKmh = userSpeedKmh ?? realtimeSpeedKmh;
+  const currentSpeedKmh = isSimulating
+    ? simulationSpeedKmh
+    : userSpeedKmh ?? realtimeSpeedKmh;
   const currentSpeedLabel = currentSpeedKmh === null
     ? '--'
     : String(Math.max(0, Math.round(currentSpeedKmh)));
@@ -1219,7 +1280,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   }, [routeId, directionId, tripId]);
 
   useEffect(() => {
-    if (!gpsFix) return undefined;
+    if (!gpsFix || isSimulating) return undefined;
 
     if (animationFrameRef.current !== null) {
       cancelAnimationFrame(animationFrameRef.current);
@@ -1337,7 +1398,137 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
         animationFrameRef.current = null;
       }
     };
-  }, [gpsFix, routeCoordinates, routePath]);
+  }, [gpsFix, isSimulating, routeCoordinates, routePath]);
+
+  useEffect(() => {
+    if (!isSimulating || !routePath.segments.length || routePath.totalDistance <= 0) {
+      return undefined;
+    }
+
+    if (animationFrameRef.current !== null) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+
+    const initialPose = poseAtRouteDistance(routePath, 0);
+    if (!initialPose) return undefined;
+
+    visualPoseRef.current = initialPose;
+    lastSnappedProgressRef.current = 0;
+    setVisualPose(initialPose);
+    setDisplayRouteProgress(0);
+    setSimulationSpeedKmh(0);
+    setIsCameraFollowing(true);
+
+    let progressMeters = 0;
+    let speedMetersPerSecond = 0;
+    let previousTimestamp: number | null = null;
+    let cruiseSpeedKmh = randomBetween(
+      SIMULATION_MIN_CRUISE_SPEED_KMH,
+      SIMULATION_MAX_CRUISE_SPEED_KMH,
+    );
+    let nextCruiseChangeAt = 0;
+    let dwellUntil = 0;
+    let nextStopIndex = 0;
+    const simulationStops = stopsOnRoute
+      .map((stop) => stop.distanceAlong)
+      .filter((distance): distance is number => (
+        distance !== null
+        && distance > 8
+        && distance < routePath.totalDistance - 3
+      ))
+      .filter((distance, index, distances) => index === 0 || distance - distances[index - 1] > 8);
+
+    const step = (timestamp: number) => {
+      if (previousTimestamp !== null) {
+        const elapsedMs = clamp(timestamp - previousTimestamp, 0, 100);
+        const elapsedSeconds = elapsedMs / 1_000;
+
+        if (timestamp < dwellUntil) {
+          speedMetersPerSecond = 0;
+        } else {
+          if (dwellUntil > 0) {
+            dwellUntil = 0;
+            nextStopIndex += 1;
+            cruiseSpeedKmh = randomBetween(
+              SIMULATION_MIN_CRUISE_SPEED_KMH,
+              SIMULATION_MAX_CRUISE_SPEED_KMH,
+            );
+            nextCruiseChangeAt = timestamp + randomBetween(4_500, 9_500);
+          } else if (timestamp >= nextCruiseChangeAt) {
+            cruiseSpeedKmh = randomBetween(
+              SIMULATION_MIN_CRUISE_SPEED_KMH,
+              SIMULATION_MAX_CRUISE_SPEED_KMH,
+            );
+            nextCruiseChangeAt = timestamp + randomBetween(4_500, 9_500);
+          }
+
+          const activeStopDistance = simulationStops[nextStopIndex] ?? null;
+          const distanceToStop = activeStopDistance === null
+            ? Number.POSITIVE_INFINITY
+            : Math.max(0, activeStopDistance - progressMeters);
+          const cruiseMetersPerSecond = cruiseSpeedKmh / MS_TO_KMH;
+          const stoppingTargetMetersPerSecond = Number.isFinite(distanceToStop)
+            ? Math.sqrt(
+              2 * SIMULATION_BRAKING_MPS2 * distanceToStop,
+            )
+            : cruiseMetersPerSecond;
+          const targetSpeed = Math.min(cruiseMetersPerSecond, stoppingTargetMetersPerSecond);
+          const acceleration = targetSpeed < speedMetersPerSecond
+            ? SIMULATION_BRAKING_MPS2
+            : SIMULATION_ACCELERATION_MPS2;
+          speedMetersPerSecond = moveTowards(
+            speedMetersPerSecond,
+            targetSpeed,
+            acceleration * elapsedSeconds,
+          );
+
+          const movementMeters = speedMetersPerSecond * elapsedSeconds;
+          if (
+            activeStopDistance !== null
+            && progressMeters + movementMeters >= activeStopDistance - 0.05
+          ) {
+            progressMeters = activeStopDistance;
+            speedMetersPerSecond = 0;
+            dwellUntil = timestamp + randomBetween(3_500, 7_500);
+          } else {
+            progressMeters = Math.min(
+              routePath.totalDistance,
+              progressMeters + movementMeters,
+            );
+            if (progressMeters >= routePath.totalDistance) {
+              speedMetersPerSecond = 0;
+            }
+          }
+        }
+      }
+      previousTimestamp = timestamp;
+      setSimulationSpeedKmh(speedMetersPerSecond * MS_TO_KMH);
+
+      const nextPose = poseAtRouteDistance(routePath, progressMeters);
+      if (nextPose) {
+        visualPoseRef.current = nextPose;
+        lastSnappedProgressRef.current = progressMeters;
+        setVisualPose(nextPose);
+        setDisplayRouteProgress(progressMeters);
+      }
+
+      if (progressMeters < routePath.totalDistance) {
+        simulationFrameRef.current = requestAnimationFrame(step);
+      } else {
+        simulationFrameRef.current = null;
+      }
+    };
+
+    simulationFrameRef.current = requestAnimationFrame(step);
+
+    return () => {
+      if (simulationFrameRef.current !== null) {
+        cancelAnimationFrame(simulationFrameRef.current);
+        simulationFrameRef.current = null;
+      }
+    };
+  }, [isSimulating, routePath, stopsOnRoute]);
 
   useEffect(() => {
     if (!userCoords) {
@@ -1850,6 +2041,24 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     navigation.replace('Home');
   };
 
+  const handleRouteTitlePress = () => {
+    if (isSimulating || !routePath.segments.length) return;
+
+    const now = Date.now();
+    const previous = simulationTitleTapRef.current;
+    const count = now - previous.lastTapAt <= SIMULATION_TRIPLE_TAP_WINDOW_MS
+      ? previous.count + 1
+      : 1;
+
+    if (count >= 3) {
+      simulationTitleTapRef.current = { count: 0, lastTapAt: 0 };
+      setIsSimulating(true);
+      return;
+    }
+
+    simulationTitleTapRef.current = { count, lastTapAt: now };
+  };
+
   return (
     <View style={styles.container}>
       <StatusBar style={usesLightChrome ? 'dark' : 'light'} />
@@ -1899,7 +2108,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
         />
 
         {/* Custom user location: Programmatic TMB Bus Marker */}
-        {locationGranted && displayCoords && (
+        {(locationGranted || isSimulating) && displayCoords && (
           <Marker
             id="userBusMarker"
             lngLat={displayCoords}
@@ -2044,7 +2253,14 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
         >
           <MaterialCommunityIcons name="chevron-left" size={24} color={chromeTextColor} />
         </TouchableOpacity>
-        <View style={[styles.routeHud, usesLightChrome && styles.mapChromeLight]}>
+        <TouchableOpacity
+          style={[styles.routeHud, usesLightChrome && styles.mapChromeLight]}
+          onPress={handleRouteTitlePress}
+          activeOpacity={1}
+          accessibilityRole="button"
+          accessibilityLabel={`${routeShortName}. ${directionName || t('map.activeRoute')}`}
+          accessibilityHint={t('map.simulateTripleTapHint')}
+        >
           <View style={styles.hudTitleRow}>
             <View style={[
               styles.hudBadge,
@@ -2058,7 +2274,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
               {directionName || t('map.activeRoute')}
             </Text>
           </View>
-        </View>
+        </TouchableOpacity>
         <View style={[styles.wsIndicator, usesLightChrome && styles.mapChromeLight]}>
           <View
             style={[

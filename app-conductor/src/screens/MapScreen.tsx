@@ -123,7 +123,7 @@ type RouteProjectionOptions = {
 };
 
 type MapScreenProps = NativeStackScreenProps<RootStackParamList, 'Map'>;
-type MapTheme = 'dark' | 'light' | 'satellite';
+type MapTheme = 'dark' | 'light';
 type MapViewMode = 'perspective' | 'topDown';
 type MapThemeOption = {
   labelKey: TranslationKey;
@@ -597,38 +597,6 @@ function reportedVehicleDelay(update: RTTripUpdate | undefined, vehicle: Vehicle
     : null;
 }
 
-const SATELLITE_MAP_STYLE = {
-  version: 8,
-  sources: {
-    esriWorldImagery: {
-      type: 'raster',
-      tiles: [
-        'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-      ],
-      tileSize: 256,
-      maxzoom: 19,
-      attribution: 'Tiles © Esri',
-    },
-    carto: {
-      type: 'vector',
-      url: 'https://tiles.basemaps.cartocdn.com/vector/carto.streets/v1/tiles.json',
-    },
-  },
-  layers: [
-    {
-      id: 'esriWorldImagery',
-      type: 'raster',
-      source: 'esriWorldImagery',
-      minzoom: 0,
-      maxzoom: 24,
-      paint: {
-        'raster-fade-duration': 0,
-        'raster-resampling': 'linear',
-      },
-    },
-  ],
-};
-
 const MAP_THEME_OPTIONS: Record<MapTheme, MapThemeOption> = {
   dark: {
     labelKey: 'map.dark',
@@ -640,11 +608,6 @@ const MAP_THEME_OPTIONS: Record<MapTheme, MapThemeOption> = {
     icon: 'white-balance-sunny',
     style: 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json',
   },
-  satellite: {
-    labelKey: 'map.satellite',
-    icon: 'satellite-variant',
-    style: SATELLITE_MAP_STYLE,
-  },
 };
 
 // A lightweight colour veil hides MapLibre's unavoidable style rebuild. The
@@ -655,7 +618,6 @@ const MAP_THEME_OPTIONS: Record<MapTheme, MapThemeOption> = {
 const MAP_THEME_TRANSITION_COLORS: Record<MapTheme, string> = {
   dark: '#0B1118',
   light: '#F4F1E9',
-  satellite: '#17252A',
 };
 const MAP_THEME_TRANSITION_MAX_MS = 1_200;
 
@@ -855,27 +817,21 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const usesLightChrome = mapTheme === 'light';
   const chromeTextColor = usesLightChrome ? '#1F2937' : '#FFFFFF';
   const chromeMutedTextColor = usesLightChrome ? '#6B7280' : '#9FB0C8';
-  const perspectiveMapPitch = mapTheme === 'satellite'
-    ? (isLandscape ? 36 : 40)
-    : (isLandscape ? 52 : 58);
+  const perspectiveMapPitch = isLandscape ? 52 : 58;
   const mapPitch = mapViewMode === 'topDown' ? 0 : perspectiveMapPitch;
   const mapZoom = isLandscape ? 16.5 : 17;
   const mapSafeTop = Math.max(insets.top + 8, 12);
   const mapSafeLeft = Math.max(insets.left + 12, 12);
   const mapSafeRight = Math.max(insets.right + 12, 12);
   const portraitDriverPanelHeight = Math.max(164, Math.round(viewportHeight * 0.25));
-  const standardBuildingOpacity = mapTheme === 'satellite'
-    ? 0.18
-    : usesLightChrome ? 0.78 : 0.68;
+  const standardBuildingOpacity = usesLightChrome ? 0.78 : 0.68;
   const buildingExtrusionPaint = React.useMemo(() => ({
-    'fill-extrusion-color': mapTheme === 'satellite'
-      ? '#F8FAFC'
-      : usesLightChrome ? '#94A3B8' : '#334155',
+    'fill-extrusion-color': usesLightChrome ? '#94A3B8' : '#334155',
     'fill-extrusion-height': ['coalesce', ['get', 'render_height'], 8],
     'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], 0],
     'fill-extrusion-opacity': standardBuildingOpacity,
-    'fill-extrusion-vertical-gradient': mapTheme !== 'satellite',
-  }), [mapTheme, standardBuildingOpacity, usesLightChrome]);
+    'fill-extrusion-vertical-gradient': true,
+  }), [standardBuildingOpacity, usesLightChrome]);
   const routeCoordinates = React.useMemo(() => extractRouteCoordinates(routeFeature), [routeFeature]);
   const routePath = React.useMemo(() => buildRoutePath(routeCoordinates), [routeCoordinates]);
   const routeSource = React.useMemo(() => routeFeature

@@ -19,6 +19,7 @@ import {
   type NativeSyntheticEvent,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 import { StatusBar } from 'expo-status-bar';
 import { useFocusEffect } from '@react-navigation/native';
 import * as Location from 'expo-location';
@@ -87,6 +88,8 @@ const BASE_ROUTE_ROW_HEIGHT = 49;
 const BASE_PREFERENCE_ROW_HEIGHT = 38;
 const PREFERENCE_ROWS_PORTRAIT = 4;
 const PREFERENCE_ROWS_LANDSCAPE = 3;
+const MAX_RECENT_ROUTES = 4;
+const RECENT_PREVIEW_ROWS = 2.5;
 const SEARCH_RESULT_LIMIT = 40;
 const SEARCH_OPEN_DURATION_MS = 320;
 const SEARCH_CLOSE_DURATION_MS = 280;
@@ -608,7 +611,7 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
         const item = byId.get(recent.routeId);
         return item ? [{ route: item, recent }] : [];
       })
-      .slice(0, 4);
+      .slice(0, MAX_RECENT_ROUTES);
   }, [preferenceView, preferences, routes]);
 
   const defaultVisiblePreferenceRows = isLandscape
@@ -618,9 +621,12 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
       : isBalancedPortrait
         ? 3
         : PREFERENCE_ROWS_PORTRAIT);
-  const visiblePreferenceRows = fontScale > 1.35
+  const responsiveVisiblePreferenceRows = fontScale > 1.35
     ? Math.min(2, defaultVisiblePreferenceRows)
     : defaultVisiblePreferenceRows;
+  const visiblePreferenceRows = preferenceView === 'recent'
+    ? (fontScale > 1.35 ? 2 : RECENT_PREVIEW_ROWS)
+    : responsiveVisiblePreferenceRows;
   const preferenceViewportHeight = Math.min(
     preferenceRoutes.length,
     visiblePreferenceRows,
@@ -1136,7 +1142,9 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
                       styles.preferenceModeText,
                       responsiveType.preferenceModeText,
                       preferenceView === 'recent' && styles.preferenceModeTextActive,
-                    ]}>{t('home.recents', { count: preferences.recentRoutes.length })}</Text>
+                    ]}>{t('home.recents', {
+                      count: Math.min(MAX_RECENT_ROUTES, preferences.recentRoutes.length),
+                    })}</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={[styles.preferenceMode, preferenceView === 'favorite' && styles.preferenceModeActive]}
@@ -1266,6 +1274,14 @@ export default function HomeScreen({ navigation, route }: HomeScreenProps) {
                         );
                       })}
                     </Animated.ScrollView>
+                    {preferenceScrollEnabled ? (
+                      <LinearGradient
+                        pointerEvents="none"
+                        colors={['rgba(241, 239, 232, 0)', colors.background]}
+                        locations={[0, 1]}
+                        style={styles.preferenceFade}
+                      />
+                    ) : null}
                   </View>
                 ) : (
                   <TouchableOpacity
@@ -1651,6 +1667,13 @@ const styles = StyleSheet.create({
   preferenceViewport: { overflow: 'hidden' },
   preferenceScroller: { flex: 1 },
   preferenceList: { paddingRight: 38 },
+  preferenceFade: {
+    position: 'absolute',
+    right: 0,
+    bottom: 0,
+    left: 0,
+    height: 14,
+  },
   preferenceRow: {
     position: 'relative',
     paddingHorizontal: 2,

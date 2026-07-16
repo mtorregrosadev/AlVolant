@@ -68,6 +68,51 @@ async def test_traffic_concurrent_bucket_uses_single_provider_request(settings: 
 
 
 @pytest.mark.asyncio
+async def test_traffic_shared_cache_reuses_a_zone_across_bff_instances(
+    settings: Settings,
+    cache: CacheManager,
+) -> None:
+    first_service = TrafficService(_settings(settings), cache)
+    second_service = TrafficService(_settings(settings), cache)
+    first_service._fetch_tomtom_flow = AsyncMock(return_value=_summary())
+    second_service._fetch_tomtom_flow = AsyncMock(return_value=_summary())
+
+    first = await first_service.get_summary(41.38721, 2.16991)
+    second = await second_service.get_summary(41.38739, 2.17014)
+
+    assert first == second == _summary()
+    first_service._fetch_tomtom_flow.assert_awaited_once()
+    second_service._fetch_tomtom_flow.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_traffic_shared_lookup_lock_coalesces_concurrent_bff_instances(
+    settings: Settings,
+    cache: CacheManager,
+) -> None:
+    first_service = TrafficService(_settings(settings), cache)
+    second_service = TrafficService(_settings(settings), cache)
+
+    async def fetch(_latitude: float, _longitude: float) -> TrafficSummary:
+        await asyncio.sleep(0.05)
+        return _summary()
+
+    first_service._fetch_tomtom_flow = AsyncMock(side_effect=fetch)
+    second_service._fetch_tomtom_flow = AsyncMock(side_effect=fetch)
+
+    first, second = await asyncio.gather(
+        first_service.get_summary(41.38721, 2.16991),
+        second_service.get_summary(41.38739, 2.17014),
+    )
+
+    assert first == second == _summary()
+    assert (
+        first_service._fetch_tomtom_flow.await_count
+        + second_service._fetch_tomtom_flow.await_count
+    ) == 1
+
+
+@pytest.mark.asyncio
 async def test_traffic_global_quota_bounds_unique_buckets(
     settings: Settings,
     cache: CacheManager,
@@ -144,7 +189,7 @@ async def test_traffic_cache_has_lru_and_ttl_caps(
 
     assert len(service._memory_cache) == 3
     assert (41_380, 2_170) not in service._memory_cache
-    assert all(entry.expires_at == 400.0 for entry in service._memory_cache.values())
+    assert all(entry.expires_at == 3_700.0 for entry in service._memory_cache.values())
 
 
 @pytest.mark.asyncio

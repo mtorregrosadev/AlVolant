@@ -165,7 +165,7 @@ fi
 
 echo "→ Instal·lant en $simulator_name"
 xcrun simctl install "$simulator_udid" "$app_path"
-xcrun simctl launch --terminate-running-process "$simulator_udid" com.anonymous.app-conductor >/dev/null
+xcrun simctl launch --terminate-running-process "$simulator_udid" com.mtorregrosadev.AlVolant >/dev/null
 
 echo
 echo "✓ AlVolant compilada, instal·lada i oberta a $simulator_name."

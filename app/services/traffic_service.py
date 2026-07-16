@@ -31,12 +31,17 @@ TRAFFIC_MAX_LONGITUDE = 3.50
 _COORDINATE_GRID = 1_000  # Three decimals: roughly 80-110 m in Catalonia.
 _MAX_CACHE_ENTRIES = 2_048
 _MIN_CACHE_TTL_SECONDS = 10
-_MAX_CACHE_TTL_SECONDS = 300
+_MAX_CACHE_TTL_SECONDS = 3_600
+_DISTRIBUTED_LOOKUP_LOCK_SECONDS = 10
+_DISTRIBUTED_LOOKUP_WAIT_SECONDS = 7
+_DISTRIBUTED_LOOKUP_POLL_SECONDS = 0.2
 _ALLOWED_TOMTOM_HOSTS = frozenset({"api.tomtom.com"})
 _MAX_RESPONSE_BYTES = 128 * 1024
 _TRAFFIC_QUOTA_MINUTE_PREFIX = "rl:traffic:minute"
 _TRAFFIC_QUOTA_DAY_PREFIX = "rl:traffic:day"
 _TRAFFIC_CIRCUIT_KEY = "rl:traffic:circuit"
+_TRAFFIC_SUMMARY_PREFIX = "traffic:summary"
+_TRAFFIC_LOOKUP_LOCK_PREFIX = "traffic:lookup-lock"
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +100,11 @@ class TrafficService:
         if cached:
             self._memory_cache.pop(cache_key, None)
 
+        shared = await self._get_shared_summary(cache_key)
+        if shared is not None:
+            self._remember(cache_key, shared)
+            return shared
+
         async with self._inflight_lock:
             task = self._inflight.get(cache_key)
             if task is None:
@@ -124,6 +134,17 @@ class TrafficService:
             self._memory_cache.move_to_end(cache_key)
             return cached.summary
 
+        shared = await self._get_shared_summary(cache_key)
+        if shared is not None:
+            self._remember(cache_key, shared)
+            return shared
+
+        if self._cache is not None and not await self._acquire_distributed_lookup_lock(cache_key):
+            shared = await self._wait_for_shared_summary(cache_key)
+            if shared is not None:
+                self._remember(cache_key, shared)
+                return shared
+
         if await self._provider_request_allowed():
             # The provider receives the coarse grid centre, never the raw GPS fix.
             summary = await self._fetch_tomtom_flow(
@@ -133,18 +154,91 @@ class TrafficService:
         else:
             summary = _unavailable_summary()
 
-        ttl = min(
+        self._remember(cache_key, summary)
+        await self._set_shared_summary(cache_key, summary)
+        return summary
+
+    def _cache_ttl_seconds(self) -> int:
+        return min(
             _MAX_CACHE_TTL_SECONDS,
             max(_MIN_CACHE_TTL_SECONDS, self._settings.TRAFFIC_CACHE_TTL_SECONDS),
         )
+
+    def _remember(self, cache_key: tuple[int, int], summary: TrafficSummary) -> None:
         self._memory_cache[cache_key] = _CacheEntry(
-            expires_at=time.monotonic() + ttl,
+            expires_at=time.monotonic() + self._cache_ttl_seconds(),
             summary=summary,
         )
         self._memory_cache.move_to_end(cache_key)
         while len(self._memory_cache) > _MAX_CACHE_ENTRIES:
             self._memory_cache.popitem(last=False)
-        return summary
+
+    @staticmethod
+    def _summary_cache_key(cache_key: tuple[int, int]) -> str:
+        latitude_bucket, longitude_bucket = cache_key
+        return f"{_TRAFFIC_SUMMARY_PREFIX}:{latitude_bucket}:{longitude_bucket}"
+
+    @staticmethod
+    def _lookup_lock_key(cache_key: tuple[int, int]) -> str:
+        latitude_bucket, longitude_bucket = cache_key
+        return f"{_TRAFFIC_LOOKUP_LOCK_PREFIX}:{latitude_bucket}:{longitude_bucket}"
+
+    async def _get_shared_summary(self, cache_key: tuple[int, int]) -> TrafficSummary | None:
+        if self._cache is None:
+            return None
+        try:
+            raw_summary = await self._cache.get_json(self._summary_cache_key(cache_key))
+            if not isinstance(raw_summary, dict):
+                return None
+            return TrafficSummary.model_validate(raw_summary)
+        except (TypeError, ValueError):
+            logger.warning("Traffic shared cache read failed")
+            return None
+        except Exception:
+            logger.warning("Traffic shared cache unavailable")
+            return None
+
+    async def _set_shared_summary(
+        self,
+        cache_key: tuple[int, int],
+        summary: TrafficSummary,
+    ) -> None:
+        if self._cache is None:
+            return
+        try:
+            await self._cache.set_json(
+                self._summary_cache_key(cache_key),
+                summary.model_dump(mode="json"),
+                ttl=self._cache_ttl_seconds(),
+            )
+        except Exception:
+            # The in-process cache still protects the provider for this BFF process.
+            logger.warning("Traffic shared cache write failed")
+
+    async def _acquire_distributed_lookup_lock(self, cache_key: tuple[int, int]) -> bool:
+        assert self._cache is not None
+        try:
+            acquired = await self._cache.client.set(
+                self._lookup_lock_key(cache_key),
+                b"1",
+                nx=True,
+                ex=_DISTRIBUTED_LOOKUP_LOCK_SECONDS,
+            )
+            return bool(acquired)
+        except Exception:
+            # Redis availability is already enforced in production quota checks;
+            # this fallback keeps a single-process deployment usable.
+            logger.warning("Traffic lookup lock unavailable")
+            return True
+
+    async def _wait_for_shared_summary(self, cache_key: tuple[int, int]) -> TrafficSummary | None:
+        attempts = int(_DISTRIBUTED_LOOKUP_WAIT_SECONDS / _DISTRIBUTED_LOOKUP_POLL_SECONDS)
+        for _ in range(attempts):
+            await asyncio.sleep(_DISTRIBUTED_LOOKUP_POLL_SECONDS)
+            shared = await self._get_shared_summary(cache_key)
+            if shared is not None:
+                return shared
+        return None
 
     async def _provider_request_allowed(self) -> bool:
         """Apply local circuit state and distributed minute/day provider quotas."""

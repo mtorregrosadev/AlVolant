@@ -13,8 +13,17 @@ build/
 venv/
 env/
 
-# Environment variables (secrets)
+# Environment variables and release secrets
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p8
+*.p12
+*.jks
+*.mobileprovision
+*.ipa
 
 # IDE
 .vscode/

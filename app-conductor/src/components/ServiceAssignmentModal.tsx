@@ -41,6 +41,22 @@ type ServiceAssignmentModalProps = {
   onSkip: () => void;
 };
 
+function formatClockMinutes(value: number) {
+  const totalMinutes = ((value % 1440) + 1440) % 1440;
+  return `${String(Math.floor(totalMinutes / 60)).padStart(2, '0')}:${String(totalMinutes % 60).padStart(2, '0')}`;
+}
+
+function formatServiceTime(value: string | null | undefined) {
+  const [hourText, minuteText] = (value ?? '').split(':');
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  if (!Number.isInteger(hour) || !Number.isInteger(minute) || minute < 0 || minute > 59) {
+    return (value ?? '').slice(0, 5);
+  }
+
+  return formatClockMinutes(hour * 60 + minute);
+}
+
 export default function ServiceAssignmentModal({
   visible,
   isLandscape,
@@ -213,7 +229,7 @@ export default function ServiceAssignmentModal({
                   <Text style={styles.emptyText}>{t('assignment.emptyHint')}</Text>
                 </View>
               ) : upcomingTrips.map((trip) => {
-                const scheduledTime = (trip.departure_time || '').slice(0, 5);
+                const scheduledTime = formatServiceTime(trip.departure_time);
                 const title = formatDirectionLabel(
                   trip.trip_headsign || trip.towards_label,
                   language,
@@ -225,8 +241,7 @@ export default function ServiceAssignmentModal({
 
                 if (trip.has_rt_first_stop_update && delayMinutes !== 0) {
                   const [hour, minute] = (trip.departure_time || '00:00').split(':').map(Number);
-                  const totalMinutes = ((hour * 60 + minute + delayMinutes) + 1440) % 1440;
-                  estimatedTime = `${String(Math.floor(totalMinutes / 60)).padStart(2, '0')}:${String(totalMinutes % 60).padStart(2, '0')}`;
+                  estimatedTime = formatClockMinutes(hour * 60 + minute + delayMinutes);
                 }
 
                 const status = delayMinutes > 0

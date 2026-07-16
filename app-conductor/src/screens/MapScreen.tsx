@@ -28,6 +28,7 @@ import {
   type LiveWebSocketMessage,
   type RTTripUpdate,
   type ServiceAlert,
+  type TrafficSummary,
   type VehiclePosition,
 } from '../services/api';
 import { telemetry } from '../services/telemetry';
@@ -74,6 +75,10 @@ type SelectedStop = {
 };
 
 type IconName = React.ComponentProps<typeof MaterialCommunityIcons>['name'];
+type DriverMetric = {
+  icon: IconName;
+  label: string;
+};
 type RouteProjection = {
   coordinate: Coordinate;
   distanceAlong: number;
@@ -129,6 +134,7 @@ type MapThemeOption = {
 const MS_TO_KMH = 3.6;
 const MIN_MOVING_SPEED_KMH = 3;
 const FALLBACK_CITY_SPEED_KMH = 18;
+const TRAFFIC_REFRESH_INTERVAL_MS = 120_000;
 const LIVE_REFRESH_MIN_INTERVAL_MS = 60_000;
 const LIVE_REFRESH_JITTER_MS = 5_000;
 const LIVE_RECONNECT_MAX_MS = 30_000;
@@ -705,6 +711,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const [routeTripUpdates, setRouteTripUpdates] = useState<RTTripUpdate[]>([]);
   const [vehiclePositions, setVehiclePositions] = useState<VehiclePosition[]>([]);
   const [serviceAlerts, setServiceAlerts] = useState<ServiceAlert[]>([]);
+  const [trafficSummary, setTrafficSummary] = useState<TrafficSummary | null>(null);
   const [isServiceAlertModalVisible, setIsServiceAlertModalVisible] = useState(false);
   const [isServiceAlertTabDismissed, setIsServiceAlertTabDismissed] = useState(false);
   const [mapTheme, setMapTheme] = useState<MapTheme>('dark');
@@ -732,6 +739,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const mapThemeFadeGenerationRef = useRef<number | null>(null);
   const mapThemeTransitionOpacity = useRef(new Animated.Value(0)).current;
   const visualPoseRef = useRef<VisualPose | null>(null);
+  const displayCoordsRef = useRef<Coordinate | null>(null);
   const liveActivityPropsRef = useRef<RouteLiveActivityProps | null>(null);
   const liveActivityStartedRef = useRef(false);
   const presentedServiceAlertKeyRef = useRef('');
@@ -742,6 +750,15 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const userCoords = gpsFix?.coordinate ?? null;
   const userSpeedKmh = gpsFix?.speedKmh ?? null;
   const displayCoords = visualPose?.coordinate ?? null;
+  // GPS is available before the visual route marker during initial map
+  // settling, so use it as a safe fallback for the first traffic lookup.
+  const trafficCoordinate = displayCoords ?? userCoords;
+  displayCoordsRef.current = trafficCoordinate;
+  // Simulations make one immediate lookup so the integration can be checked;
+  // active real navigation refreshes the result on the bounded interval below.
+  const shouldFetchTraffic = !loading
+    && !error
+    && trafficCoordinate !== null;
   const displayRouteBearing = visualPose?.bearing ?? 0;
   const gpsBearing = gpsFix
     && isValidHeading(gpsFix.headingDegrees)
@@ -758,6 +775,44 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     ? displayRouteBearing
     : mapBearing;
   const vehicleMarkerRotation = vehicleWorldBearing - effectiveMapBearing;
+
+  useEffect(() => {
+    if (!shouldFetchTraffic) {
+      setTrafficSummary(null);
+      return undefined;
+    }
+
+    let disposed = false;
+    let controller: AbortController | null = null;
+
+    const refreshTraffic = () => {
+      const coords = displayCoordsRef.current;
+      if (!coords) return;
+
+      controller?.abort();
+      const requestController = new AbortController();
+      controller = requestController;
+      void apiService.fetchTrafficSummary(coords[1], coords[0], requestController.signal)
+        .then((summary) => {
+          if (!disposed) setTrafficSummary(summary);
+        })
+        .catch(() => {
+          if (!disposed && !requestController.signal.aborted) {
+            setTrafficSummary(null);
+          }
+        });
+    };
+
+    refreshTraffic();
+    const refreshTimer = isSimulating
+      ? null
+      : setInterval(refreshTraffic, TRAFFIC_REFRESH_INTERVAL_MS);
+    return () => {
+      disposed = true;
+      if (refreshTimer) clearInterval(refreshTimer);
+      controller?.abort();
+    };
+  }, [directionId, isSimulating, routeId, shouldFetchTraffic, tripId]);
 
   const directionName = React.useMemo(() => {
     if (directionLabel) {
@@ -878,9 +933,35 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const currentSpeedLabel = currentSpeedKmh === null
     ? '--'
     : String(Math.max(0, Math.round(currentSpeedKmh)));
-  const effectiveSpeedKmh = currentSpeedKmh !== null && currentSpeedKmh > MIN_MOVING_SPEED_KMH
-    ? currentSpeedKmh
-    : FALLBACK_CITY_SPEED_KMH;
+  const trafficSpeedKmh = trafficSummary?.status !== 'unavailable'
+    && !trafficSummary?.road_closure
+    && typeof trafficSummary?.current_speed_kmh === 'number'
+    && trafficSummary.current_speed_kmh > MIN_MOVING_SPEED_KMH
+    ? trafficSummary.current_speed_kmh
+    : null;
+  const trafficEtaPillColor = trafficSummary?.status === 'dense'
+    ? '#C97A12'
+    : trafficSummary?.status === 'slow' || trafficSummary?.status === 'jammed'
+      ? '#C13A3A'
+        : trafficSummary?.status === 'closed'
+          ? '#8B1E1E'
+          : colors.primary;
+  const trafficStatusKey: TranslationKey | null = trafficSummary?.status === 'normal'
+    ? 'map.trafficNormal'
+    : trafficSummary?.status === 'dense'
+      ? 'map.trafficDense'
+      : trafficSummary?.status === 'slow'
+        ? 'map.trafficSlow'
+        : trafficSummary?.status === 'jammed'
+          ? 'map.trafficJammed'
+          : trafficSummary?.status === 'closed'
+            ? 'map.trafficClosed'
+            : null;
+  const trafficStatusLabel = trafficStatusKey ? t(trafficStatusKey) : null;
+  const effectiveSpeedKmh = trafficSpeedKmh
+    ?? (currentSpeedKmh !== null && currentSpeedKmh > MIN_MOVING_SPEED_KMH
+      ? currentSpeedKmh
+      : FALLBACK_CITY_SPEED_KMH);
   const currentRouteProgress = displayRouteProgress;
   const upcomingStops = React.useMemo(() => {
     if (!stopsOnRoute.length) {
@@ -1059,9 +1140,9 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
       const stop = stopsOnRoute.find((item) => (
         Boolean(vehicle.stop_id) && item.stop_id === vehicle.stop_id
       ) || (
-        vehicle.current_stop_sequence !== null
-        && (item.stop_sequence === vehicle.current_stop_sequence || item.sequence === vehicle.current_stop_sequence)
-      ));
+          vehicle.current_stop_sequence !== null
+          && (item.stop_sequence === vehicle.current_stop_sequence || item.sequence === vehicle.current_stop_sequence)
+        ));
       const hasStopLocation = Boolean(stop?.stop_name && vehicle.current_status);
       const location = hasStopLocation
         ? vehicle.current_status === 'STOPPED_AT'
@@ -1103,15 +1184,18 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     tripId,
     vehiclePositions,
   ]);
-  const driverMetrics = [
+  const driverMetrics: DriverMetric[] = [
     { icon: 'speedometer' as IconName, label: `${currentSpeedLabel} km/h` },
     nextStopDistanceMeters !== null
       ? { icon: 'map-marker-distance' as IconName, label: formatDistance(nextStopDistanceMeters, language) }
       : null,
     estimatedArrival
-      ? { icon: 'clock-time-four-outline' as IconName, label: t('map.arrival', { time: estimatedArrival }) }
+      ? {
+        icon: 'clock-time-four-outline' as IconName,
+        label: t('map.arrival', { time: estimatedArrival }),
+      }
       : null,
-  ].filter((metric): metric is { icon: IconName; label: string } => metric !== null);
+  ].filter((metric): metric is DriverMetric => metric !== null);
   const visibleDriverMetrics = driverMetrics;
   const landscapeDriverPanelHeight = fleetMetrics.length > 0 ? 146 : 104;
   const driverPanelClearance = isLandscape
@@ -1405,7 +1489,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
       const easedRatio = ratio < 1 ? ratio * ratio * (3 - 2 * ratio) : 1;
       const nextRouteProgress = followsRoute
         ? fromPose.routeProgress!
-          + (targetPose.routeProgress! - fromPose.routeProgress!) * easedRatio
+        + (targetPose.routeProgress! - fromPose.routeProgress!) * easedRatio
         : null;
       const routePosition = nextRouteProgress === null
         ? null
@@ -2576,9 +2660,20 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
                 </Text>
               </View>
             ) : null}
-            <View style={styles.driverEtaPill}>
-              <MaterialCommunityIcons name="timer-outline" size={13} color="#FFFFFF" />
-              <Text style={styles.driverEtaText}>{formatEta(nextStopEtaMinutes, language)}</Text>
+            <View style={[
+              styles.driverEtaPill,
+              trafficStatusLabel && styles.driverEtaPillWithTraffic,
+              { backgroundColor: trafficEtaPillColor },
+            ]}>
+              {trafficStatusLabel ? (
+                <Text style={styles.driverTrafficStatusText} numberOfLines={1}>
+                  {trafficStatusLabel}
+                </Text>
+              ) : null}
+              <View style={styles.driverEtaTimeRow}>
+                <MaterialCommunityIcons name="timer-outline" size={13} color="#FFFFFF" />
+                <Text style={styles.driverEtaText}>{formatEta(nextStopEtaMinutes, language)}</Text>
+              </View>
             </View>
           </View>
 
@@ -3199,6 +3294,25 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 5,
     backgroundColor: colors.primary,
+  },
+  driverEtaPillWithTraffic: {
+    height: 42,
+    minWidth: 108,
+    paddingHorizontal: 9,
+    flexDirection: 'column',
+    gap: 0,
+  },
+  driverEtaTimeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  driverTrafficStatusText: {
+    maxWidth: 112,
+    color: '#FFFFFF',
+    fontSize: 9,
+    lineHeight: 11,
+    fontWeight: '900',
   },
   driverEtaText: {
     color: '#FFFFFF',

@@ -91,9 +91,10 @@ class Settings(BaseSettings):
     TOMTOM_API_KEY: str = ""
     TOMTOM_API_KEY_FILE: str = ""
     TOMTOM_TRAFFIC_BASE_URL: str = "https://api.tomtom.com/traffic/services/4"
-    TRAFFIC_CACHE_TTL_SECONDS: int = Field(default=60, ge=1, le=3_600)
+    TRAFFIC_CACHE_TTL_SECONDS: int = Field(default=900, ge=1, le=3_600)
     TRAFFIC_GLOBAL_REQUESTS_PER_MINUTE: int = Field(default=120, ge=1, le=10_000)
-    TRAFFIC_GLOBAL_REQUESTS_PER_DAY: int = Field(default=5_000, ge=1, le=1_000_000)
+    # Stay inside TomTom's daily free allowance until usage justifies a paid budget.
+    TRAFFIC_GLOBAL_REQUESTS_PER_DAY: int = Field(default=2_300, ge=1, le=1_000_000)
     TRAFFIC_PROVIDER_CIRCUIT_SECONDS: int = Field(default=60, ge=5, le=3_600)
 
     # -------------------------------------------------------------------------

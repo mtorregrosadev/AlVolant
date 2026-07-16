@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
@@ -24,6 +24,8 @@ _MAX_GTFS_ID_LENGTH = 128
 # corrupt logs or cache-key diagnostics.
 _PATH_ID_PATTERN = r"^[^\x00-\x1f\x7f/]+$"
 _QUERY_ID_PATTERN = r"^[^\x00-\x1f\x7f]+$"
+_DEPARTURE_GRACE_MINUTES = 5
+_MAX_PAST_DEPARTURES_MINUTES = 180
 
 logger = get_logger(__name__)
 
@@ -174,7 +176,7 @@ def _get_first_stop_delay_seconds(rt_trip: object) -> int | None:
         return departure_delay
     if arrival_delay is not None:
         return arrival_delay
-    return 0
+    return None
 
 
 @router.get(
@@ -194,6 +196,7 @@ async def get_upcoming_trips(
     direction_id: Annotated[int, Query(ge=0, le=1)],
     request: Request,
     limit: Annotated[int, Query(ge=1, le=20)] = 4,
+    past_minutes: Annotated[int, Query(ge=0, le=_MAX_PAST_DEPARTURES_MINUTES)] = 0,
 ) -> list[dict]:
     """Return enriched upcoming trips with origin, destination label, and status."""
     gtfs_service = request.app.state.gtfs_service
@@ -205,8 +208,13 @@ async def get_upcoming_trips(
     except Exception:
         now_local = datetime.now()
 
-    date_str = now_local.strftime("%Y%m%d")
-    time_str = now_local.strftime("%H:%M:%S")
+    # A driver can still select a departure just after its scheduled minute.
+    # Keep a small window here (rather than relying on realtime data, which
+    # may arrive late) so a 20:20 service remains selectable until 20:25.
+    lookback_minutes = max(_DEPARTURE_GRACE_MINUTES, past_minutes)
+    lookup_local = now_local - timedelta(minutes=lookback_minutes)
+    date_str = lookup_local.strftime("%Y%m%d")
+    time_str = lookup_local.strftime("%H:%M:%S")
 
     calendar_exists = await gtfs_service._cache.get_json("gtfs:calendar")
     if not calendar_exists:
@@ -231,6 +239,17 @@ async def get_upcoming_trips(
         time_str=time_str,
         limit=max(limit * 4, 20),
     )
+    if past_minutes > _DEPARTURE_GRACE_MINUTES:
+        # The explicit history request should start with the latest completed
+        # departures, not the oldest one inside the lookback window.
+        trips = sorted(
+            (
+                trip for trip in trips
+                if int(trip.get("scheduled_epoch", 0) or 0) <= int(now_local.timestamp())
+            ),
+            key=lambda trip: int(trip.get("scheduled_epoch", 0) or 0),
+            reverse=True,
+        )
 
     try:
         rt_trips = []
@@ -261,7 +280,9 @@ async def get_upcoming_trips(
         expected_departure_epoch = scheduled_epoch + effective_delay
 
         # Remove stale trips that are too far in the past after delay adjustment.
-        if expected_departure_epoch and expected_departure_epoch < (now_epoch - 600):
+        if expected_departure_epoch and expected_departure_epoch < (
+            now_epoch - lookback_minutes * 60
+        ):
             continue
 
         seconds_until_expected = expected_departure_epoch - now_epoch

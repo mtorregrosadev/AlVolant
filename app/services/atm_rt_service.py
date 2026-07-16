@@ -33,6 +33,7 @@ from app.config import Settings
 from app.core.exceptions import ExternalAPIError, GTFSParseError
 from app.core.logging import get_logger
 from app.models.atm_rt import (
+    AffectedEntity,
     AffectedStopDetail,
     AlertCause,
     AlertEffect,
@@ -63,8 +64,8 @@ _KEY_TRIPS_ROUTE_PREFIX = "atm_rt:trips:route"
 _KEY_VEHICLE_ROUTES = "atm_rt:vehicles:route_ids"
 _KEY_TRIP_ROUTES = "atm_rt:trips:route_ids"
 
-# ATM language priority mapping (ca = Catalan, es = Spanish, en = English)
-_LANG_PRIORITY = ("ca", "es", "en", "")
+# ATM uses both ``ca`` and ``cat`` for Catalan depending on the operator.
+_LANG_PRIORITY = ("ca", "cat", "es", "en", "")
 
 # Safety limits
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -75,6 +76,7 @@ _MAX_ID_LENGTH = 160
 _MAX_ALERT_SELECTORS = 1_000
 _MAX_TOTAL_ALERT_SELECTORS = 20_000
 _MAX_TRANSLATIONS = 20
+_MAX_ROUTE_ALERTS = 50
 _SAFE_ID_PATTERN = re.compile(r"^[^\x00-\x1f\x7f]{1,160}$")
 _MAX_REDIRECTS = 3
 _MAX_PROVIDER_FUTURE_SKEW_SECONDS = 30
@@ -572,8 +574,16 @@ class ATMRTService:
             if not _is_safe_id(stop_id):
                 continue
 
-            arr_delay = stu.arrival.delay if stu.HasField("arrival") else 0
-            dep_delay = stu.departure.delay if stu.HasField("departure") else 0
+            arr_delay = (
+                stu.arrival.delay
+                if stu.HasField("arrival") and stu.arrival.HasField("delay")
+                else None
+            )
+            dep_delay = (
+                stu.departure.delay
+                if stu.HasField("departure") and stu.departure.HasField("delay")
+                else None
+            )
             arrival_time = (
                 stu.arrival.time
                 if stu.HasField("arrival") and stu.arrival.HasField("time")
@@ -646,11 +656,27 @@ class ATMRTService:
         # Extract affected routes/stops
         routes = []
         stops = []
+        affected_entities = []
         for entity_selector in al.informed_entity[:_MAX_ALERT_SELECTORS]:
+            route_id = ""
+            stop_id = ""
+            direction_id = None
             if entity_selector.HasField("route_id") and _is_safe_id(entity_selector.route_id):
-                routes.append(entity_selector.route_id)
+                route_id = entity_selector.route_id
+                routes.append(route_id)
             if entity_selector.HasField("stop_id") and _is_safe_id(entity_selector.stop_id):
-                stops.append(entity_selector.stop_id)
+                stop_id = entity_selector.stop_id
+                stops.append(stop_id)
+            if entity_selector.HasField("direction_id") and entity_selector.direction_id in (0, 1):
+                direction_id = entity_selector.direction_id
+            if route_id or stop_id or direction_id is not None:
+                affected_entities.append(
+                    AffectedEntity(
+                        route_id=route_id,
+                        stop_id=stop_id,
+                        direction_id=direction_id,
+                    )
+                )
 
         # --- Auto-classification ---
         alert_type = self._classify_alert_type(effect_str, header, desc)
@@ -672,6 +698,7 @@ class ATMRTService:
             active_period_end=end_iso,
             affected_route_ids=routes,
             affected_stop_ids=stops,
+            affected_entities=affected_entities,
             alert_type=alert_type,
             severity=severity,
             affected_stop_details=affected_details,
@@ -1039,3 +1066,41 @@ class ATMRTService:
         if not data:
             return []
         return [ServiceAlert(**a) for a in data]
+
+    async def get_cached_alerts_for_route(
+        self,
+        route_id: str,
+        direction_id: int | None = None,
+    ) -> list[ServiceAlert]:
+        """Return fresh alerts applicable to one route and optional direction.
+
+        Historic cache entries did not preserve the individual GTFS-RT
+        selectors, so they use the route list as a backwards-compatible
+        fallback.  New entries retain selectors and therefore honour a
+        direction-specific alert without leaking it to the other direction.
+        """
+        if not await self._component_is_fresh("alerts"):
+            return []
+
+        applicable: list[ServiceAlert] = []
+        for alert in await self.get_cached_alerts():
+            if alert.affected_entities:
+                if any(
+                    entity.route_id == route_id
+                    and (
+                        direction_id is None
+                        or entity.direction_id is None
+                        or entity.direction_id == direction_id
+                    )
+                    for entity in alert.affected_entities
+                ):
+                    applicable.append(alert)
+                continue
+
+            if route_id in alert.affected_route_ids:
+                applicable.append(alert)
+        severity_rank = {AlertSeverity.SEVERE: 0, AlertSeverity.WARNING: 1, AlertSeverity.INFO: 2}
+        return sorted(
+            applicable,
+            key=lambda alert: (severity_rank.get(alert.severity, 3), alert.alert_id),
+        )[:_MAX_ROUTE_ALERTS]

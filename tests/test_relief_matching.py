@@ -264,6 +264,25 @@ async def test_parser_does_not_confuse_absent_zero_enums_with_real_values(
     assert parsed.stop_id == ""
     assert parsed.current_status is None
 
+    trip = gtfs_realtime_pb2.TripUpdate()
+    trip.trip.trip_id = "trip-8"
+    trip.trip.route_id = _ROUTE_B
+    trip.stop_time_update.add(stop_id=_STOP_ID, stop_sequence=_STOP_SEQUENCE)
+
+    parsed_trip = service._parse_trip_update(trip)
+
+    assert parsed_trip is not None
+    assert parsed_trip.stop_time_updates == [
+        StopTimeUpdate(
+            stop_id=_STOP_ID,
+            stop_sequence=_STOP_SEQUENCE,
+            arrival_delay=None,
+            departure_delay=None,
+            arrival_time=None,
+            departure_time=None,
+        )
+    ]
+
 
 @pytest.mark.asyncio
 async def test_matcher_resolves_route_group_and_rejects_the_wrong_direction() -> None:

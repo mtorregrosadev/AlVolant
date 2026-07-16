@@ -83,12 +83,18 @@ _ALLOWED_PHASES = frozenset({
 })
 _ALLOWED_SETTINGS = frozenset({
     "background_location",
+    "buildings_3d",
     "keep_screen_awake",
     "language",
     "live_activities",
     "vehicle_color",
+    "vehicle_marker",
+    "route_line_dynamic",
+    "route_line_color",
 })
-_ALLOWED_VALUES = frozenset({"ca", "es", "green", "red", "route", "yellow"})
+_ALLOWED_VALUES = frozenset({
+    "arrow", "blue", "bus", "ca", "es", "eu", "gl", "green", "red", "route", "white", "yellow",
+})
 _ALLOWED_MODES = frozenset({"off_route", "snapped"})
 
 

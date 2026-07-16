@@ -158,6 +158,25 @@ class AlternativeStop(BaseModel):
     )
 
 
+class AffectedEntity(BaseModel):
+    """One GTFS-RT selector that scopes a service alert.
+
+    Keeping selectors together is important: a route and a stop in the
+    same GTFS-RT ``informed_entity`` are an intersection, rather than two
+    unrelated network-wide alerts.  This lets clients show an incident only
+    when the selected route and direction are actually affected.
+    """
+
+    route_id: str = Field("", max_length=160, description="Affected GTFS route_id")
+    stop_id: str = Field("", max_length=160, description="Affected GTFS stop_id")
+    direction_id: int | None = Field(
+        None,
+        ge=0,
+        le=1,
+        description="Affected GTFS direction_id when the provider supplies it",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Core GTFS-RT models
 # ---------------------------------------------------------------------------
@@ -216,17 +235,17 @@ class StopTimeUpdate(BaseModel):
 
     stop_id: str = Field(..., max_length=160, description="GTFS stop_id")
     stop_sequence: int = Field(0, ge=0, le=10_000, description="Order of this stop in the trip")
-    arrival_delay: int = Field(
-        0,
+    arrival_delay: int | None = Field(
+        None,
         ge=-86_400,
         le=604_800,
-        description="Delay in seconds relative to the schedule (positive = late)",
+        description="Delay in seconds relative to the schedule when supplied (positive = late)",
     )
-    departure_delay: int = Field(
-        0,
+    departure_delay: int | None = Field(
+        None,
         ge=-86_400,
         le=604_800,
-        description="Departure delay in seconds",
+        description="Departure delay in seconds when supplied",
     )
     arrival_time: int | None = Field(
         None,
@@ -318,6 +337,11 @@ class ServiceAlert(BaseModel):
         default_factory=list,
         max_length=1_000,
         description="List of GTFS stop_ids affected by this alert",
+    )
+    affected_entities: list[AffectedEntity] = Field(
+        default_factory=list,
+        max_length=1_000,
+        description="GTFS-RT selectors preserved for route/direction filtering",
     )
 
     # --- Enhanced classification fields ---

@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from fastapi.responses import ORJSONResponse
 
 from app.core.auth import require_api_key
-from app.models.atm_rt import ReliefCandidate, TripUpdate, VehiclePosition
+from app.models.atm_rt import ReliefCandidate, ServiceAlert, TripUpdate, VehiclePosition
 from app.services.relief_matching_service import ReliefMatchingService
 
 _MAX_ROUTE_ID_LENGTH = 128
@@ -107,3 +107,22 @@ async def get_route_trip_updates(
     """Retrieve ETAs and delay predictions for trips on the specified route."""
     service = request.app.state.atm_rt_service
     return await service.get_cached_trips_for_route(route_id)
+
+
+@router.get(
+    "/alerts/{route_id}",
+    response_model=list[ServiceAlert],
+    response_class=ORJSONResponse,
+    summary="Get current service alerts for a route",
+)
+async def get_route_service_alerts(
+    route_id: Annotated[
+        str,
+        Path(min_length=1, max_length=_MAX_ROUTE_ID_LENGTH, pattern=_ROUTE_ID_PATTERN),
+    ],
+    request: Request,
+    direction_id: Annotated[int | None, Query(ge=0, le=1)] = None,
+) -> list[ServiceAlert]:
+    """Retrieve fresh ATM incidents that apply to this route/direction only."""
+    service = request.app.state.atm_rt_service
+    return await service.get_cached_alerts_for_route(route_id, direction_id)

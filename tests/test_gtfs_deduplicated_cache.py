@@ -89,6 +89,28 @@ def _build_indexes(service: GTFSService) -> tuple[dict, dict, dict]:
     )
 
 
+def test_direction_destination_uses_the_last_stop_when_headsign_is_reversed(
+    settings: Settings,
+    cache: CacheManager,
+) -> None:
+    service = GTFSService(settings=settings, cache=cache)
+    trips, routes, shapes, stops, stop_times, start_times = _source_data()
+    trips[0]["trip_headsign"] = "Origen incorrecte"
+
+    trip_meta, _, _ = service._build_trip_indexes(
+        trip_rows=trips,
+        routes_by_id=routes,
+        shapes_by_id=shapes,
+        stops_by_id=stops,
+        stop_times_by_trip=stop_times,
+        trip_start_times=start_times,
+    )
+    routes_payload = service._build_deduplicated_routes(routes, trip_meta)
+
+    assert trip_meta["trip-out"]["destination_name"] == "Destí"
+    assert routes_payload[0]["direction_destinations"][0]["destination_name"] == "Destí"
+
+
 def _legacy_shape(trip_id: str = "legacy-trip") -> dict:
     return RouteShape(
         route_id="route-1",
@@ -168,8 +190,8 @@ async def test_v2_index_reconstructs_trip_specific_shape_and_stops(
     assert outbound_shape.geojson["geometry"] == return_shape.geojson["geometry"]
     assert outbound_shape.geojson["properties"]["trip_id"] == "trip-out"
     assert return_shape.geojson["properties"]["trip_id"] == "trip-back"
-    assert outbound_shape.destination_name == "Centre"
-    assert return_shape.destination_name == "Estació"
+    assert outbound_shape.destination_name == "Destí"
+    assert return_shape.destination_name == "Destí"
     assert outbound_stops is not None and return_stops is not None
     assert outbound_stops["features"][0]["properties"]["trip_id"] == "trip-out"
     assert return_stops["features"][0]["properties"]["trip_id"] == "trip-back"

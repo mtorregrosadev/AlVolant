@@ -17,7 +17,13 @@ from app.api.v1.atm_rt import router as atm_router
 from app.cache.redis_manager import CacheManager
 from app.config import Settings
 from app.core.exceptions import ExternalAPIError, GTFSParseError
-from app.models.atm_rt import ATMRealtimeFeed, TripUpdate, VehiclePosition
+from app.models.atm_rt import (
+    AffectedEntity,
+    ATMRealtimeFeed,
+    ServiceAlert,
+    TripUpdate,
+    VehiclePosition,
+)
 from app.services.atm_rt_service import ATMRTService
 
 _TRIP_URL = "https://t-mobilitat.atm.cat/opendata/trip_updates/user/token/open"
@@ -81,6 +87,74 @@ def _alert_feed(*, timestamp: int | None = None) -> bytes:
     alert.id = "alert-1"
     alert.alert.header_text.translation.add(text="Avís", language="ca")
     return feed.SerializeToString()
+
+
+def test_alert_parser_preserves_route_direction_selector(
+    settings: Settings,
+    cache: CacheManager,
+) -> None:
+    feed = gtfs_realtime_pb2.FeedMessage()
+    _set_header(feed)
+    entity = feed.entity.add(id="alert-direction")
+    entity.alert.header_text.translation.add(text="Detour", language="en")
+    entity.alert.header_text.translation.add(text="Desviament puntual", language="cat")
+    selector = entity.alert.informed_entity.add()
+    selector.route_id = "AMB_148"
+    selector.direction_id = 1
+    selector.stop_id = "AMB_12345"
+
+    result = ATMRTService(_settings(settings), cache)._parse_protobuf(
+        feed.SerializeToString(),
+        ATMRealtimeFeed(),
+    )
+
+    assert result.service_alerts[0].affected_entities == [
+        AffectedEntity(
+            route_id="AMB_148",
+            direction_id=1,
+            stop_id="AMB_12345",
+        )
+    ]
+    assert result.service_alerts[0].header_text == "Desviament puntual"
+
+
+@pytest.mark.asyncio
+async def test_route_alerts_are_fresh_and_respect_the_selected_direction(
+    settings: Settings,
+    cache: CacheManager,
+) -> None:
+    service = ATMRTService(_settings(settings), cache)
+    alerts = [
+        ServiceAlert(
+            alert_id="one-way",
+            header_text="Afecta només l'anada",
+            affected_route_ids=["AMB_148"],
+            affected_entities=[AffectedEntity(route_id="AMB_148", direction_id=1)],
+        ),
+        ServiceAlert(
+            alert_id="both-ways",
+            header_text="Afecta tota la línia",
+            affected_route_ids=["AMB_148"],
+            affected_entities=[AffectedEntity(route_id="AMB_148")],
+        ),
+        ServiceAlert(
+            alert_id="other-route",
+            header_text="Una altra línia",
+            affected_route_ids=["AMB_415"],
+            affected_entities=[AffectedEntity(route_id="AMB_415", direction_id=1)],
+        ),
+    ]
+    await service._cache_feed(
+        ATMRealtimeFeed(service_alerts=alerts, entity_count=len(alerts)),
+        {"alerts"},
+        provider_timestamps={"alerts": _provider_timestamp()},
+    )
+
+    outbound = await service.get_cached_alerts_for_route("AMB_148", direction_id=1)
+    inbound = await service.get_cached_alerts_for_route("AMB_148", direction_id=0)
+
+    assert [alert.alert_id for alert in outbound] == ["both-ways", "one-way"]
+    assert [alert.alert_id for alert in inbound] == ["both-ways"]
 
 
 @pytest.mark.asyncio
@@ -634,3 +708,34 @@ def test_bulk_realtime_endpoints_are_not_exposed_and_route_ids_are_bounded() -> 
             f"/api/v1/atm_rt/vehicles/{'x' * 129}",
             headers=headers,
         ).status_code == 422
+
+
+def test_route_alert_endpoint_is_bounded_and_passes_direction_to_realtime_service() -> None:
+    alert = ServiceAlert(
+        alert_id="closure",
+        header_text="Servei interromput",
+        effect="NO_SERVICE",
+        affected_route_ids=["AMB_148"],
+    )
+    service = SimpleNamespace(get_cached_alerts_for_route=AsyncMock(return_value=[alert]))
+    app = FastAPI()
+    app.state.api_key = "test-api-key"
+    app.state.atm_rt_service = service
+    app.include_router(atm_router, prefix="/api/v1")
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/atm_rt/alerts/AMB_148",
+            params={"direction_id": 1},
+            headers={"X-API-Key": "test-api-key"},
+        )
+        invalid = client.get(
+            "/api/v1/atm_rt/alerts/AMB_148",
+            params={"direction_id": 2},
+            headers={"X-API-Key": "test-api-key"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()[0]["alert_id"] == "closure"
+    assert invalid.status_code == 422
+    service.get_cached_alerts_for_route.assert_awaited_once_with("AMB_148", 1)

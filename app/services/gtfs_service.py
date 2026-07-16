@@ -1436,7 +1436,11 @@ class GTFSService:
             ).hexdigest()
             stop_patterns_by_id.setdefault(stop_pattern_id, stop_pattern)
 
-            destination_name = trip.get("trip_headsign") or destination_stop_name
+            # ATM's trip_headsign can occasionally name the origin (B31 is a
+            # concrete example).  The last stop in the ordered stop_times is
+            # what the vehicle actually reaches, so it is the dependable
+            # direction label for both the selector and driver map.
+            destination_name = destination_stop_name or trip.get("trip_headsign")
             trip_meta = {
                 "trip_id": trip_id,
                 "route_id": route_id,
@@ -1582,8 +1586,8 @@ class GTFSService:
                 if direction_id in by_direction and by_direction[direction_id]:
                     continue
                 destination_name = (
-                    trip_meta.get("trip_headsign")
-                    or trip_meta.get("destination_stop_name")
+                    trip_meta.get("destination_stop_name")
+                    or trip_meta.get("trip_headsign")
                     or canonical.get("route_long_name", "")
                 )
                 by_direction[direction_id] = destination_name

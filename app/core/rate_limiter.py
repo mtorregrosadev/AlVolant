@@ -40,6 +40,11 @@ logger = get_logger(__name__)
 # Only the cheap process-liveness probe bypasses Redis. Readiness and docs are
 # rate-limited because they perform dependency work and must not be amplifiers.
 _EXEMPT_PATHS = frozenset({"/health"})
+# MapLibre cannot attach a private API-key header to a raster tile source.
+# These tiles are nevertheless bounded at the route handler to Catalonia and
+# fetched from a fixed provider; running the general API limiter on every
+# image would make a normal map pan exceed the 60 RPM API budget.
+_EXEMPT_PATH_PREFIXES = ("/maps/satellite/",)
 
 _KEY_PREFIX = "rl:"
 RateLimitDecision = Literal["allowed", "limited", "unavailable"]
@@ -65,7 +70,7 @@ class RateLimiterMiddleware(BaseHTTPMiddleware):
     ) -> Response:
         """Check rate limit before forwarding the request."""
         # Skip rate limiting for exempt paths
-        if request.url.path in _EXEMPT_PATHS:
+        if request.url.path in _EXEMPT_PATHS or request.url.path.startswith(_EXEMPT_PATH_PREFIXES):
             return await call_next(request)
 
         # Skip WebSocket upgrades (handled separately inside the WS handler)

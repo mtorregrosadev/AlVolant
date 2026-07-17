@@ -456,6 +456,10 @@ export interface TrafficSummary {
   road_closure: boolean;
 }
 
+export interface SatelliteAvailability {
+  available: boolean;
+}
+
 export type LiveWebSocketMessage =
   | { type: 'subscribed'; topics: string[] }
   | { type: 'unsubscribed'; topics: string[] }
@@ -766,6 +770,15 @@ export const apiService = {
       body: { latitude, longitude },
       signal,
     });
+  },
+
+  fetchSatelliteAvailability(signal?: AbortSignal): Promise<SatelliteAvailability> {
+    return requestJson<unknown>('/maps/satellite/status', {
+      reportTelemetry: false,
+      signal,
+    }).then((payload) => ({
+      available: isRecord(payload) && payload.available === true,
+    }));
   },
 
   connectWebSocket(onMessage?: (data: LiveWebSocketMessage) => void) {

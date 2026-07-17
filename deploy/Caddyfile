@@ -27,10 +27,41 @@ alvolant.duckdns.org {
 		-Server
 	}
 
-	reverse_proxy 127.0.0.1:8000 {
-		transport http {
-			dial_timeout 3s
-			response_header_timeout 30s
+	@map_tiles path /maps/tiles /maps/tiles/*
+	header @map_tiles Cache-Control "public, max-age=86400"
+	handle_path /maps/tiles/* {
+		reverse_proxy 127.0.0.1:3001
+	}
+
+	@map_styles path /maps/styles /maps/styles/*
+	header @map_styles Cache-Control "public, max-age=3600"
+	handle_path /maps/styles/* {
+		root * /Users/mtorregrosadev/.local/share/alvolant-maps/styles
+		file_server
+	}
+
+	# World Imagery is fetched only by the BFF for valid Catalonia tiles. Native
+	# raster sources cannot add the private ArcGIS key, so the key stays server-side.
+	handle /maps/satellite/* {
+		# During a local BFF restart, wait briefly for the loopback service instead
+		# of returning a transient 502 to MapLibre (which turns it into a LogBox
+		# error). GET tile requests are safe to retry.
+		reverse_proxy 127.0.0.1:8000 {
+			lb_try_duration 5s
+			lb_try_interval 250ms
+			transport http {
+				dial_timeout 1s
+				response_header_timeout 15s
+			}
+		}
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:8000 {
+			transport http {
+				dial_timeout 3s
+				response_header_timeout 30s
+			}
 		}
 	}
 }

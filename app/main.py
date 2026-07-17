@@ -38,6 +38,7 @@ from fastapi.responses import ORJSONResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api.health import router as health_router
+from app.api.satellite import router as satellite_router
 from app.api.v1.router import v1_router
 from app.cache.redis_manager import CacheManager
 from app.config import Settings, settings
@@ -49,6 +50,7 @@ from app.core.telemetry import TelemetryMiddleware
 from app.services.atm_rt_service import ATMRTService
 from app.services.gtfs_service import GTFSService
 from app.services.relief_matching_service import ReliefMatchingService
+from app.services.satellite_tile_service import SatelliteTileService
 from app.services.telemetry_service import TelemetryService
 from app.services.traffic_service import TrafficService
 from app.workers.atm_rt_worker import ATMRTWorker
@@ -113,6 +115,7 @@ def _resolve_runtime_settings(app_settings: Settings) -> Settings:
             32,
         ),
         ("TOMTOM_API_KEY", "TOMTOM_API_KEY_FILE", "TomTom API key secret", 1),
+        ("ARCGIS_API_KEY", "ARCGIS_API_KEY_FILE", "ArcGIS API key secret", 1),
     ):
         file_path = getattr(app_settings, file_field)
         if file_path:
@@ -162,24 +165,18 @@ def _validate_security_settings(
         errors.append("BFF_API_KEY must be a high-entropy value of at least 32 characters")
     if not _is_strong_runtime_secret(app_settings.RATE_LIMIT_HASH_KEY):
         errors.append("RATE_LIMIT_HASH_KEY must be a high-entropy server-only secret")
-    trusted_hosts = {
-        item.strip() for item in app_settings.TRUSTED_HOSTS.split(",") if item.strip()
-    }
+    trusted_hosts = {item.strip() for item in app_settings.TRUSTED_HOSTS.split(",") if item.strip()}
     if not trusted_hosts or "*" in trusted_hosts:
         errors.append("TRUSTED_HOSTS must be an explicit production allow-list")
     cors_origins = {
-        item.strip()
-        for item in app_settings.CORS_ALLOWED_ORIGINS.split(",")
-        if item.strip()
+        item.strip() for item in app_settings.CORS_ALLOWED_ORIGINS.split(",") if item.strip()
     }
     if "*" in cors_origins:
         errors.append("CORS_ALLOWED_ORIGINS cannot contain '*' in production")
     if app_settings.DOCS_ENABLED:
         errors.append("DOCS_ENABLED must be false in production")
     forwarded_allow_ips = [
-        item.strip()
-        for item in app_settings.FORWARDED_ALLOW_IPS.split(",")
-        if item.strip()
+        item.strip() for item in app_settings.FORWARDED_ALLOW_IPS.split(",") if item.strip()
     ]
     if not forwarded_allow_ips or "*" in forwarded_allow_ips:
         errors.append("FORWARDED_ALLOW_IPS must be an explicit trusted proxy allow-list")
@@ -329,6 +326,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await traffic_service.start()
     app.state.traffic_service = traffic_service
 
+    satellite_tile_service = SatelliteTileService(settings=runtime_settings, cache=cache)
+    await satellite_tile_service.start()
+    app.state.satellite_tile_service = satellite_tile_service
+
     # --- 3. Refresh Static GTFS Shapes ---
     # Keep startup fast: if Redis already has static GTFS data, serve it
     # immediately and avoid blocking the API with a heavy parse pass.
@@ -391,6 +392,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await atm_rt_service.close()
     await gtfs_service.close()
     await traffic_service.close()
+    await satellite_tile_service.close()
 
     # Flush diagnostics while Redis is still available.
     await telemetry.close()
@@ -473,4 +475,5 @@ register_exception_handlers(app)
 
 # --- Routers ---
 app.include_router(health_router)
+app.include_router(satellite_router)
 app.include_router(v1_router)

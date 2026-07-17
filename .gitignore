@@ -39,6 +39,9 @@ Thumbs.db
 data/*.zip
 data/*.txt
 data/*.csv
+*.osm.pbf
+*.mbtiles
+*.pmtiles
 !data/.gitkeep
 
 # Coverage

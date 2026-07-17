@@ -1,0 +1,18 @@
+listen_addresses: 127.0.0.1:3001
+base_path: /maps/tiles
+
+cache:
+  size_mb: 128
+  expiry: 2h
+  maxzoom: 16
+
+fonts:
+  paths:
+    - /Users/mtorregrosadev/.local/share/alvolant-maps/fonts
+  cache:
+    size_mb: 32
+
+pmtiles:
+  allow_http: false
+  sources:
+    catalunya: /Users/mtorregrosadev/.local/share/alvolant-maps/tiles/catalunya.pmtiles

@@ -1,0 +1,28 @@
+{
+  "version": 8,
+  "name": "AlVolant World Imagery",
+  "sources": {
+    "satellite": {
+      "type": "raster",
+      "tiles": [
+        "https://alvolant.duckdns.org/maps/satellite/{z}/{x}/{y}.jpg?source=esri-world-imagery-v1"
+      ],
+      "tileSize": 256,
+      "minzoom": 0,
+      "maxzoom": 20,
+      "attribution": "Esri, Maxar, Earthstar Geographics, and the GIS User Community"
+    }
+  },
+  "layers": [
+    {
+      "id": "satellite",
+      "type": "raster",
+      "source": "satellite",
+      "paint": {
+        "raster-saturation": -0.08,
+        "raster-contrast": 0.06,
+        "raster-fade-duration": 180
+      }
+    }
+  ]
+}

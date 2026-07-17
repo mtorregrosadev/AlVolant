@@ -74,9 +74,13 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------------------
     # ATM T-mobilitat Real-Time (GTFS-RT)
     # -------------------------------------------------------------------------
-    ATM_RT_TRIP_UPDATES_URL: str = "https://t-mobilitat.atm.cat/opendata/trip_updates/user/token/open"
+    ATM_RT_TRIP_UPDATES_URL: str = (
+        "https://t-mobilitat.atm.cat/opendata/trip_updates/user/token/open"
+    )
     ATM_RT_ALERTS_URL: str = "https://t-mobilitat.atm.cat/opendata/alerts/user/token/open"
-    ATM_RT_VEHICLE_POSITIONS_URL: str = "https://t-mobilitat.atm.cat/opendata/vehicle_positions/user/token/open"
+    ATM_RT_VEHICLE_POSITIONS_URL: str = (
+        "https://t-mobilitat.atm.cat/opendata/vehicle_positions/user/token/open"
+    )
     ATM_RT_POLL_INTERVAL_SECONDS: int = Field(default=30, ge=5, le=3_600)
 
     # -------------------------------------------------------------------------
@@ -96,6 +100,26 @@ class Settings(BaseSettings):
     # Stay inside TomTom's daily free allowance until usage justifies a paid budget.
     TRAFFIC_GLOBAL_REQUESTS_PER_DAY: int = Field(default=2_300, ge=1, le=1_000_000)
     TRAFFIC_PROVIDER_CIRCUIT_SECONDS: int = Field(default=60, ge=5, le=3_600)
+
+    # -------------------------------------------------------------------------
+    # Satellite basemap
+    # -------------------------------------------------------------------------
+    # The key is held by the BFF only.  The public tile endpoint proxies a
+    # fixed Esri World Imagery URL, so clients cannot recover this credential.
+    ARCGIS_API_KEY: str = ""
+    ARCGIS_API_KEY_FILE: str = ""
+    SATELLITE_TILES_ENABLED: bool = True
+    # Esri currently publishes World Imagery with max-age=86400.  Never keep
+    # the server or client cache beyond that upstream policy.
+    SATELLITE_TILE_CACHE_TTL_SECONDS: int = Field(default=86_400, ge=300, le=86_400)
+    SATELLITE_TILE_CACHE_ENTRIES: int = Field(default=512, ge=32, le=4_096)
+    # 50,000 cold upstream tiles/day is a conservative 1.55M maximum in a
+    # 31-day month, below Esri's 2M free basemap tile allowance. Cache hits
+    # never consume this budget; the higher minute cap avoids a normal map
+    # load tripping the safety guard before the day budget is relevant.
+    SATELLITE_GLOBAL_REQUESTS_PER_MINUTE: int = Field(default=600, ge=1, le=10_000)
+    SATELLITE_GLOBAL_REQUESTS_PER_DAY: int = Field(default=50_000, ge=1, le=2_000_000)
+    SATELLITE_PROVIDER_CIRCUIT_SECONDS: int = Field(default=3_600, ge=5, le=86_400)
 
     # -------------------------------------------------------------------------
     # Redis
@@ -141,6 +165,10 @@ class Settings(BaseSettings):
         if self.TRAFFIC_GLOBAL_REQUESTS_PER_MINUTE > self.TRAFFIC_GLOBAL_REQUESTS_PER_DAY:
             raise ValueError(
                 "TRAFFIC_GLOBAL_REQUESTS_PER_MINUTE cannot exceed the daily traffic limit"
+            )
+        if self.SATELLITE_GLOBAL_REQUESTS_PER_MINUTE > self.SATELLITE_GLOBAL_REQUESTS_PER_DAY:
+            raise ValueError(
+                "SATELLITE_GLOBAL_REQUESTS_PER_MINUTE cannot exceed the daily satellite limit"
             )
         return self
 

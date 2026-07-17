@@ -109,7 +109,7 @@ class RequestBodyLimitMiddleware:
 
 
 class SecurityHeadersMiddleware:
-    """Apply non-cacheable API and browser hardening headers."""
+    """Apply API hardening headers while permitting immutable public map tiles."""
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
@@ -122,12 +122,17 @@ class SecurityHeadersMiddleware:
         async def send_with_headers(message: Message) -> None:
             if message["type"] == "http.response.start":
                 security_headers = [
-                    (b"cache-control", b"no-store"),
                     (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
                     (b"referrer-policy", b"no-referrer"),
                     (b"x-content-type-options", b"nosniff"),
                     (b"x-frame-options", b"DENY"),
                 ]
+                # World Imagery has strict XYZ/bounding-box validation and is
+                # served through a fixed, server-authenticated upstream. It
+                # needs a cacheable response so each map pan does not spend a
+                # new provider tile request.
+                if not scope.get("path", "").startswith("/maps/satellite/"):
+                    security_headers.insert(0, (b"cache-control", b"no-store"))
                 protected_names = {name for name, _ in security_headers}
                 headers = [
                     (name, value)

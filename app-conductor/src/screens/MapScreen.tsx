@@ -19,6 +19,7 @@ import {
   GeoJSONSource,
   Layer,
   Marker,
+  VectorSource,
 } from '@maplibre/maplibre-react-native';
 import * as Location from 'expo-location';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
@@ -123,7 +124,7 @@ type RouteProjectionOptions = {
 };
 
 type MapScreenProps = NativeStackScreenProps<RootStackParamList, 'Map'>;
-type MapTheme = 'dark' | 'light';
+type MapTheme = 'dark' | 'light' | 'satellite';
 type MapViewMode = 'perspective' | 'topDown';
 type MapThemeOption = {
   labelKey: TranslationKey;
@@ -133,8 +134,10 @@ type MapThemeOption = {
 
 const MS_TO_KMH = 3.6;
 const MIN_MOVING_SPEED_KMH = 3;
+const MAX_JOURNEY_STOP_MARKERS = 9;
 const FALLBACK_CITY_SPEED_KMH = 18;
 const TRAFFIC_REFRESH_INTERVAL_MS = 120_000;
+const SATELLITE_STATUS_REFRESH_INTERVAL_MS = 300_000;
 const LIVE_REFRESH_MIN_INTERVAL_MS = 60_000;
 const LIVE_REFRESH_JITTER_MS = 5_000;
 const LIVE_RECONNECT_MAX_MS = 30_000;
@@ -475,6 +478,41 @@ function extractRouteCoordinates(routeFeature: any): Coordinate[] {
     .filter((coordinate): coordinate is Coordinate => Boolean(coordinate));
 }
 
+/**
+ * Keep satellite imagery close to the active service. MapLibre loads raster
+ * tiles for its viewport, so restricting the camera centre is the reliable
+ * way to avoid fetching a whole city just because a driver pans around.
+ */
+function satelliteRouteBounds(coordinates: Coordinate[]): [number, number, number, number] | undefined {
+  if (!coordinates.length) return undefined;
+
+  let west = Number.POSITIVE_INFINITY;
+  let south = Number.POSITIVE_INFINITY;
+  let east = Number.NEGATIVE_INFINITY;
+  let north = Number.NEGATIVE_INFINITY;
+
+  for (const [longitude, latitude] of coordinates) {
+    west = Math.min(west, longitude);
+    south = Math.min(south, latitude);
+    east = Math.max(east, longitude);
+    north = Math.max(north, latitude);
+  }
+
+  const centreLatitude = (south + north) / 2;
+  // 2.5 km leaves enough room to inspect a diversion or the next stops while
+  // still making an accidental pan across Barcelona impossible in satellite.
+  const latitudeMargin = 2_500 / 111_320;
+  const longitudeMargin = 2_500 / (
+    111_320 * Math.max(Math.cos(centreLatitude * Math.PI / 180), 0.2)
+  );
+  return [
+    west - longitudeMargin,
+    south - latitudeMargin,
+    east + longitudeMargin,
+    north + latitudeMargin,
+  ];
+}
+
 function extractStopsOnRoute(stopsFeature: any, routeCoordinates: Coordinate[]): RouteStopInfo[] {
   const features = stopsFeature?.features;
   if (!Array.isArray(features)) {
@@ -601,12 +639,20 @@ const MAP_THEME_OPTIONS: Record<MapTheme, MapThemeOption> = {
   dark: {
     labelKey: 'map.dark',
     icon: 'weather-night',
-    style: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+    style: 'https://alvolant.duckdns.org/maps/styles/dark.json',
   },
   light: {
     labelKey: 'map.light',
     icon: 'white-balance-sunny',
-    style: 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json',
+    style: 'https://alvolant.duckdns.org/maps/styles/light.json',
+  },
+  satellite: {
+    labelKey: 'map.satellite',
+    icon: 'satellite-variant',
+    // Revision is intentional: native MapLibre keeps style documents in its
+    // HTTP cache. It prevents an installed development build from retaining
+    // the previous EOX source after this provider migration.
+    style: 'https://alvolant.duckdns.org/maps/styles/satellite-esri.json?rev=2',
   },
 };
 
@@ -618,8 +664,10 @@ const MAP_THEME_OPTIONS: Record<MapTheme, MapThemeOption> = {
 const MAP_THEME_TRANSITION_COLORS: Record<MapTheme, string> = {
   dark: '#0B1118',
   light: '#F4F1E9',
+  satellite: '#273326',
 };
 const MAP_THEME_TRANSITION_MAX_MS = 1_200;
+const SATELLITE_MIN_ZOOM = 14;
 
 export default function MapScreen({ route, navigation }: MapScreenProps) {
   const { routeId, directionId, assignedVehicle, tripId, directionLabel } = route.params;
@@ -674,6 +722,8 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const [vehiclePositions, setVehiclePositions] = useState<VehiclePosition[]>([]);
   const [serviceAlerts, setServiceAlerts] = useState<ServiceAlert[]>([]);
   const [trafficSummary, setTrafficSummary] = useState<TrafficSummary | null>(null);
+  const [satelliteAvailable, setSatelliteAvailable] = useState(true);
+  const satelliteAvailabilityControllerRef = useRef<AbortController | null>(null);
   const [isServiceAlertModalVisible, setIsServiceAlertModalVisible] = useState(false);
   const [isServiceAlertTabDismissed, setIsServiceAlertTabDismissed] = useState(false);
   const [mapTheme, setMapTheme] = useState<MapTheme>('dark');
@@ -712,10 +762,34 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const userCoords = gpsFix?.coordinate ?? null;
   const userSpeedKmh = gpsFix?.speedKmh ?? null;
   const displayCoords = visualPose?.coordinate ?? null;
+  const assignedVehicleCoordinate = React.useMemo<Coordinate | null>(() => {
+    const vehicle = assignedVehicle
+      ? vehiclePositions.find((candidate) => candidate.vehicle_id === assignedVehicle)
+      : vehiclePositions.find((candidate) => candidate.trip_id === tripId);
+    if (!vehicle || !Number.isFinite(vehicle.latitude) || !Number.isFinite(vehicle.longitude)) {
+      return null;
+    }
+    return [vehicle.longitude, vehicle.latitude];
+  }, [assignedVehicle, tripId, vehiclePositions]);
+  const routeTrafficFallbackCoordinate = React.useMemo<Coordinate | null>(() => (
+    extractRouteCoordinates(routeFeature)[0] ?? null
+  ), [routeFeature]);
   // GPS is available before the visual route marker during initial map
-  // settling, so use it as a safe fallback for the first traffic lookup.
-  const trafficCoordinate = displayCoords ?? userCoords;
+  // settling. When neither has arrived yet, use the assigned bus's public
+  // live position. As a final first-render fallback, sample the first route
+  // segment; a real position always replaces it as soon as one is available.
+  const trafficCoordinate = displayCoords
+    ?? userCoords
+    ?? assignedVehicleCoordinate
+    ?? routeTrafficFallbackCoordinate;
   displayCoordsRef.current = trafficCoordinate;
+  // Use an approximately 1 km cell as the client-side refresh key. This
+  // immediately replaces a simulator/device's previous location when the
+  // vehicle joins the route, without starting a new request for every GPS
+  // point while driving. The BFF still uses its finer, 100 m cache grid.
+  const trafficLookupCell = trafficCoordinate
+    ? `${isSimulating ? 'simulation' : 'live'}:${Math.round(trafficCoordinate[1] * 100)},${Math.round(trafficCoordinate[0] * 100)}`
+    : null;
   // Simulations make one immediate lookup so the integration can be checked;
   // active real navigation refreshes the result on the bounded interval below.
   const shouldFetchTraffic = !loading
@@ -774,7 +848,32 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
       if (refreshTimer) clearInterval(refreshTimer);
       controller?.abort();
     };
-  }, [directionId, isSimulating, routeId, shouldFetchTraffic, tripId]);
+  }, [directionId, isSimulating, routeId, shouldFetchTraffic, trafficLookupCell, tripId]);
+
+  const refreshSatelliteAvailability = React.useCallback(() => {
+    satelliteAvailabilityControllerRef.current?.abort();
+    const requestController = new AbortController();
+    satelliteAvailabilityControllerRef.current = requestController;
+    void apiService.fetchSatelliteAvailability(requestController.signal)
+      .then((status) => {
+        if (!requestController.signal.aborted) setSatelliteAvailable(status.available);
+      })
+      .catch(() => {
+        // Keep the last known state during an ordinary network interruption.
+      });
+  }, []);
+
+  useEffect(() => {
+    refreshSatelliteAvailability();
+    const refreshTimer = setInterval(
+      refreshSatelliteAvailability,
+      SATELLITE_STATUS_REFRESH_INTERVAL_MS,
+    );
+    return () => {
+      clearInterval(refreshTimer);
+      satelliteAvailabilityControllerRef.current?.abort();
+    };
+  }, [refreshSatelliteAvailability]);
 
   const directionName = React.useMemo(() => {
     if (directionLabel) {
@@ -824,15 +923,24 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const mapSafeLeft = Math.max(insets.left + 12, 12);
   const mapSafeRight = Math.max(insets.right + 12, 12);
   const portraitDriverPanelHeight = Math.max(164, Math.round(viewportHeight * 0.25));
-  const standardBuildingOpacity = usesLightChrome ? 0.78 : 0.68;
+  const satelliteBuildings = mapTheme === 'satellite';
+  // Satellite imagery needs a little more contrast than the vector basemap:
+  // this keeps the footprint visible without hiding the road context below.
+  const standardBuildingOpacity = satelliteBuildings ? 0.5 : usesLightChrome ? 0.52 : 0.68;
   const buildingExtrusionPaint = React.useMemo(() => ({
-    'fill-extrusion-color': usesLightChrome ? '#94A3B8' : '#334155',
-    'fill-extrusion-height': ['coalesce', ['get', 'render_height'], 8],
+    'fill-extrusion-color': satelliteBuildings ? '#DCE8F4' : usesLightChrome ? '#FFFFFF' : '#334155',
+    'fill-extrusion-height': satelliteBuildings
+      ? ['*', ['coalesce', ['get', 'render_height'], 8], 1.25]
+      : ['coalesce', ['get', 'render_height'], 8],
     'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], 0],
     'fill-extrusion-opacity': standardBuildingOpacity,
     'fill-extrusion-vertical-gradient': true,
-  }), [standardBuildingOpacity, usesLightChrome]);
+  }), [satelliteBuildings, standardBuildingOpacity, usesLightChrome]);
   const routeCoordinates = React.useMemo(() => extractRouteCoordinates(routeFeature), [routeFeature]);
+  const satelliteCameraBounds = React.useMemo(
+    () => satelliteRouteBounds(routeCoordinates),
+    [routeCoordinates],
+  );
   const routePath = React.useMemo(() => buildRoutePath(routeCoordinates), [routeCoordinates]);
   const routeSource = React.useMemo(() => routeFeature
     ? {
@@ -913,7 +1021,11 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
           : trafficSummary?.status === 'closed'
             ? 'map.trafficClosed'
             : null;
-  const trafficStatusLabel = trafficStatusKey ? t(trafficStatusKey) : null;
+  const trafficStatusLabel = trafficStatusKey
+    ? t(trafficStatusKey)
+    : trafficSummary?.status !== 'unavailable'
+      ? trafficSummary?.label ?? null
+      : null;
   const effectiveSpeedKmh = trafficSpeedKmh
     ?? (currentSpeedKmh !== null && currentSpeedKmh > MIN_MOVING_SPEED_KMH
       ? currentSpeedKmh
@@ -954,6 +1066,37 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
       isFollowing: stop === followingStop,
     }];
   }), [currentRouteProgress, followingStop, nextStop, routePath.totalDistance, stopsOnRoute]);
+  const visibleJourneyStops = React.useMemo(() => {
+    if (journeyStops.length <= MAX_JOURNEY_STOP_MARKERS) {
+      return journeyStops;
+    }
+
+    // A route can contain dozens of stops. The rail is a quick progress
+    // indicator, not a miniature timetable: keep the imminent stops and a
+    // small, evenly-spaced sample of the rest so it stays readable.
+    const selected = new globalThis.Map<string, (typeof journeyStops)[number]>();
+    const add = (stop: (typeof journeyStops)[number] | undefined) => {
+      if (stop && selected.size < MAX_JOURNEY_STOP_MARKERS) {
+        selected.set(stop.key, stop);
+      }
+    };
+
+    journeyStops.filter((stop) => stop.isNext || stop.isFollowing).forEach(add);
+    const remainingSlots = MAX_JOURNEY_STOP_MARKERS - selected.size;
+    const candidates = journeyStops.length > 2 ? journeyStops.slice(1, -1) : journeyStops;
+
+    for (let index = 0; index < remainingSlots; index += 1) {
+      const candidateIndex = Math.round(
+        ((index + 1) / (remainingSlots + 1)) * (candidates.length - 1),
+      );
+      add(candidates[candidateIndex]);
+    }
+
+    // Rounding can select the same stop twice on shorter routes. Fill the
+    // remaining slots deterministically rather than showing a sparse rail.
+    candidates.forEach(add);
+    return [...selected.values()].sort((first, second) => first.progress - second.progress);
+  }, [journeyStops]);
   const liveActivityProps = React.useMemo<RouteLiveActivityProps>(() => {
     const updatedAtEpochMs = Date.now();
     const hasValidEta = nextStopEtaMinutes !== null
@@ -1988,6 +2131,9 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   };
 
   const handleMapThemeChange = (theme: MapTheme) => {
+    if (theme === 'satellite' && !satelliteAvailable) {
+      return;
+    }
     setIsMapThemePickerOpen(false);
 
     const currentTarget = mapThemeTransitionTargetRef.current;
@@ -2156,7 +2302,9 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
         {initialCameraCenter ? (
           <Camera
             ref={cameraRef}
+            minZoom={mapTheme === 'satellite' ? SATELLITE_MIN_ZOOM : undefined}
             maxZoom={22}
+            maxBounds={mapTheme === 'satellite' ? satelliteCameraBounds : undefined}
             initialViewState={{
               center: initialCameraCenter,
               zoom: 14,
@@ -2173,15 +2321,32 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
           />
         ) : null}
 
-        {preferences.buildings3dEnabled ? (
+        {preferences.buildings3dEnabled && mapTheme !== 'satellite' ? (
           <Layer
             id="routeBuildings3d"
             type="fill-extrusion"
-            source="carto"
+            source="openmaptiles"
             source-layer="building"
             minzoom={15}
             paint={buildingExtrusionPaint as any}
           />
+        ) : null}
+
+        {preferences.buildings3dEnabled && mapTheme === 'satellite' ? (
+          <VectorSource
+            id="satelliteBuildings"
+            url="https://alvolant.duckdns.org/maps/tiles/catalunya"
+            minzoom={0}
+            maxzoom={15}
+          >
+            <Layer
+              id="satelliteBuildings3d"
+              type="fill-extrusion"
+              source-layer="building"
+              minzoom={15}
+              paint={buildingExtrusionPaint as any}
+            />
+          </VectorSource>
         ) : null}
 
         {/* The marker uses a route bearing whenever the vehicle is snapped, so
@@ -2339,6 +2504,24 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
         ) : null}
       </Map>
 
+      <View
+        pointerEvents="none"
+        style={[
+          styles.mapDataAttribution,
+          {
+            bottom: mapOrnamentBottom + 22,
+            left: mapSafeLeft,
+            backgroundColor: usesLightChrome ? 'rgba(255,255,255,0.86)' : 'rgba(8,15,26,0.82)',
+          },
+        ]}
+      >
+        <Text style={[styles.mapDataAttributionText, { color: usesLightChrome ? '#334155' : '#D7E1EE' }]}>
+          {mapTheme === 'satellite'
+            ? 'Esri, Maxar, Earthstar Geographics, GIS User Community'
+            : '© OpenMapTiles · © OpenStreetMap contributors'}
+        </Text>
+      </View>
+
       <Animated.View
         style={[
           styles.mapThemeTransitionVeil,
@@ -2408,6 +2591,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
             {(Object.keys(MAP_THEME_OPTIONS) as MapTheme[]).map((theme) => {
               const option = MAP_THEME_OPTIONS[theme];
               const isActive = theme === (pendingMapTheme ?? mapTheme);
+              const isUnavailable = theme === 'satellite' && !satelliteAvailable;
 
               return (
                 <TouchableOpacity
@@ -2415,15 +2599,18 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
                   style={[
                     styles.mapThemeOption,
                     isActive && styles.mapThemeOptionActive,
+                    isUnavailable && styles.mapThemeOptionUnavailable,
                   ]}
                   onPress={() => handleMapThemeChange(theme)}
+                  disabled={isUnavailable}
                   accessibilityRole="button"
                   accessibilityLabel={t('map.themeA11y', { theme: t(option.labelKey) })}
+                  accessibilityState={{ disabled: isUnavailable, selected: isActive }}
                 >
                   <MaterialCommunityIcons
                     name={option.icon}
                     size={18}
-                    color={isActive ? '#FFFFFF' : chromeTextColor}
+                    color={isUnavailable ? '#94A3B8' : isActive ? '#FFFFFF' : chromeTextColor}
                   />
                 </TouchableOpacity>
               );
@@ -2433,7 +2620,10 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
         {!isMapThemePickerOpen ? (
           <TouchableOpacity
             style={[styles.mapThemeTrigger, usesLightChrome && styles.mapChromeLight]}
-            onPress={() => setIsMapThemePickerOpen(true)}
+            onPress={() => {
+              refreshSatelliteAvailability();
+              setIsMapThemePickerOpen(true);
+            }}
             accessibilityRole="button"
             accessibilityLabel={t('map.changeTheme')}
           >
@@ -2578,6 +2768,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
       <View style={[
         styles.driverPanel,
         usesLightChrome && styles.mapChromeLight,
+        usesLightChrome && styles.driverPanelLight,
         !isLandscape && styles.driverPanelPortrait,
         isLandscape && styles.driverPanelLandscape,
         {
@@ -2644,14 +2835,18 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
                 </View>
               ) : null}
               <View style={styles.driverJourneyRail}>
-                <View style={styles.driverJourneyTrack} />
+                <View style={[
+                  styles.driverJourneyTrack,
+                  usesLightChrome && styles.driverJourneyTrackLight,
+                ]} />
                 <View style={[styles.driverJourneyProgress, { width: `${Math.max(2, routeProgressPercent)}%` }]} />
                 <View style={styles.driverJourneyStart} />
-                {journeyStops.map((stop) => (
+                {visibleJourneyStops.map((stop) => (
                   <View
                     key={stop.key}
                     style={[
                       styles.driverJourneyStop,
+                      usesLightChrome && styles.driverJourneyStopLight,
                       stop.isPassed && styles.driverJourneyStopPassed,
                       stop.isNext && styles.driverJourneyStopNext,
                       stop.isFollowing && styles.driverJourneyStopFollowing,
@@ -2660,7 +2855,10 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
                   />
                 ))}
                 <View style={[styles.driverJourneyVehicle, { left: `${Math.min(96, Math.max(2, routeProgressPercent))}%` }]} />
-                <View style={styles.driverJourneyEnd} />
+                <View style={[
+                  styles.driverJourneyEnd,
+                  usesLightChrome && styles.driverJourneyEndLight,
+                ]} />
               </View>
               {nextStop ? (
                 <View style={styles.driverUpcomingStops}>
@@ -2689,6 +2887,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
 
           <View style={[
             styles.driverStatusRow,
+            usesLightChrome && styles.driverStatusRowLight,
             !isLandscape && styles.driverStatusRowPortrait,
             isLandscape && styles.driverStatusRowLandscape,
           ]}>
@@ -2698,6 +2897,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
                 style={[
                   styles.driverMetric,
                   index > 0 && styles.driverMetricWithDivider,
+                  index > 0 && usesLightChrome && styles.driverMetricWithDividerLight,
                   isLandscape && styles.driverMetricLandscape,
                 ]}
               >
@@ -2747,6 +2947,16 @@ const styles = StyleSheet.create({
   },
   map: {
     flex: 1,
+  },
+  mapDataAttribution: {
+    position: 'absolute',
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  mapDataAttributionText: {
+    fontSize: 8,
+    fontWeight: '600',
   },
   mapThemeTransitionVeil: {
     position: 'absolute',
@@ -3023,6 +3233,9 @@ const styles = StyleSheet.create({
   mapThemeOptionActive: {
     backgroundColor: colors.primary,
   },
+  mapThemeOptionUnavailable: {
+    opacity: 0.45,
+  },
   mapThemeTrigger: {
     width: 46,
     height: 46,
@@ -3064,6 +3277,12 @@ const styles = StyleSheet.create({
     shadowRadius: 16,
     shadowOffset: { width: 0, height: 8 },
     elevation: 12,
+  },
+  driverPanelLight: {
+    backgroundColor: '#F7FBF9',
+    borderColor: '#CFE2D9',
+    shadowColor: '#24584B',
+    shadowOpacity: 0.2,
   },
   driverPanelLandscape: {
     left: 18,
@@ -3125,6 +3344,9 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     backgroundColor: 'rgba(255,255,255,0.15)',
   },
+  driverJourneyTrackLight: {
+    backgroundColor: '#C9DED5',
+  },
   driverJourneyProgress: {
     position: 'absolute',
     left: 0,
@@ -3138,7 +3360,10 @@ const styles = StyleSheet.create({
     height: 4,
     marginLeft: -2,
     borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.45)',
+    backgroundColor: '#65A997',
+  },
+  driverJourneyStopLight: {
+    backgroundColor: '#318470',
   },
   driverJourneyStopPassed: {
     backgroundColor: colors.primary,
@@ -3148,14 +3373,14 @@ const styles = StyleSheet.create({
     height: 8,
     marginLeft: -4,
     borderWidth: 2,
-    borderColor: colors.primary,
-    backgroundColor: '#FFFFFF',
+    borderColor: '#FFFFFF',
+    backgroundColor: colors.primary,
   },
   driverJourneyStopFollowing: {
     width: 6,
     height: 6,
     marginLeft: -3,
-    backgroundColor: '#A7F3D0',
+    backgroundColor: '#65A997',
   },
   driverJourneyStart: {
     position: 'absolute',
@@ -3184,6 +3409,9 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: colors.primary,
     backgroundColor: 'rgba(8, 21, 39, 0.93)',
+  },
+  driverJourneyEndLight: {
+    backgroundColor: '#F7FBF9',
   },
   driverUpcomingStops: {
     flexDirection: 'row',
@@ -3253,7 +3481,7 @@ const styles = StyleSheet.create({
   },
   driverEtaPillWithTraffic: {
     height: 42,
-    minWidth: 108,
+    minWidth: 114,
     paddingHorizontal: 9,
     flexDirection: 'column',
     gap: 0,
@@ -3264,10 +3492,10 @@ const styles = StyleSheet.create({
     gap: 5,
   },
   driverTrafficStatusText: {
-    maxWidth: 112,
+    maxWidth: 120,
     color: '#FFFFFF',
-    fontSize: 9,
-    lineHeight: 11,
+    fontSize: 10,
+    lineHeight: 12,
     fontWeight: '900',
   },
   driverEtaText: {
@@ -3286,6 +3514,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.08)',
     backgroundColor: 'rgba(255,255,255,0.07)',
+  },
+  driverStatusRowLight: {
+    borderColor: '#D8E8E1',
+    backgroundColor: '#EBF4F0',
   },
   driverStatusRowLandscape: {
     flex: 0,
@@ -3315,6 +3547,9 @@ const styles = StyleSheet.create({
   driverMetricWithDivider: {
     borderLeftWidth: StyleSheet.hairlineWidth,
     borderLeftColor: 'rgba(255,255,255,0.12)',
+  },
+  driverMetricWithDividerLight: {
+    borderLeftColor: '#D1E4DB',
   },
   driverMetricText: {
     fontSize: 12,

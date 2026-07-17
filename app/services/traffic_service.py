@@ -36,11 +36,14 @@ _DISTRIBUTED_LOOKUP_LOCK_SECONDS = 10
 _DISTRIBUTED_LOOKUP_WAIT_SECONDS = 7
 _DISTRIBUTED_LOOKUP_POLL_SECONDS = 0.2
 _ALLOWED_TOMTOM_HOSTS = frozenset({"api.tomtom.com"})
-_MAX_RESPONSE_BYTES = 128 * 1024
+# TomTom flow responses include the full geometry of the matched road. A
+# legitimate segment in Catalonia can contain several thousand coordinates
+# (~222 KiB decoded), so keep a bounded but practical ceiling.
+_MAX_RESPONSE_BYTES = 512 * 1024
 _TRAFFIC_QUOTA_MINUTE_PREFIX = "rl:traffic:minute"
 _TRAFFIC_QUOTA_DAY_PREFIX = "rl:traffic:day"
 _TRAFFIC_CIRCUIT_KEY = "rl:traffic:circuit"
-_TRAFFIC_SUMMARY_PREFIX = "traffic:summary"
+_TRAFFIC_SUMMARY_PREFIX = "traffic:summary:v2"
 _TRAFFIC_LOOKUP_LOCK_PREFIX = "traffic:lookup-lock"
 
 

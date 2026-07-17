@@ -175,6 +175,7 @@ class TMBIbusService:
                 route_id=route_id,
                 trip_id=trip_id,
                 direction_id=direction_id,
+                current_stop_id=stop_id,
                 contexts=contexts,
                 scheduled_departure_epoch=scheduled_departure_epoch,
                 now_epoch=int(time.time()),
@@ -190,6 +191,19 @@ class TMBIbusService:
         reference_index: int | None = None
         schedule_matched = False
         downstream: list[tuple[dict[str, Any], list[_StopPrediction]]] = []
+        full_route_scan = False
+        route_scan_contexts = contexts[1:]
+        # iBus exposes arrivals per stop rather than a route-wide vehicle
+        # feed.  A scan only from the driver's current stop to the terminus
+        # can never find the service that left the origin behind them.  For a
+        # selected TMB trip, sample the complete static pattern every N stops;
+        # the result is shared by the static route fingerprint and protected by
+        # the global provider budget.
+        if trip_id and not can_use_amb_rt:
+            full_contexts = await self._get_full_tmb_route_scan_contexts(route_id, trip_id)
+            if full_contexts:
+                route_scan_contexts = full_contexts
+                full_route_scan = True
         if scheduled_departure_epoch is not None:
             scheduled_offset_seconds = _bounded_int(
                 context.get("scheduled_offset_seconds"),
@@ -200,25 +214,49 @@ class TMBIbusService:
                 expected_arrival_epoch = scheduled_departure_epoch + scheduled_offset_seconds
                 downstream = await self._get_downstream_route_scan(
                     context,
-                    contexts[1:],
+                    route_scan_contexts,
                     now_epoch,
                 )
+                correlation_scan = [
+                    item for item in downstream
+                    if item[0].get("stop_id") != context.get("stop_id")
+                ]
                 reference_index = _find_multistop_reference_prediction(
                     candidates,
                     expected_arrival_epoch,
                     scheduled_departure_epoch,
-                    downstream,
+                    correlation_scan,
                 )
                 schedule_matched = reference_index is not None
 
+        route_position_observations = [(context, candidates), *downstream]
+        if full_route_scan:
+            # The current stop may also be one of the every-other-stop samples.
+            # Keep the direct, fresh lookup once so it cannot be interpreted as
+            # a second physical bus.
+            seen_stop_ids = {str(context.get("stop_id", ""))}
+            route_position_observations = [
+                (context, candidates),
+                *[
+                    item
+                    for item in downstream
+                    if str(item[0].get("stop_id", "")) not in seen_stop_ids
+                ],
+            ]
         route_position_data = _find_route_positions(
-            [(context, candidates), *downstream],
+            route_position_observations,
             scheduled_departure_epoch,
             now_epoch,
         )
         public_route_positions = self._to_route_positions(route_position_data, now_epoch)
+        current_stop_sequence = _bounded_int(context.get("stop_sequence"), 0, 10_000)
+        future_downstream = [
+            item for item in downstream
+            if current_stop_sequence is None
+            or (_bounded_int(item[0].get("stop_sequence"), 0, 10_000) or -1) > current_stop_sequence
+        ]
         ahead_position = _find_downstream_ahead_position(
-            downstream,
+            future_downstream,
             scheduled_departure_epoch,
             now_epoch,
         ) or next(
@@ -269,6 +307,27 @@ class TMBIbusService:
             if reference_index + 1 < len(candidates)
             else None
         )
+        inferred_ahead, inferred_behind = _find_inferred_adjacent_predictions(
+            route_position_observations,
+            reference_arrival_epoch=reference.arrival_epoch,
+            reference_stop_offset_seconds=_bounded_int(
+                context.get("scheduled_offset_seconds"),
+                -1,
+                86_400,
+            ),
+        )
+        resolved_ahead = ahead or (inferred_ahead[1] if inferred_ahead else None)
+        resolved_behind = behind or (inferred_behind[1] if inferred_behind else None)
+        inferred_ahead_gap = (
+            inferred_ahead[2]
+            if ahead is None and inferred_ahead is not None
+            else None
+        )
+        inferred_behind_gap = (
+            inferred_behind[2]
+            if behind is None and inferred_behind is not None
+            else None
+        )
         return IbusFleetSummary(
             status="available",
             stop_id=stop_id,
@@ -277,8 +336,16 @@ class TMBIbusService:
             reference_arrival_epoch=reference.arrival_epoch,
             reference_prediction=self._to_public_prediction(reference, now_epoch),
             reference_is_schedule_match=schedule_matched,
-            ahead_vehicle=self._to_public_prediction(ahead, now_epoch),
-            behind_vehicle=self._to_public_prediction(behind, now_epoch),
+            ahead_vehicle=self._to_public_prediction(resolved_ahead, now_epoch),
+            behind_vehicle=self._to_public_prediction(resolved_behind, now_epoch),
+            ahead_gap_seconds=(
+                max(0, reference.arrival_epoch - ahead.arrival_epoch)
+                if ahead is not None else inferred_ahead_gap
+            ),
+            behind_gap_seconds=(
+                max(0, behind.arrival_epoch - reference.arrival_epoch)
+                if behind is not None else inferred_behind_gap
+            ),
             ahead_position=public_ahead_position,
             route_positions=public_route_positions,
         )
@@ -295,6 +362,19 @@ class TMBIbusService:
     ) -> list[dict[str, Any]]:
         if trip_id:
             if include_downstream:
+                if full_pattern:
+                    get_full_contexts = getattr(self._gtfs_service, "get_full_trip_stop_contexts", None)
+                    if callable(get_full_contexts):
+                        contexts = await get_full_contexts(
+                            route_id,
+                            trip_id,
+                            max_stops=128,
+                            stop_stride=1,
+                        )
+                        if isinstance(contexts, list) and contexts and all(
+                            isinstance(context, dict) for context in contexts
+                        ):
+                            return contexts
                 get_contexts = getattr(self._gtfs_service, "get_trip_stop_contexts", None)
                 if callable(get_contexts):
                     contexts = await get_contexts(
@@ -314,12 +394,34 @@ class TMBIbusService:
         context = await self._gtfs_service.get_route_stop_context(route_id, direction_id, stop_id)
         return [context] if isinstance(context, dict) else []
 
+    async def _get_full_tmb_route_scan_contexts(
+        self,
+        route_id: str,
+        trip_id: str,
+    ) -> list[dict[str, Any]]:
+        """Return a bounded every-other-stop TMB radar pattern for one trip."""
+        get_full_contexts = getattr(self._gtfs_service, "get_full_trip_stop_contexts", None)
+        if not callable(get_full_contexts):
+            return []
+        contexts = await get_full_contexts(
+            route_id,
+            trip_id,
+            max_stops=self._settings.TMB_IBUS_ROUTE_SCAN_MAX_STOPS,
+            stop_stride=self._settings.TMB_IBUS_STOP_STRIDE,
+        )
+        if not isinstance(contexts, list) or not contexts or not all(
+            isinstance(context, dict) for context in contexts
+        ):
+            return []
+        return contexts
+
     async def _get_amb_fleet_summary(
         self,
         *,
         route_id: str,
         trip_id: str | None,
         direction_id: int,
+        current_stop_id: str,
         contexts: list[dict[str, Any]],
         scheduled_departure_epoch: int | None,
         now_epoch: int,
@@ -368,9 +470,13 @@ class TMBIbusService:
             for context in contexts
             if isinstance(context.get("stop_id"), str)
         }
-        current_stop_id = str(contexts[0].get("stop_id", ""))
-        positioned: list[tuple[dict[str, Any], _StopPrediction, Literal["ahead", "behind"]]] = []
+        current_context = contexts_by_stop.get(current_stop_id, contexts[0])
+        positioned: list[
+            tuple[dict[str, Any], _StopPrediction, Literal["ahead", "behind"], int | None]
+        ] = []
         own_observation: tuple[dict[str, Any], _StopPrediction] | None = None
+        own_representative_start: int | None = None
+        observed_services: list[tuple[dict[str, Any], _StopPrediction, int | None]] = []
 
         for item, item_meta in selected:
             observations: list[tuple[dict[str, Any], _StopPrediction]] = []
@@ -418,7 +524,17 @@ class TMBIbusService:
                     or marker_prediction.arrival_epoch < own_observation[1].arrival_epoch
                 ):
                     own_observation = (marker_context, marker_prediction)
+                    own_representative_start = representative_start
                 continue
+
+            observed_services.append((marker_context, marker_prediction, representative_start))
+
+        # Once the driver's live service is available, compare every other
+        # service against that live inferred journey start. This preserves the
+        # useful scheduled fallback during a temporary feed gap, while making
+        # ahead/behind resilient to a late or early selected departure.
+        reference_start = own_representative_start or scheduled_departure_epoch
+        for marker_context, marker_prediction, representative_start in observed_services:
 
             # AMB gives us stop-arrival predictions, not vehicle GPS.  A
             # different live trip whose first upcoming stop is the driver's
@@ -429,18 +545,22 @@ class TMBIbusService:
             if str(marker_context.get("stop_id", "")) == current_stop_id:
                 continue
 
-            if scheduled_departure_epoch is None or representative_start is None:
+            if reference_start is None or representative_start is None:
                 relation: Literal["ahead", "behind"] = "ahead"
             else:
-                gap_seconds = representative_start - scheduled_departure_epoch
+                gap_seconds = representative_start - reference_start
                 if abs(gap_seconds) < _AHEAD_POSITION_MIN_LEAD_SECONDS:
-                    # Same scheduled service, but the provider may omit a
+                    # Same live journey start, but the provider may omit a
                     # trip suffix in rare responses. Never duplicate the
                     # driver's marker on the journey rail.
-                    own_observation = (marker_context, marker_prediction)
                     continue
                 relation = "ahead" if gap_seconds < 0 else "behind"
-            positioned.append((marker_context, marker_prediction, relation))
+            live_gap_seconds = (
+                abs(representative_start - reference_start)
+                if own_representative_start is not None and representative_start is not None
+                else None
+            )
+            positioned.append((marker_context, marker_prediction, relation, live_gap_seconds))
 
         positioned.sort(
             key=lambda value: (
@@ -448,15 +568,18 @@ class TMBIbusService:
                 value[1].arrival_epoch,
             ),
         )
-        public_positions = self._to_route_positions(positioned[:_MAX_ROUTE_POSITIONS], now_epoch)
+        public_positions = self._to_route_positions(
+            [(context, prediction, relation) for context, prediction, relation, _gap in positioned[:_MAX_ROUTE_POSITIONS]],
+            now_epoch,
+        )
         ahead_observations = [
-            (context, prediction)
-            for context, prediction, relation in positioned
+            (context, prediction, gap)
+            for context, prediction, relation, gap in positioned
             if relation == "ahead"
         ]
         behind_observations = [
-            (context, prediction)
-            for context, prediction, relation in positioned
+            (context, prediction, gap)
+            for context, prediction, relation, gap in positioned
             if relation == "behind"
         ]
         # The HUD describes the *nearest* bus in each direction, whereas the
@@ -476,7 +599,7 @@ class TMBIbusService:
         )
         reference = own_observation or (
             min(
-                ((context, prediction) for context, prediction, _relation in positioned),
+                ((context, prediction) for context, prediction, _relation, _gap in positioned),
                 key=lambda value: value[1].arrival_epoch,
                 default=None,
             )
@@ -488,8 +611,8 @@ class TMBIbusService:
         return IbusFleetSummary(
             source="amb_gtfs_rt",
             status="available",
-            stop_id=str(contexts[0].get("stop_id", "")),
-            stop_name=str(contexts[0].get("stop_name", "")),
+            stop_id=str(current_context.get("stop_id", "")),
+            stop_name=str(current_context.get("stop_name", "")),
             reference_arrival_epoch=(reference_prediction.arrival_epoch if reference_prediction else None),
             reference_prediction=reference_prediction,
             reference_is_schedule_match=own_observation is not None,
@@ -501,7 +624,12 @@ class TMBIbusService:
                 behind_position[1] if behind_position is not None else None,
                 now_epoch,
             ),
-            ahead_position=self._to_ahead_position(ahead_position, now_epoch),
+            ahead_gap_seconds=ahead_position[2] if ahead_position is not None else None,
+            behind_gap_seconds=behind_position[2] if behind_position is not None else None,
+            ahead_position=self._to_ahead_position(
+                (ahead_position[0], ahead_position[1]) if ahead_position is not None else None,
+                now_epoch,
+            ),
             route_positions=public_positions,
         )
 
@@ -587,8 +715,15 @@ class TMBIbusService:
         now_epoch: int,
     ) -> tuple[LookupStatus, list[_StopPrediction]]:
         stop_code = str(context.get("stop_code", ""))
-        line = _normalize_line(context.get("route_short_name"))
-        if not _STOP_CODE_PATTERN.fullmatch(stop_code) or not line:
+        line_codes = {
+            line_code
+            for line_code in (
+                _normalize_line(context.get("route_short_name")),
+                _normalize_line(context.get("ibus_line_code")),
+            )
+            if line_code
+        }
+        if not _STOP_CODE_PATTERN.fullmatch(stop_code) or not line_codes:
             return "unavailable", []
         status, predictions = await self._get_stop_predictions(stop_code)
         if status != "available":
@@ -597,7 +732,7 @@ class TMBIbusService:
             (
                 item
                 for item in predictions
-                if _normalize_line(item.line) == line
+                if _normalize_line(item.line) in line_codes
                 and item.arrival_epoch >= now_epoch - 60
             ),
             key=lambda item: (item.arrival_epoch, item.vehicle_id),
@@ -605,16 +740,19 @@ class TMBIbusService:
 
     def _route_scan_cache_key(
         self,
-        primary_context: dict[str, Any],
+        _primary_context: dict[str, Any],
         downstream_contexts: list[dict[str, Any]],
     ) -> str:
         # The scan contains only public stop codes and prediction epochs; hash
         # the static pattern so cache keys stay bounded and route variants do
         # not accidentally share a radar snapshot.
-        fingerprint = "|".join(
-            f"{item.get('stop_id', '')}:{item.get('stop_code', '')}:{item.get('scheduled_offset_seconds', '')}"
-            for item in [primary_context, *downstream_contexts]
-        )
+        # The scan is a route resource, not a driver's current-stop resource.
+        # Do not put ``primary_context`` in the key: the full-pattern sample is
+        # identical for drivers at different points of the same trip.
+        fingerprint = "|".join(sorted(
+            f"{item.get('stop_sequence', '')}:{item.get('stop_id', '')}:{item.get('stop_code', '')}:{item.get('scheduled_offset_seconds', '')}"
+            for item in downstream_contexts
+        ))
         digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:32]
         return f"{_ROUTE_SCAN_CACHE_PREFIX}:{digest}"
 
@@ -1060,7 +1198,15 @@ def _parse_amb_gtfs_rt_payload(payload: bytes, *, now_epoch: int) -> list[_AMBTr
                 route_id=f"AMB_{route_number}",
                 stop_arrivals=tuple(sorted(stop_arrivals.items(), key=lambda item: item[1])),
             ))
-    return parsed
+    # A provider snapshot can carry a corrected entity for the same trip.
+    # Keep one deterministic, most-complete observation so the rail never
+    # draws the same scheduled service twice.
+    deduplicated: dict[str, _AMBTripPrediction] = {}
+    for prediction in parsed:
+        previous = deduplicated.get(prediction.trip_id)
+        if previous is None or len(prediction.stop_arrivals) > len(previous.stop_arrivals):
+            deduplicated[prediction.trip_id] = prediction
+    return [deduplicated[trip_id] for trip_id in sorted(deduplicated)]
 
 
 def _parse_arrival_epoch(value: object, now_epoch: int) -> int | None:
@@ -1337,6 +1483,42 @@ def _find_route_positions(
             item[1].arrival_epoch,
         ),
     )[:_MAX_ROUTE_POSITIONS]
+
+
+def _find_inferred_adjacent_predictions(
+    observations: list[tuple[dict[str, Any], list[_StopPrediction]]],
+    *,
+    reference_arrival_epoch: int,
+    reference_stop_offset_seconds: int | None,
+) -> tuple[
+    tuple[dict[str, Any], _StopPrediction, int] | None,
+    tuple[dict[str, Any], _StopPrediction, int] | None,
+]:
+    """Locate adjacent inferred journeys when neither reaches the current stop.
+
+    iBus only reports a bus after it has entered a stop's prediction horizon.
+    A successor that has just left the terminus therefore has no arrival at the
+    driver's current stop yet.  Normalize every sampled arrival by its static
+    stop offset to compare each journey's live start with the selected bus.
+    """
+    if reference_stop_offset_seconds is None:
+        return None, None
+    reference_start_epoch = reference_arrival_epoch - reference_stop_offset_seconds
+    ahead: tuple[dict[str, Any], _StopPrediction, int] | None = None
+    behind: tuple[dict[str, Any], _StopPrediction, int] | None = None
+    for context, predictions in observations:
+        offset_seconds = _bounded_int(context.get("scheduled_offset_seconds"), -1, 86_400)
+        if offset_seconds is None:
+            continue
+        for prediction in predictions:
+            gap_seconds = prediction.arrival_epoch - offset_seconds - reference_start_epoch
+            if gap_seconds <= -_AHEAD_POSITION_MIN_LEAD_SECONDS:
+                if ahead is None or gap_seconds > -ahead[2]:
+                    ahead = (context, prediction, -gap_seconds)
+            elif gap_seconds >= _AHEAD_POSITION_MIN_LEAD_SECONDS:
+                if behind is None or gap_seconds < behind[2]:
+                    behind = (context, prediction, gap_seconds)
+    return ahead, behind
 
 
 def _provider_rate_limit_headers(headers: httpx.Headers) -> tuple[tuple[str, str], ...]:

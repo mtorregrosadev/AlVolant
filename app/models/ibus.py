@@ -78,5 +78,9 @@ class IbusFleetSummary(BaseModel):
     reference_is_schedule_match: bool = False
     ahead_vehicle: IbusVehiclePrediction | None = None
     behind_vehicle: IbusVehiclePrediction | None = None
+    # Live headway from the selected vehicle when both GTFS-RT journeys can
+    # be identified. This is distinct from an ETA at the other bus's stop.
+    ahead_gap_seconds: int | None = Field(default=None, ge=0, le=14_400)
+    behind_gap_seconds: int | None = Field(default=None, ge=0, le=14_400)
     ahead_position: IbusAheadPosition | None = None
     route_positions: list[IbusRoutePosition] = Field(default_factory=list, max_length=16)

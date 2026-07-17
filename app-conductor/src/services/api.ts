@@ -319,6 +319,18 @@ function parseIbusFleetSummary(value: unknown): IbusFleetSummary | null {
     || typeof value.reference_is_schedule_match !== 'boolean'
     || !(value.ahead_vehicle === null || isIbusVehiclePrediction(value.ahead_vehicle))
     || !(value.behind_vehicle === null || isIbusVehiclePrediction(value.behind_vehicle))
+    || !(value.ahead_gap_seconds === undefined || value.ahead_gap_seconds === null || (
+      typeof value.ahead_gap_seconds === 'number'
+      && Number.isInteger(value.ahead_gap_seconds)
+      && value.ahead_gap_seconds >= 0
+      && value.ahead_gap_seconds <= 14_400
+    ))
+    || !(value.behind_gap_seconds === undefined || value.behind_gap_seconds === null || (
+      typeof value.behind_gap_seconds === 'number'
+      && Number.isInteger(value.behind_gap_seconds)
+      && value.behind_gap_seconds >= 0
+      && value.behind_gap_seconds <= 14_400
+    ))
     || !(value.ahead_position === undefined || value.ahead_position === null || isIbusAheadPosition(value.ahead_position))
     || !(value.route_positions === undefined || (
       Array.isArray(value.route_positions)
@@ -338,6 +350,8 @@ function parseIbusFleetSummary(value: unknown): IbusFleetSummary | null {
     reference_is_schedule_match: value.reference_is_schedule_match,
     ahead_vehicle: value.ahead_vehicle,
     behind_vehicle: value.behind_vehicle,
+    ahead_gap_seconds: value.ahead_gap_seconds ?? null,
+    behind_gap_seconds: value.behind_gap_seconds ?? null,
     ahead_position: value.ahead_position ?? null,
     route_positions: value.route_positions ?? [],
   };
@@ -565,6 +579,8 @@ export interface IbusFleetSummary {
   reference_is_schedule_match: boolean;
   ahead_vehicle: IbusVehiclePrediction | null;
   behind_vehicle: IbusVehiclePrediction | null;
+  ahead_gap_seconds: number | null;
+  behind_gap_seconds: number | null;
   ahead_position: IbusAheadPosition | null;
   route_positions: IbusRoutePosition[];
 }

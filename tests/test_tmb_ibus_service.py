@@ -95,17 +95,16 @@ def test_parses_amb_trip_updates_with_static_gtfs_identifiers() -> None:
 @pytest.mark.asyncio
 async def test_uses_shared_amb_feed_for_m30_positions() -> None:
     class FakeGTFS:
-        async def get_trip_stop_contexts(
+        async def get_full_trip_stop_contexts(
             self,
             route_id: str,
             trip_id: str,
-            stop_id: str,
             *,
             max_stops: int,
             stop_stride: int,
         ) -> list[dict]:
-            assert (route_id, trip_id, stop_id, max_stops, stop_stride) == (
-                "AMB_415", "AMB_415.35.2.3.30", "AMB_107401", 128, 1,
+            assert (route_id, trip_id, max_stops, stop_stride) == (
+                "AMB_415", "AMB_415.35.2.3.30", 128, 1,
             )
             return [
                 {
@@ -254,8 +253,10 @@ async def test_amb_excludes_sibling_trip_with_the_selected_scheduled_departure()
     assert summary.reference_prediction.eta_seconds == 120
     assert summary.ahead_vehicle is not None
     assert summary.ahead_vehicle.eta_seconds == 100
+    assert summary.ahead_gap_seconds == 320
     assert summary.behind_vehicle is not None
     assert summary.behind_vehicle.eta_seconds == 600
+    assert summary.behind_gap_seconds == 180
     assert [position.relation for position in summary.route_positions] == ["ahead", "behind"]
 
 
@@ -323,6 +324,90 @@ async def test_amb_never_labels_a_bus_at_the_driver_current_stop_as_ahead() -> N
     assert summary.ahead_vehicle is None
     assert summary.behind_vehicle is None
     assert summary.route_positions == []
+
+
+@pytest.mark.asyncio
+async def test_amb_full_pattern_places_a_new_departure_behind_the_driver() -> None:
+    class FakeGTFS:
+        async def get_full_trip_stop_contexts(
+            self,
+            route_id: str,
+            trip_id: str,
+            *,
+            max_stops: int,
+            stop_stride: int,
+        ) -> list[dict]:
+            assert (route_id, trip_id, max_stops, stop_stride) == (
+                "AMB_415", "AMB_415.35.2.3.selected", 128, 1,
+            )
+            return [
+                {
+                    "stop_id": "AMB_origin",
+                    "stop_name": "La Virreina",
+                    "stop_sequence": 1,
+                    "scheduled_offset_seconds": 0,
+                    "route_short_name": "M30",
+                },
+                {
+                    "stop_id": "AMB_current",
+                    "stop_name": "Camí d'Alella",
+                    "stop_sequence": 4,
+                    "scheduled_offset_seconds": 300,
+                    "route_short_name": "M30",
+                },
+                {
+                    "stop_id": "AMB_future",
+                    "stop_name": "Pl. de la Mare",
+                    "stop_sequence": 6,
+                    "scheduled_offset_seconds": 600,
+                    "route_short_name": "M30",
+                },
+            ]
+
+        async def get_trip_meta(self, trip_id: str) -> dict:
+            return {
+                "route_id": "AMB_415",
+                "direction_id": 1,
+                "departure_time": "13:03:00" if trip_id.endswith("selected") else "13:13:00",
+            }
+
+    now_epoch = int(time.time())
+    service = TMBIbusService(
+        settings=Settings(TMB_APP_ID="", TMB_APP_KEY=""),
+        cache=None,
+        gtfs_service=FakeGTFS(),  # type: ignore[arg-type]
+    )
+    service._get_amb_trip_predictions = AsyncMock(  # type: ignore[method-assign]
+        return_value=[
+            _AMBTripPrediction(
+                trip_id="AMB_415.35.2.3.selected",
+                route_id="AMB_415",
+                stop_arrivals=(("AMB_current", now_epoch + 60), ("AMB_future", now_epoch + 360)),
+            ),
+            _AMBTripPrediction(
+                trip_id="AMB_415.35.2.3.behind",
+                route_id="AMB_415",
+                stop_arrivals=(("AMB_origin", now_epoch + 120),),
+            ),
+        ],
+    )
+
+    summary = await service.get_fleet_summary(
+        route_id="AMB_415",
+        trip_id="AMB_415.35.2.3.selected",
+        direction_id=1,
+        stop_id="AMB_current",
+        scheduled_departure_epoch=now_epoch,
+    )
+
+    assert summary.stop_name == "Camí d'Alella"
+    assert summary.reference_is_schedule_match is True
+    assert summary.behind_vehicle is not None
+    assert summary.behind_vehicle.eta_seconds == 120
+    assert summary.behind_gap_seconds == 360
+    assert [(position.stop_id, position.relation) for position in summary.route_positions] == [
+        ("AMB_origin", "behind"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -530,6 +615,106 @@ async def test_scans_downstream_stops_to_locate_preceding_service() -> None:
         position.stop_id == "AMB_000317" and position.relation == "ahead"
         for position in summary.route_positions
     )
+
+
+@pytest.mark.asyncio
+async def test_tmb_full_route_scan_finds_a_bus_that_has_not_reached_the_driver_stop() -> None:
+    class FakeGTFS:
+        async def get_trip_stop_contexts(
+            self,
+            route_id: str,
+            trip_id: str,
+            stop_id: str,
+            *,
+            max_stops: int,
+            stop_stride: int,
+        ) -> list[dict]:
+            assert (route_id, trip_id, stop_id, max_stops, stop_stride) == (
+                "tmb-h10", "trip-h10", "stop-current", 16, 2,
+            )
+            return [
+                {
+                    "stop_id": "stop-current",
+                    "stop_name": "Parada actual",
+                    "stop_code": "105",
+                    "stop_sequence": 5,
+                    "scheduled_offset_seconds": 300,
+                    "route_short_name": "H10",
+                    "ibus_line_code": "210",
+                },
+            ]
+
+        async def get_full_trip_stop_contexts(
+            self,
+            route_id: str,
+            trip_id: str,
+            *,
+            max_stops: int,
+            stop_stride: int,
+        ) -> list[dict]:
+            assert (route_id, trip_id, max_stops, stop_stride) == (
+                "tmb-h10", "trip-h10", 16, 2,
+            )
+            return [
+                {
+                    "stop_id": "stop-origin",
+                    "stop_name": "Terminal",
+                    "stop_code": "101",
+                    "stop_sequence": 1,
+                    "scheduled_offset_seconds": 0,
+                    "route_short_name": "H10",
+                    "ibus_line_code": "210",
+                },
+                {
+                    "stop_id": "stop-current",
+                    "stop_name": "Parada actual",
+                    "stop_code": "105",
+                    "stop_sequence": 5,
+                    "scheduled_offset_seconds": 300,
+                    "route_short_name": "H10",
+                    "ibus_line_code": "210",
+                },
+                {
+                    "stop_id": "stop-future",
+                    "stop_name": "Parada futura",
+                    "stop_code": "109",
+                    "stop_sequence": 9,
+                    "scheduled_offset_seconds": 600,
+                    "route_short_name": "H10",
+                    "ibus_line_code": "210",
+                },
+            ]
+
+    now = int(time.time())
+    predictions_by_stop = {
+        "101": [_StopPrediction("", "210", "Final", now + 240)],
+        "105": [_StopPrediction("", "210", "Final", now + 300)],
+        "109": [_StopPrediction("", "210", "Final", now + 600)],
+    }
+    service = TMBIbusService(
+        settings=Settings(TMB_APP_ID="test-app-id", TMB_APP_KEY="test-app-key"),
+        cache=None,
+        gtfs_service=FakeGTFS(),  # type: ignore[arg-type]
+    )
+    service._get_stop_predictions = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda stop_code: ("available", predictions_by_stop[stop_code]),
+    )
+
+    summary = await service.get_fleet_summary(
+        route_id="tmb-h10",
+        trip_id="trip-h10",
+        direction_id=0,
+        stop_id="stop-current",
+        scheduled_departure_epoch=now,
+    )
+
+    assert summary.reference_is_schedule_match is True
+    assert summary.behind_vehicle is not None
+    assert summary.behind_vehicle.eta_seconds == 240
+    assert summary.behind_gap_seconds == 240
+    assert [(position.stop_id, position.relation) for position in summary.route_positions] == [
+        ("stop-origin", "behind"),
+    ]
 
 
 @pytest.mark.asyncio

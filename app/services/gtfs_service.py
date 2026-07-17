@@ -156,6 +156,27 @@ def _resolve_ibus_stop_code(stop_code: object, stop_id: object) -> str:
     return ""
 
 
+def _resolve_ibus_line_code(route_id: object) -> str:
+    """Return TMB iBus's numeric line code from an ATM GTFS route id.
+
+    TMB's static feed calls the public route ``H10`` while iBus returns it as
+    ``210`` in ``codi_linia``.  The middle segment of IDs such as
+    ``TMB_2.210.3078`` is that provider-specific code.
+    """
+    if not isinstance(route_id, str):
+        return ""
+    parts = route_id.strip().split(".")
+    if (
+        len(parts) < 3
+        or not parts[0].startswith("TMB_")
+        or not parts[1].isascii()
+        or not parts[1].isdigit()
+        or not 1 <= len(parts[1]) <= 8
+    ):
+        return ""
+    return parts[1].lstrip("0") or "0"
+
+
 class GTFSService:
     """Loader and cache writer for ATM T-mobilitat static GTFS data."""
 
@@ -592,6 +613,7 @@ class GTFSService:
         *,
         max_stops: int = 4,
         stop_stride: int = 1,
+        start_at_trip_origin: bool = False,
     ) -> list[dict]:
         """Return the selected stop and a bounded downstream iBus context.
 
@@ -622,14 +644,17 @@ class GTFSService:
         if origin_time is None:
             return []
         stops = stop_pattern["stops"]
-        try:
-            first_index = next(
-                index
-                for index, stop in enumerate(stops)
-                if isinstance(stop, dict) and stop.get("stop_id") == stop_id
-            )
-        except StopIteration:
-            return []
+        if start_at_trip_origin:
+            first_index = 0
+        else:
+            try:
+                first_index = next(
+                    index
+                    for index, stop in enumerate(stops)
+                    if isinstance(stop, dict) and stop.get("stop_id") == stop_id
+                )
+            except StopIteration:
+                return []
 
         contexts: list[dict] = []
         for stop in stops[first_index::stop_stride]:
@@ -648,10 +673,35 @@ class GTFSService:
                 "stop_sequence": _bounded_context_int(stop.get("sequence"), 0, 10_000),
                 "scheduled_offset_seconds": scheduled_time - origin_time,
                 "route_short_name": _bounded_context_text(trip_meta.get("route_short_name"), 64),
+                "ibus_line_code": _resolve_ibus_line_code(trip_meta.get("route_id") or route_id),
             })
             if len(contexts) >= max_stops:
                 break
         return contexts
+
+    async def get_full_trip_stop_contexts(
+        self,
+        route_id: str,
+        trip_id: str,
+        *,
+        max_stops: int = 128,
+        stop_stride: int = 1,
+    ) -> list[dict]:
+        """Return the full trip pattern for shared route-wide live feeds.
+
+        AMB's GTFS-RT feed is one snapshot for the whole line, so restricting
+        it to the driver's remaining stops hides every bus that is currently
+        behind the driver.  This does not create extra provider calls; it only
+        exposes the already-cached static pattern to the matcher.
+        """
+        return await self.get_trip_stop_contexts(
+            route_id,
+            trip_id,
+            "",
+            max_stops=max_stops,
+            stop_stride=stop_stride,
+            start_at_trip_origin=True,
+        )
 
     async def get_route_stop_context(
         self,
@@ -682,6 +732,7 @@ class GTFSService:
                 "stop_name": _bounded_context_text(properties.get("stop_name"), 500),
                 "stop_code": _resolve_ibus_stop_code(properties.get("stop_code"), stop_id),
                 "route_short_name": _bounded_context_text(route_shape.route_short_name, 64),
+                "ibus_line_code": _resolve_ibus_line_code(route_id),
             }
         return None
 

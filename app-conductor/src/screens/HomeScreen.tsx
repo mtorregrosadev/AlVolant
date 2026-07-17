@@ -897,7 +897,11 @@ function HomeContent({ navigation, route }: HomeScreenProps) {
     setRoutesHeadingBottom(y + height + spacing.xs);
   }, []);
 
-  const navigateToMap = useCallback((vehicleId?: string, tripId?: string) => {
+  const navigateToMap = useCallback((
+    vehicleId?: string,
+    tripId?: string,
+    scheduledDepartureEpoch?: number,
+  ) => {
     if (!selectedRoute || directionId === null) return;
 
     telemetry.capture('route_started', {
@@ -911,6 +915,7 @@ function HomeContent({ navigation, route }: HomeScreenProps) {
       directionId,
       ...(vehicleId ? { assignedVehicle: vehicleId } : {}),
       ...(tripId ? { tripId } : {}),
+      ...(Number.isInteger(scheduledDepartureEpoch) ? { scheduledDepartureEpoch } : {}),
       directionLabel: directionId === 0 ? directionNames.anada : directionNames.tornada,
     });
   }, [directionId, directionNames, navigation, recordRecent, selectedRoute]);
@@ -1062,9 +1067,13 @@ function HomeContent({ navigation, route }: HomeScreenProps) {
     setHasLoadedPastDepartures(false);
   }, []);
 
-  const handleConfirmAssignment = useCallback((vehicleId: string, tripId?: string) => {
+  const handleConfirmAssignment = useCallback((
+    vehicleId: string,
+    tripId?: string,
+    scheduledDepartureEpoch?: number,
+  ) => {
     closeAssignmentModal();
-    navigateToMap(sanitizeVehicleId(vehicleId) || undefined, tripId);
+    navigateToMap(sanitizeVehicleId(vehicleId) || undefined, tripId, scheduledDepartureEpoch);
   }, [closeAssignmentModal, navigateToMap]);
 
   const handleManualVehicleSync = useCallback(() => {

@@ -219,7 +219,7 @@ async def test_trip_reads_fall_back_to_legacy_keys_during_migration(
     generation = "a" * 32
     await cache.set_json(
         _KEY_TRIP_INDEX_ACTIVE,
-        {"version": 2, "generation": generation, "last_updated": "new"},
+        {"version": 3, "generation": generation, "last_updated": "new"},
         ttl=60,
     )
     await cache.set_json(
@@ -456,7 +456,7 @@ async def test_trip_lookup_falls_back_to_retained_previous_generation(
     await cache.set_json(
         _KEY_TRIP_INDEX_ACTIVE,
         {
-            "version": 2,
+            "version": 3,
             "generation": current_generation,
             "previous_generation": previous_generation,
             "last_updated": "new",
@@ -477,7 +477,7 @@ async def test_trip_lookup_falls_back_to_retained_previous_generation(
 
 
 @pytest.mark.asyncio
-async def test_complete_cache_and_refresh_deadline_require_both_v2_manifests(
+async def test_complete_cache_and_refresh_deadline_require_both_current_manifests(
     settings: Settings,
     cache: CacheManager,
 ) -> None:
@@ -487,18 +487,19 @@ async def test_complete_cache_and_refresh_deadline_require_both_v2_manifests(
 
     snapshot_id = "b" * 32
     trip_manifest = {
-        "version": 2,
+        "version": 3,
         "generation": "a" * 32,
         "snapshot_id": snapshot_id,
         "last_updated": "now",
     }
     schedule_manifest = {
         **trip_manifest,
+        "version": 2,
         "trip_generation": trip_manifest["generation"],
         "component_counts": {"calendar": 0, "exceptions": 0, "trips": 0},
     }
     snapshot = {
-        "version": 2,
+        "version": 3,
         "snapshot_id": snapshot_id,
         "trip_generation": trip_manifest["generation"],
         "schedule_generation": schedule_manifest["generation"],

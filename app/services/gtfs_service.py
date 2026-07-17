@@ -56,9 +56,9 @@ _KEY_PROXIMITY_INDEX = "gtfs:proximity:routes:v1"
 
 _PROXIMITY_INDEX_VERSION = 1
 _PROXIMITY_STOP_KEY_BATCH_SIZE = 500
-_TRIP_INDEX_VERSION = 2
+_TRIP_INDEX_VERSION = 3
 _SCHEDULE_INDEX_VERSION = 2
-_SNAPSHOT_VERSION = 2
+_SNAPSHOT_VERSION = 3
 _TRIP_INDEX_WRITE_BATCH_SIZE = 500
 _TRIP_INDEX_WRITE_BATCH_BYTES = 4 * 1024 * 1024
 _TRIP_INDEX_CLEANUP_BATCH_SIZE = 250
@@ -90,6 +90,70 @@ csv.field_size_limit(_MAX_CSV_FIELD_BYTES)
 
 ProximityIndex = dict[str, list[list[float]]]
 StopTimeRow = tuple[str, int, str]
+
+
+def _bounded_context_text(value: object, maximum: int) -> str:
+    """Return a small, display-safe GTFS field for a server-side adapter."""
+    if not isinstance(value, str):
+        return ""
+    normalized = value.strip()
+    if not normalized or len(normalized) > maximum:
+        return ""
+    if any(character.isspace() and character not in {" ", "\t"} for character in normalized):
+        return ""
+    return normalized
+
+
+def _bounded_context_int(value: object, minimum: int, maximum: int) -> int | None:
+    """Return a validated integer from a cached GTFS context field."""
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if minimum <= parsed <= maximum else None
+
+
+def _service_time_seconds(value: object) -> int | None:
+    """Parse a GTFS service time, including after-midnight hours such as 25:20."""
+    if not isinstance(value, str):
+        return None
+    parts = value.split(":")
+    if len(parts) != 3 or any(not part.isascii() or not part.isdigit() for part in parts):
+        return None
+    try:
+        hours, minutes, seconds = (int(part) for part in parts)
+    except ValueError:
+        return None
+    if not 0 <= hours <= 72 or not 0 <= minutes < 60 or not 0 <= seconds < 60:
+        return None
+    return hours * 3_600 + minutes * 60 + seconds
+
+
+def _resolve_ibus_stop_code(stop_code: object, stop_id: object) -> str:
+    """Map the ATM static GTFS stop identity to the numeric iBus stop code.
+
+    The current feed exposes TMB stops as ``AMB_000313`` with ``313`` in
+    ``stop_code``.  Keep a tightly bounded fallback for older cache snapshots
+    that did not retain the GTFS ``stop_code`` field.
+    """
+    for candidate in (stop_code, stop_id):
+        if not isinstance(candidate, str):
+            continue
+        normalized = candidate.strip()
+        if normalized.isascii() and normalized.isdigit() and 1 <= len(normalized) <= 8:
+            return normalized.lstrip("0") or "0"
+        prefix, separator, numeric_part = normalized.partition("_")
+        if (
+            prefix == "AMB"
+            and separator
+            and numeric_part.isascii()
+            and numeric_part.isdigit()
+            and 1 <= len(numeric_part) <= 8
+        ):
+            return numeric_part.lstrip("0") or "0"
+    return ""
 
 
 class GTFSService:
@@ -505,6 +569,122 @@ class GTFSService:
         trip_meta, _manifest = await self._get_trip_meta_record(trip_id)
         return trip_meta
 
+    async def get_trip_stop_context(
+        self,
+        route_id: str,
+        trip_id: str,
+        stop_id: str,
+    ) -> dict | None:
+        """Return only the static fields needed to match one iBus stop call."""
+        contexts = await self.get_trip_stop_contexts(
+            route_id,
+            trip_id,
+            stop_id,
+            max_stops=1,
+        )
+        return contexts[0] if contexts else None
+
+    async def get_trip_stop_contexts(
+        self,
+        route_id: str,
+        trip_id: str,
+        stop_id: str,
+        *,
+        max_stops: int = 4,
+        stop_stride: int = 1,
+    ) -> list[dict]:
+        """Return the selected stop and a bounded downstream iBus context.
+
+        A stop-level iBus prediction has no stable vehicle identifier in the
+        current TMB payload.  The immediate downstream stops let callers
+        correlate a chosen scheduled trip and detect a preceding service
+        without exposing the complete trip pattern to the client.
+        """
+        if not 1 <= max_stops <= 128 or not 1 <= stop_stride <= 5:
+            return []
+        trip_meta, manifest = await self._get_trip_meta_record(trip_id)
+        if not trip_meta or not await self._trip_matches_route(
+            route_id,
+            trip_id,
+            trip_meta=trip_meta,
+        ):
+            return None
+        if manifest is None:
+            return None
+        stop_pattern = await self._cache.hget_json(
+            self._trip_index_key(manifest["generation"], "stops"),
+            trip_meta.get("stop_pattern_id", ""),
+        )
+        if not isinstance(stop_pattern, dict) or not isinstance(stop_pattern.get("stops"), list):
+            return None
+
+        origin_time = _service_time_seconds(trip_meta.get("departure_time"))
+        if origin_time is None:
+            return []
+        stops = stop_pattern["stops"]
+        try:
+            first_index = next(
+                index
+                for index, stop in enumerate(stops)
+                if isinstance(stop, dict) and stop.get("stop_id") == stop_id
+            )
+        except StopIteration:
+            return []
+
+        contexts: list[dict] = []
+        for stop in stops[first_index::stop_stride]:
+            if not isinstance(stop, dict):
+                continue
+            scheduled_time = _service_time_seconds(stop.get("scheduled_time"))
+            if scheduled_time is None:
+                continue
+            context_stop_id = stop.get("stop_id")
+            if not isinstance(context_stop_id, str) or not context_stop_id:
+                continue
+            contexts.append({
+                "stop_id": context_stop_id,
+                "stop_name": _bounded_context_text(stop.get("stop_name"), 500),
+                "stop_code": _resolve_ibus_stop_code(stop.get("stop_code"), context_stop_id),
+                "stop_sequence": _bounded_context_int(stop.get("sequence"), 0, 10_000),
+                "scheduled_offset_seconds": scheduled_time - origin_time,
+                "route_short_name": _bounded_context_text(trip_meta.get("route_short_name"), 64),
+            })
+            if len(contexts) >= max_stops:
+                break
+        return contexts
+
+    async def get_route_stop_context(
+        self,
+        route_id: str,
+        direction_id: int,
+        stop_id: str,
+    ) -> dict | None:
+        """Return iBus-safe stop context when no scheduled trip was selected."""
+        if direction_id not in (0, 1):
+            return None
+        stop_collection, route_shape = await asyncio.gather(
+            self.get_route_stops(route_id, direction_id=direction_id),
+            self.get_route_shape(route_id, direction_id=direction_id),
+        )
+        if route_shape is None or not isinstance(stop_collection, dict):
+            return None
+        features = stop_collection.get("features")
+        if not isinstance(features, list):
+            return None
+        for feature in features:
+            if not isinstance(feature, dict):
+                continue
+            properties = feature.get("properties")
+            if not isinstance(properties, dict) or properties.get("stop_id") != stop_id:
+                continue
+            return {
+                "stop_id": stop_id,
+                "stop_name": _bounded_context_text(properties.get("stop_name"), 500),
+                "stop_code": _resolve_ibus_stop_code(properties.get("stop_code"), stop_id),
+                "route_short_name": _bounded_context_text(route_shape.route_short_name, 64),
+            }
+        return None
+
     async def resolve_group_route_ids(self, route_id: str) -> list[str]:
         """Return every underlying GTFS route id represented by a catalog route."""
         return await self._resolve_group_route_ids(route_id)
@@ -658,6 +838,7 @@ class GTFSService:
                         "direction_id": direction_id,
                         "trip_id": trip_id,
                         "stop_id": stop_id,
+                        "stop_code": stop.get("stop_code", ""),
                         "stop_sequence": stop.get("sequence", 0),
                         "stop_name": stop.get("stop_name", ""),
                     },
@@ -1306,6 +1487,7 @@ class GTFSService:
                 "lat": latitude,
                 "lon": longitude,
                 "name": cls._bounded_text(row, "stop_name", max_length=500),
+                "code": cls._bounded_text(row, "stop_code", max_length=64),
             }
 
         return stops
@@ -1424,7 +1606,9 @@ class GTFSService:
                 pattern_stops.append(
                     {
                         "stop_id": stop_id,
+                        "stop_code": stop_info.get("code", ""),
                         "sequence": stop[1],
+                        "scheduled_time": stop[2],
                         "stop_name": stop_info.get("name", ""),
                         "coordinates": [stop_info.get("lon", 0), stop_info.get("lat", 0)],
                     }

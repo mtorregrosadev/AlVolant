@@ -55,6 +55,7 @@ export type RootStackParamList = {
     directionId: 0 | 1;
     assignedVehicle?: string;
     tripId?: string;
+    scheduledDepartureEpoch?: number;
     directionLabel?: string;
   };
 };

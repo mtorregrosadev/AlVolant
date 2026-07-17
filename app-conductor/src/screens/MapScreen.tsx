@@ -26,6 +26,7 @@ import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   apiService,
+  type IbusFleetSummary,
   type LiveWebSocketMessage,
   type RTTripUpdate,
   type ServiceAlert,
@@ -137,6 +138,7 @@ const MIN_MOVING_SPEED_KMH = 3;
 const MAX_JOURNEY_STOP_MARKERS = 9;
 const FALLBACK_CITY_SPEED_KMH = 18;
 const TRAFFIC_REFRESH_INTERVAL_MS = 120_000;
+const IBUS_REFRESH_INTERVAL_MS = 30_000;
 const SATELLITE_STATUS_REFRESH_INTERVAL_MS = 300_000;
 const LIVE_REFRESH_MIN_INTERVAL_MS = 60_000;
 const LIVE_REFRESH_JITTER_MS = 5_000;
@@ -670,7 +672,14 @@ const MAP_THEME_TRANSITION_MAX_MS = 1_200;
 const SATELLITE_MIN_ZOOM = 14;
 
 export default function MapScreen({ route, navigation }: MapScreenProps) {
-  const { routeId, directionId, assignedVehicle, tripId, directionLabel } = route.params;
+  const {
+    routeId,
+    directionId,
+    assignedVehicle,
+    tripId,
+    scheduledDepartureEpoch,
+    directionLabel,
+  } = route.params;
   const { width: viewportWidth, height: viewportHeight } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const isLandscape = viewportWidth > viewportHeight;
@@ -722,6 +731,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const [vehiclePositions, setVehiclePositions] = useState<VehiclePosition[]>([]);
   const [serviceAlerts, setServiceAlerts] = useState<ServiceAlert[]>([]);
   const [trafficSummary, setTrafficSummary] = useState<TrafficSummary | null>(null);
+  const [ibusFleet, setIbusFleet] = useState<IbusFleetSummary | null>(null);
   const [satelliteAvailable, setSatelliteAvailable] = useState(true);
   const satelliteAvailabilityControllerRef = useRef<AbortController | null>(null);
   const [isServiceAlertModalVisible, setIsServiceAlertModalVisible] = useState(false);
@@ -922,7 +932,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const mapSafeTop = Math.max(insets.top + 8, 12);
   const mapSafeLeft = Math.max(insets.left + 12, 12);
   const mapSafeRight = Math.max(insets.right + 12, 12);
-  const portraitDriverPanelHeight = Math.max(164, Math.round(viewportHeight * 0.25));
+  const portraitDriverPanelHeight = Math.max(184, Math.round(viewportHeight * 0.25));
   const satelliteBuildings = mapTheme === 'satellite';
   // Satellite imagery needs a little more contrast than the vector basemap:
   // this keeps the footprint visible without hiding the road context below.
@@ -1047,6 +1057,50 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   }, [currentRouteProgress, stopsOnRoute]);
   const nextStop = upcomingStops[0] ?? null;
   const followingStop = upcomingStops[1] ?? null;
+  const iBusStopId = nextStop?.stop_id?.trim() || '';
+  const iBusDepartureEpoch = typeof scheduledDepartureEpoch === 'number'
+    && Number.isInteger(scheduledDepartureEpoch)
+    ? scheduledDepartureEpoch
+    : undefined;
+  const canFetchIbus = !loading
+    && !error
+    && Boolean(iBusStopId);
+
+  useEffect(() => {
+    if (!canFetchIbus || !iBusStopId) {
+      setIbusFleet(null);
+      return undefined;
+    }
+
+    let disposed = false;
+    let controller: AbortController | null = null;
+    const refreshIbus = () => {
+      controller?.abort();
+      const requestController = new AbortController();
+      controller = requestController;
+      void apiService.fetchIbusFleet(
+        routeId,
+        directionId,
+        iBusStopId,
+        tripId,
+        iBusDepartureEpoch,
+        requestController.signal,
+      ).then((summary) => {
+        if (!disposed) setIbusFleet(summary);
+      }).catch(() => {
+        if (!disposed && !requestController.signal.aborted) setIbusFleet(null);
+      });
+    };
+
+    refreshIbus();
+    const refreshTimer = setInterval(refreshIbus, IBUS_REFRESH_INTERVAL_MS);
+    return () => {
+      disposed = true;
+      clearInterval(refreshTimer);
+      controller?.abort();
+    };
+  }, [canFetchIbus, directionId, iBusDepartureEpoch, iBusStopId, routeId, tripId]);
+
   const nextStopDistanceMeters = nextStop?.distanceAlong !== null && nextStop?.distanceAlong !== undefined && currentRouteProgress !== null
     ? Math.max(0, nextStop.distanceAlong - currentRouteProgress)
     : (nextStop ? distanceMeters(displayCoords, nextStop.coordinates) : null);
@@ -1283,6 +1337,124 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     tripId,
     vehiclePositions,
   ]);
+  // ATM's public GTFS-RT currently supplies no vehicle identifiers for these
+  // trips. iBus still identifies the next arrivals at the stop, so use it as
+  // a clearly-labelled prediction fallback rather than pretending it is GPS.
+  const iBusFleetMetrics = React.useMemo(() => {
+    if (ibusFleet?.status !== 'available' || !ibusFleet.reference_prediction) {
+      return [];
+    }
+    const stop = ibusFleet.stop_name || nextStop?.stop_name || t('map.calculatingStop');
+    const stopForVehicle = (
+      vehicle: NonNullable<IbusFleetSummary['reference_prediction']>,
+      relation?: 'ahead' | 'behind',
+    ) => {
+      const explicitAhead = relation === 'ahead'
+        && ibusFleet.ahead_position?.prediction.arrival_epoch === vehicle.arrival_epoch
+        ? ibusFleet.ahead_position.stop_name
+        : '';
+      const inferredPosition = ibusFleet.route_positions.find((position) => (
+        (!relation || position.relation === relation)
+        && position.prediction.arrival_epoch === vehicle.arrival_epoch
+      ));
+      return explicitAhead || inferredPosition?.stop_name || stop;
+    };
+    const buildMetric = (
+      vehicle: NonNullable<IbusFleetSummary['reference_prediction']>,
+      icon: IconName,
+      title: string,
+      observedStop = stop,
+    ) => ({
+      icon,
+      title,
+      location: t('map.ibusEtaAtStop', {
+        minutes: Math.max(1, Math.ceil(vehicle.eta_seconds / 60)),
+        stop: observedStop,
+      }),
+      stopName: observedStop,
+      delay: null,
+      etaSeconds: vehicle.eta_seconds,
+    });
+
+    if (!ibusFleet.reference_is_schedule_match) {
+      return [
+        buildMetric(
+          ibusFleet.reference_prediction,
+          'clock-time-four-outline',
+          t('map.ibusNextPrediction'),
+          stopForVehicle(ibusFleet.reference_prediction),
+        ),
+        ...(ibusFleet.behind_vehicle ? [buildMetric(
+          ibusFleet.behind_vehicle,
+          'arrow-down',
+          t('map.ibusFollowingPrediction'),
+          stopForVehicle(ibusFleet.behind_vehicle, 'behind'),
+        )] : []),
+      ];
+    }
+    const titleFor = (vehicle: NonNullable<IbusFleetSummary['reference_prediction']>, kind: 'previous' | 'next') => (
+      vehicle.vehicle_id
+        ? t(kind === 'previous' ? 'map.fleetAheadVehicle' : 'map.fleetBehindVehicle', {
+          vehicle: vehicle.vehicle_id,
+        })
+        : t(kind === 'previous' ? 'map.ibusAheadPrediction' : 'map.ibusBehindPrediction')
+    );
+    return [
+      ...(ibusFleet.ahead_vehicle ? [buildMetric(
+        ibusFleet.ahead_vehicle,
+        'arrow-up',
+        titleFor(ibusFleet.ahead_vehicle, 'previous'),
+        stopForVehicle(ibusFleet.ahead_vehicle, 'ahead'),
+      )] : []),
+      ...(ibusFleet.behind_vehicle ? [buildMetric(
+        ibusFleet.behind_vehicle,
+        'arrow-down',
+        titleFor(ibusFleet.behind_vehicle, 'next'),
+        stopForVehicle(ibusFleet.behind_vehicle, 'behind'),
+      )] : []),
+    ];
+  }, [ibusFleet, nextStop?.stop_name, t]);
+  const visibleFleetMetrics = fleetMetrics.length > 0 ? fleetMetrics : iBusFleetMetrics;
+  const iBusSummaryMetric = iBusFleetMetrics[0] ?? null;
+  const iBusSummaryLabel = React.useMemo(() => {
+    if (!iBusSummaryMetric) {
+      return null;
+    }
+    const stop = iBusSummaryMetric.stopName
+      .split(/\s+-\s+/)[0]
+      .trim();
+    return `${iBusSummaryMetric.title}: ${formatEta(
+      Math.ceil(iBusSummaryMetric.etaSeconds / 60),
+      language,
+    )} · ${stop}`;
+  }, [iBusSummaryMetric, language]);
+  // The route radar samples every other stop and groups the iBus predictions
+  // into inferred services. These markers are stop-arrival based rather than
+  // GPS dots, but let the driver see all detected buses on the same rail.
+  const iBusJourneyVehicles = React.useMemo(() => {
+    if (routePath.totalDistance <= 0 || !ibusFleet) return [];
+    const positions = ibusFleet.route_positions.length > 0
+      ? ibusFleet.route_positions
+      : ibusFleet.ahead_position
+        ? [{ ...ibusFleet.ahead_position, relation: 'ahead' as const }]
+        : [];
+    return positions.flatMap((position, index) => {
+      const observedStop = stopsOnRoute.find((stop) => (
+        stop.stop_id === position.stop_id && stop.distanceAlong !== null
+      ));
+      if (!observedStop || observedStop.distanceAlong === null) return [];
+      return [{
+        key: `${position.stop_id}-${position.prediction.arrival_epoch}-${position.relation}`,
+        progress: clamp((observedStop.distanceAlong / routePath.totalDistance) * 100 - 1.5, 2, 96),
+        relation: position.relation,
+        label: `${position.stop_name} · ${formatEta(
+          Math.ceil(position.prediction.eta_seconds / 60),
+          language,
+        )}`,
+        offset: (index % 2 === 0 ? -1 : 1) * 3,
+      }];
+    });
+  }, [ibusFleet, language, routePath.totalDistance, stopsOnRoute]);
   const driverMetrics: DriverMetric[] = [
     { icon: 'speedometer' as IconName, label: `${currentSpeedLabel} km/h` },
     nextStopDistanceMeters !== null
@@ -1296,7 +1468,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
       : null,
   ].filter((metric): metric is DriverMetric => metric !== null);
   const visibleDriverMetrics = driverMetrics;
-  const landscapeDriverPanelHeight = fleetMetrics.length > 0 ? 146 : 104;
+  const landscapeDriverPanelHeight = visibleFleetMetrics.length > 0 ? 146 : 104;
   const driverPanelClearance = isLandscape
     ? landscapeDriverPanelHeight + 18
     : portraitDriverPanelHeight + 20;
@@ -2825,7 +2997,11 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
           </View>
 
           {!isLandscape && (directionName || nextStop) ? (
-            <View style={[styles.driverJourneySummary, isLandscape && styles.driverJourneySummaryLandscape]}>
+            <View style={[
+              styles.driverJourneySummary,
+              iBusSummaryMetric && iBusSummaryLabel && styles.driverJourneySummaryWithIbus,
+              isLandscape && styles.driverJourneySummaryLandscape,
+            ]}>
               {directionName ? (
                 <View style={styles.driverJourneyCaption}>
                   <MaterialCommunityIcons name="map-marker-path" size={13} color={colors.primary} />
@@ -2855,11 +3031,39 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
                   />
                 ))}
                 <View style={[styles.driverJourneyVehicle, { left: `${Math.min(96, Math.max(2, routeProgressPercent))}%` }]} />
+                {iBusJourneyVehicles.map((vehicle) => (
+                  <View
+                    key={vehicle.key}
+                    style={[
+                      styles.driverJourneyIbusVehicle,
+                      vehicle.relation === 'behind' && styles.driverJourneyIbusVehicleBehind,
+                      {
+                        left: `${vehicle.progress}%`,
+                        transform: [{ translateY: vehicle.offset }],
+                      },
+                    ]}
+                    accessible
+                    accessibilityLabel={vehicle.label}
+                  >
+                    <MaterialCommunityIcons name="bus" size={9} color={colors.primary} />
+                  </View>
+                ))}
                 <View style={[
                   styles.driverJourneyEnd,
                   usesLightChrome && styles.driverJourneyEndLight,
                 ]} />
               </View>
+              {iBusSummaryMetric && iBusSummaryLabel ? (
+                <View style={styles.driverIbusJourneyRow}>
+                  <MaterialCommunityIcons name={iBusSummaryMetric.icon} size={12} color={colors.primary} />
+                  <Text
+                    style={[styles.driverIbusJourneyText, { color: chromeTextColor }]}
+                    numberOfLines={1}
+                  >
+                    {iBusSummaryLabel}
+                  </Text>
+                </View>
+              ) : null}
               {nextStop ? (
                 <View style={styles.driverUpcomingStops}>
                   <View style={styles.driverUpcomingStop}>
@@ -2908,12 +3112,12 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
               </View>
             ))}
           </View>
-          {fleetMetrics.length > 0 ? (
+          {(isLandscape || !iBusSummaryMetric) && visibleFleetMetrics.length > 0 ? (
             <View style={[
               styles.driverFleetRow,
               isLandscape && styles.driverFleetRowLandscape,
             ]}>
-              {fleetMetrics.map((metric) => (
+              {visibleFleetMetrics.map((metric) => (
                 <View key={`${metric.icon}-${metric.title}`} style={styles.driverFleetMetric}>
                   <View style={styles.driverFleetIcon}>
                     <MaterialCommunityIcons name={metric.icon} size={14} color={colors.primary} />
@@ -3318,6 +3522,9 @@ const styles = StyleSheet.create({
     height: 66,
     justifyContent: 'space-between',
   },
+  driverJourneySummaryWithIbus: {
+    height: 84,
+  },
   driverJourneySummaryLandscape: {
     height: 26,
   },
@@ -3399,6 +3606,22 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: '#FFFFFF',
     backgroundColor: colors.primary,
+  },
+  driverJourneyIbusVehicle: {
+    position: 'absolute',
+    width: 16,
+    height: 16,
+    marginLeft: -8,
+    borderRadius: 8,
+    borderWidth: 1.5,
+    borderColor: colors.primary,
+    backgroundColor: '#F7FBF9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  driverJourneyIbusVehicleBehind: {
+    borderColor: '#65A997',
+    backgroundColor: '#DBEEE7',
   },
   driverJourneyEnd: {
     position: 'absolute',
@@ -3555,6 +3778,20 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 16,
     fontWeight: '800',
+  },
+  driverIbusJourneyRow: {
+    height: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    minWidth: 0,
+  },
+  driverIbusJourneyText: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: 10,
+    lineHeight: 13,
+    fontWeight: '900',
   },
   driverFleetRow: {
     flexDirection: 'row',

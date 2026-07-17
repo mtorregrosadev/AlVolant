@@ -36,7 +36,7 @@ type ServiceAssignmentModalProps = {
   onManualVehicleSync: () => void;
   onLoadPastDepartures: () => void;
   onClose: () => void;
-  onConfirm: (vehicleId: string, tripId?: string) => void;
+  onConfirm: (vehicleId: string, tripId?: string, scheduledDepartureEpoch?: number) => void;
   onChooseDeparture: () => void;
   onSkip: () => void;
 };
@@ -81,6 +81,12 @@ export default function ServiceAssignmentModal({
   onSkip,
 }: ServiceAssignmentModalProps) {
   const { language, t } = useI18n();
+  const orderedUpcomingTrips = React.useMemo(
+    () => [...upcomingTrips].sort((first, second) => (
+      first.expected_departure_epoch - second.expected_departure_epoch
+    )),
+    [upcomingTrips],
+  );
   const arrivalLabel = candidate
     ? candidate.phase === 'at_stop'
       ? t('relief.atStop')
@@ -214,7 +220,7 @@ export default function ServiceAssignmentModal({
                   </View>
                   <Text style={styles.loadingText}>{t('assignment.loading')}</Text>
                 </View>
-              ) : upcomingTrips.length > 0 && upcomingTrips[0].is_maintenance ? (
+              ) : orderedUpcomingTrips.length > 0 && orderedUpcomingTrips[0].is_maintenance ? (
                 <View style={styles.noticeCard}>
                   <MaterialCommunityIcons name="wrench-clock" size={24} color={colors.warning} />
                   <View style={styles.noticeCopy}>
@@ -222,13 +228,13 @@ export default function ServiceAssignmentModal({
                     <Text style={styles.noticeText}>{t('assignment.maintenanceHint')}</Text>
                   </View>
                 </View>
-              ) : upcomingTrips.length === 0 ? (
+              ) : orderedUpcomingTrips.length === 0 ? (
                 <View style={styles.emptyState}>
                   <MaterialCommunityIcons name="calendar-blank-outline" size={28} color={colors.transitDark} />
                   <Text style={styles.emptyTitle}>{t('assignment.empty')}</Text>
                   <Text style={styles.emptyText}>{t('assignment.emptyHint')}</Text>
                 </View>
-              ) : upcomingTrips.map((trip) => {
+              ) : orderedUpcomingTrips.map((trip) => {
                 const scheduledTime = formatServiceTime(trip.departure_time);
                 const title = formatDirectionLabel(
                   trip.trip_headsign || trip.towards_label,
@@ -254,7 +260,7 @@ export default function ServiceAssignmentModal({
                   <TouchableOpacity
                     key={trip.trip_id}
                     style={styles.tripRow}
-                    onPress={() => onConfirm('', trip.trip_id)}
+                    onPress={() => onConfirm('', trip.trip_id, trip.scheduled_epoch)}
                     activeOpacity={0.82}
                     accessibilityRole="button"
                     accessibilityLabel={t('assignment.tripA11y', { title, time: estimatedTime })}

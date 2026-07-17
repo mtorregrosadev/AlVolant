@@ -52,6 +52,7 @@ from app.services.gtfs_service import GTFSService
 from app.services.relief_matching_service import ReliefMatchingService
 from app.services.satellite_tile_service import SatelliteTileService
 from app.services.telemetry_service import TelemetryService
+from app.services.tmb_ibus_service import TMBIbusService
 from app.services.traffic_service import TrafficService
 from app.workers.atm_rt_worker import ATMRTWorker
 
@@ -116,6 +117,8 @@ def _resolve_runtime_settings(app_settings: Settings) -> Settings:
         ),
         ("TOMTOM_API_KEY", "TOMTOM_API_KEY_FILE", "TomTom API key secret", 1),
         ("ARCGIS_API_KEY", "ARCGIS_API_KEY_FILE", "ArcGIS API key secret", 1),
+        ("TMB_APP_ID", "TMB_APP_ID_FILE", "TMB app identifier secret", 1),
+        ("TMB_APP_KEY", "TMB_APP_KEY_FILE", "TMB app key secret", 1),
     ):
         file_path = getattr(app_settings, file_field)
         if file_path:
@@ -326,6 +329,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await traffic_service.start()
     app.state.traffic_service = traffic_service
 
+    tmb_ibus_service = TMBIbusService(
+        settings=runtime_settings,
+        cache=cache,
+        gtfs_service=gtfs_service,
+    )
+    await tmb_ibus_service.start()
+    app.state.tmb_ibus_service = tmb_ibus_service
+
     satellite_tile_service = SatelliteTileService(settings=runtime_settings, cache=cache)
     await satellite_tile_service.start()
     app.state.satellite_tile_service = satellite_tile_service
@@ -392,6 +403,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await atm_rt_service.close()
     await gtfs_service.close()
     await traffic_service.close()
+    await tmb_ibus_service.close()
     await satellite_tile_service.close()
 
     # Flush diagnostics while Redis is still available.

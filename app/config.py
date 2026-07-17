@@ -69,7 +69,10 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------------------
     CORS_ALLOWED_ORIGINS: str = ""  # Comma-separated origins, empty = same-origin only
     TRUSTED_HOSTS: str = "*"  # Comma-separated Host allow-list; wildcard is forbidden in production
-    OUTBOUND_ALLOWED_HOSTS: str = "t-mobilitat.atm.cat,t-mobilitat.cat,api.tomtom.com"
+    OUTBOUND_ALLOWED_HOSTS: str = (
+        "t-mobilitat.atm.cat,t-mobilitat.cat,api.tomtom.com,api.tmb.cat,"
+        "www.ambmobilitat.cat"
+    )
 
     # -------------------------------------------------------------------------
     # ATM T-mobilitat Real-Time (GTFS-RT)
@@ -82,6 +85,34 @@ class Settings(BaseSettings):
         "https://t-mobilitat.atm.cat/opendata/vehicle_positions/user/token/open"
     )
     ATM_RT_POLL_INTERVAL_SECONDS: int = Field(default=30, ge=5, le=3_600)
+
+    # -------------------------------------------------------------------------
+    # TMB iBus (stop-level, live arrival predictions)
+    # -------------------------------------------------------------------------
+    # Keep both credential values on the BFF. The Expo bundle never receives
+    # them, because iBus is requested through /api/v1/ibus/fleet only.
+    TMB_APP_ID: str = ""
+    TMB_APP_ID_FILE: str = ""
+    TMB_APP_KEY: str = ""
+    TMB_APP_KEY_FILE: str = ""
+    TMB_API_BASE_URL: str = "https://api.tmb.cat/v1"
+    TMB_IBUS_CACHE_TTL_SECONDS: int = Field(default=30, ge=15, le=120)
+    # Every-other-stop route scan used to position nearby services. A 120 s
+    # shared scan window keeps a full normal bus line below the daily quota.
+    TMB_IBUS_ROUTE_SCAN_MAX_STOPS: int = Field(default=16, ge=2, le=64)
+    TMB_IBUS_ROUTE_SCAN_TTL_SECONDS: int = Field(default=120, ge=30, le=600)
+    TMB_IBUS_STOP_STRIDE: int = Field(default=2, ge=1, le=5)
+    TMB_IBUS_GLOBAL_REQUESTS_PER_MINUTE: int = Field(default=60, ge=1, le=10_000)
+    TMB_IBUS_GLOBAL_REQUESTS_PER_DAY: int = Field(default=15_000, ge=1, le=1_000_000)
+    TMB_IBUS_PROVIDER_CIRCUIT_SECONDS: int = Field(default=60, ge=5, le=3_600)
+
+    # AMB publishes the non-TMB metropolitan bus predictions in one GTFS-RT
+    # feed.  It complements iBus for operators such as Direxis TUSGSAL (M30).
+    # The BFF shares this small snapshot across every active driver.
+    AMB_RT_TRIP_UPDATES_URL: str = (
+        "https://www.ambmobilitat.cat/transit/trips-updates/trips.bin"
+    )
+    AMB_RT_CACHE_TTL_SECONDS: int = Field(default=30, ge=15, le=120)
 
     # -------------------------------------------------------------------------
     # ATM T-mobilitat Static GTFS
@@ -165,6 +196,10 @@ class Settings(BaseSettings):
         if self.TRAFFIC_GLOBAL_REQUESTS_PER_MINUTE > self.TRAFFIC_GLOBAL_REQUESTS_PER_DAY:
             raise ValueError(
                 "TRAFFIC_GLOBAL_REQUESTS_PER_MINUTE cannot exceed the daily traffic limit"
+            )
+        if self.TMB_IBUS_GLOBAL_REQUESTS_PER_MINUTE > self.TMB_IBUS_GLOBAL_REQUESTS_PER_DAY:
+            raise ValueError(
+                "TMB_IBUS_GLOBAL_REQUESTS_PER_MINUTE cannot exceed the daily iBus limit"
             )
         if self.SATELLITE_GLOBAL_REQUESTS_PER_MINUTE > self.SATELLITE_GLOBAL_REQUESTS_PER_DAY:
             raise ValueError(

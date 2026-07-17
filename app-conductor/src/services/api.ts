@@ -267,6 +267,82 @@ function isBoundedString(value: unknown, maxLength = 512): value is string {
     && !/[\u0000-\u001F\u007F]/.test(value);
 }
 
+function isIbusVehiclePrediction(value: unknown): value is IbusVehiclePrediction {
+  if (!isRecord(value)) return false;
+  return isBoundedString(value.vehicle_id, 160)
+    && typeof value.arrival_epoch === 'number'
+    && Number.isInteger(value.arrival_epoch)
+    && typeof value.eta_seconds === 'number'
+    && Number.isInteger(value.eta_seconds)
+    && value.eta_seconds >= 0
+    && value.eta_seconds <= 14_400
+    && isBoundedString(value.destination_name, 300);
+}
+
+function isIbusAheadPosition(value: unknown): value is IbusAheadPosition {
+  if (!isRecord(value)) return false;
+  return isBoundedString(value.stop_id, 160)
+    && isBoundedString(value.stop_name, 500)
+    && typeof value.stop_sequence === 'number'
+    && Number.isInteger(value.stop_sequence)
+    && value.stop_sequence >= 0
+    && value.stop_sequence <= 10_000
+    && isIbusVehiclePrediction(value.prediction);
+}
+
+function isIbusRoutePosition(value: unknown): value is IbusRoutePosition {
+  if (!isRecord(value)) return false;
+  return isBoundedString(value.stop_id, 160)
+    && isBoundedString(value.stop_name, 500)
+    && typeof value.stop_sequence === 'number'
+    && Number.isInteger(value.stop_sequence)
+    && value.stop_sequence >= 0
+    && value.stop_sequence <= 10_000
+    && (value.relation === 'ahead' || value.relation === 'behind')
+    && isIbusVehiclePrediction(value.prediction);
+}
+
+function parseIbusFleetSummary(value: unknown): IbusFleetSummary | null {
+  if (!isRecord(value)) return null;
+  const status = value.status;
+  if (
+    !['tmb_ibus', 'amb_gtfs_rt'].includes(String(value.source))
+    || !['available', 'unconfigured', 'rate_limited', 'unavailable'].includes(String(status))
+    || !isBoundedString(value.stop_id, 160)
+    || !isBoundedString(value.stop_name, 500)
+    || !isBoundedString(value.reference_vehicle_id, 160)
+    || !(value.reference_arrival_epoch === null || (
+      typeof value.reference_arrival_epoch === 'number'
+      && Number.isInteger(value.reference_arrival_epoch)
+    ))
+    || !(value.reference_prediction === null || isIbusVehiclePrediction(value.reference_prediction))
+    || typeof value.reference_is_schedule_match !== 'boolean'
+    || !(value.ahead_vehicle === null || isIbusVehiclePrediction(value.ahead_vehicle))
+    || !(value.behind_vehicle === null || isIbusVehiclePrediction(value.behind_vehicle))
+    || !(value.ahead_position === undefined || value.ahead_position === null || isIbusAheadPosition(value.ahead_position))
+    || !(value.route_positions === undefined || (
+      Array.isArray(value.route_positions)
+      && value.route_positions.length <= 16
+      && value.route_positions.every(isIbusRoutePosition)
+    ))
+  ) return null;
+
+  return {
+    source: value.source as IbusFleetSummary['source'],
+    status: status as IbusFleetSummary['status'],
+    stop_id: value.stop_id,
+    stop_name: value.stop_name,
+    reference_vehicle_id: value.reference_vehicle_id,
+    reference_arrival_epoch: value.reference_arrival_epoch,
+    reference_prediction: value.reference_prediction,
+    reference_is_schedule_match: value.reference_is_schedule_match,
+    ahead_vehicle: value.ahead_vehicle,
+    behind_vehicle: value.behind_vehicle,
+    ahead_position: value.ahead_position ?? null,
+    route_positions: value.route_positions ?? [],
+  };
+}
+
 function isDirectionDestination(value: unknown): value is DirectionDestination {
   if (!isRecord(value)) return false;
   return (value.direction_id === 0 || value.direction_id === 1)
@@ -454,6 +530,43 @@ export interface TrafficSummary {
   delay_seconds: number | null;
   confidence: number | null;
   road_closure: boolean;
+}
+
+export interface IbusVehiclePrediction {
+  vehicle_id: string;
+  arrival_epoch: number;
+  eta_seconds: number;
+  destination_name: string;
+}
+
+export interface IbusAheadPosition {
+  stop_id: string;
+  stop_name: string;
+  stop_sequence: number;
+  prediction: IbusVehiclePrediction;
+}
+
+export interface IbusRoutePosition {
+  stop_id: string;
+  stop_name: string;
+  stop_sequence: number;
+  relation: 'ahead' | 'behind';
+  prediction: IbusVehiclePrediction;
+}
+
+export interface IbusFleetSummary {
+  source: 'tmb_ibus' | 'amb_gtfs_rt';
+  status: 'available' | 'unconfigured' | 'rate_limited' | 'unavailable';
+  stop_id: string;
+  stop_name: string;
+  reference_vehicle_id: string;
+  reference_arrival_epoch: number | null;
+  reference_prediction: IbusVehiclePrediction | null;
+  reference_is_schedule_match: boolean;
+  ahead_vehicle: IbusVehiclePrediction | null;
+  behind_vehicle: IbusVehiclePrediction | null;
+  ahead_position: IbusAheadPosition | null;
+  route_positions: IbusRoutePosition[];
 }
 
 export interface SatelliteAvailability {
@@ -770,6 +883,51 @@ export const apiService = {
       body: { latitude, longitude },
       signal,
     });
+  },
+
+  fetchIbusFleet(
+    routeId: string,
+    directionId: 0 | 1,
+    stopId: string,
+    tripId?: string,
+    scheduledDepartureEpoch?: number,
+    signal?: AbortSignal,
+  ): Promise<IbusFleetSummary | null> {
+    const normalizedRouteId = routeId.trim();
+    const normalizedTripId = tripId?.trim() ?? '';
+    const normalizedStopId = stopId.trim();
+    if (
+      !normalizedRouteId
+      || normalizedRouteId.length > 128
+      || !normalizedStopId
+      || normalizedStopId.length > 160
+      || (normalizedTripId.length > 160)
+      || /[\u0000-\u001F\u007F]/.test(normalizedRouteId)
+      || /[\u0000-\u001F\u007F]/.test(normalizedTripId)
+      || /[\u0000-\u001F\u007F]/.test(normalizedStopId)
+      || (scheduledDepartureEpoch !== undefined && (
+        !Number.isInteger(scheduledDepartureEpoch)
+        || scheduledDepartureEpoch < 1_577_836_800
+        || scheduledDepartureEpoch > 4_102_444_800
+      ))
+    ) {
+      return Promise.reject(new ApiError('Consulta iBus no vàlida.', undefined, 'validation'));
+    }
+
+    return requestJson<unknown>('/api/v1/ibus/fleet', {
+      method: 'POST',
+      endpoint: 'ibus_fleet',
+      body: {
+        route_id: normalizedRouteId,
+        direction_id: directionId,
+        stop_id: normalizedStopId,
+        ...(normalizedTripId ? { trip_id: normalizedTripId } : {}),
+        ...(scheduledDepartureEpoch !== undefined
+          ? { scheduled_departure_epoch: scheduledDepartureEpoch }
+          : {}),
+      },
+      signal,
+    }).then(parseIbusFleetSummary);
   },
 
   fetchSatelliteAvailability(signal?: AbortSignal): Promise<SatelliteAvailability> {

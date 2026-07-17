@@ -26,6 +26,7 @@ export type TelemetryEndpoint =
   | 'route_updates'
   | 'route_vehicles'
   | 'routes'
+  | 'ibus_fleet'
   | 'traffic_summary'
   | 'upcoming_trips';
 

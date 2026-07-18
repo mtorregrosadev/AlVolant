@@ -50,14 +50,25 @@ echo "→ Instal·lant dependències CocoaPods"
 echo "→ Validant TypeScript"
 (cd "$APP_DIR" && npx tsc --noEmit)
 
+# Expo names the generated Xcode workspace and app target after the current
+# app name.  Do not retain a stale pre-rebrand target name here: this script
+# should keep working when the app is renamed and prebuild recreates ios/.
+workspaces=("$IOS_DIR"/*.xcworkspace)
+if [[ "${#workspaces[@]}" -ne 1 || ! -d "${workspaces[0]}" ]]; then
+  echo "Error: s'esperava un únic .xcworkspace a $IOS_DIR després de pod install." >&2
+  exit 4
+fi
+WORKSPACE_PATH="${workspaces[0]}"
+XCODE_SCHEME="${XCODE_SCHEME:-$(basename "$WORKSPACE_PATH" .xcworkspace)}"
+
 mkdir -p "$DERIVED_DATA" "$STAGING_DIR/Payload"
 : > "$BUILD_LOG"
 
 echo "→ Compilant per a iPhone físic (Release, sense signatura)"
 set +e
 xcodebuild \
-  -workspace "$IOS_DIR/appconductor.xcworkspace" \
-  -scheme appconductor \
+  -workspace "$WORKSPACE_PATH" \
+  -scheme "$XCODE_SCHEME" \
   -configuration Release \
   -sdk iphoneos \
   -destination 'generic/platform=iOS' \
@@ -74,7 +85,7 @@ if [[ "$build_status" -ne 0 ]]; then
   exit "$build_status"
 fi
 
-APP_PATH="$DERIVED_DATA/Build/Products/Release-iphoneos/appconductor.app"
+APP_PATH="$DERIVED_DATA/Build/Products/Release-iphoneos/$XCODE_SCHEME.app"
 if [[ ! -d "$APP_PATH" ]]; then
   echo "Error: no s'ha trobat l'app compilada a $APP_PATH" >&2
   exit 4

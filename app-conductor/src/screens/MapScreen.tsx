@@ -25,6 +25,7 @@ import * as Location from 'expo-location';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
+  BASE_URL,
   apiService,
   type IbusFleetSummary,
   type LiveWebSocketMessage,
@@ -33,6 +34,7 @@ import {
   type TrafficSummary,
   type VehiclePosition,
 } from '../services/api';
+import { loadSatelliteClientId, saveSatelliteClientId } from '../services/satelliteClient';
 import { telemetry } from '../services/telemetry';
 import {
   requestBackgroundRoutePermission,
@@ -143,6 +145,8 @@ const BUS_STOP_DWELL_SECONDS = 30;
 const TRAFFIC_REFRESH_INTERVAL_MS = 120_000;
 const IBUS_REFRESH_INTERVAL_MS = 30_000;
 const SATELLITE_STATUS_REFRESH_INTERVAL_MS = 300_000;
+const SATELLITE_ACTIVE_STATUS_REFRESH_INTERVAL_MS = 30_000;
+const SATELLITE_STATUS_ZOOM = 16;
 const LIVE_REFRESH_MIN_INTERVAL_MS = 60_000;
 const LIVE_REFRESH_JITTER_MS = 5_000;
 const LIVE_RECONNECT_MAX_MS = 30_000;
@@ -192,6 +196,24 @@ function distanceMeters(from: Coordinate | null, to: Coordinate | null) {
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 
   return earthRadiusMeters * c;
+}
+
+function coordinateToSatelliteTile(
+  coordinate: Coordinate | null,
+  zoom = SATELLITE_STATUS_ZOOM,
+) {
+  if (!coordinate) return null;
+  const [longitude, latitude] = coordinate;
+  if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) return null;
+  const tileCount = 2 ** zoom;
+  const safeLatitude = clamp(latitude, -85.05112878, 85.05112878);
+  const x = Math.floor(((longitude + 180) / 360) * tileCount);
+  const latitudeRadians = safeLatitude * (Math.PI / 180);
+  const y = Math.floor(
+    ((1 - Math.asinh(Math.tan(latitudeRadians)) / Math.PI) / 2) * tileCount,
+  );
+  if (x < 0 || x >= tileCount || y < 0 || y >= tileCount) return null;
+  return { z: zoom, x, y };
 }
 
 function bearingBetween(from: Coordinate, to: Coordinate) {
@@ -727,8 +749,6 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const [visualPose, setVisualPose] = useState<VisualPose | null>(null);
   const [displayRouteProgress, setDisplayRouteProgress] = useState<number | null>(null);
   const [isSimulating, setIsSimulating] = useState(false);
-  const [simulationStartProgress, setSimulationStartProgress] = useState(0);
-  const [simulationRunToken, setSimulationRunToken] = useState(0);
   const [simulationSpeedKmh, setSimulationSpeedKmh] = useState(0);
   const [mapBearing, setMapBearing] = useState<number>(0);
   const [routeInfo, setRouteInfo] = useState<any>(null);
@@ -738,6 +758,8 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const [trafficSummary, setTrafficSummary] = useState<TrafficSummary | null>(null);
   const [ibusFleet, setIbusFleet] = useState<IbusFleetSummary | null>(null);
   const [satelliteAvailable, setSatelliteAvailable] = useState(true);
+  const [satelliteClientId, setSatelliteClientId] = useState<string | null>(null);
+  const [satelliteClientIdLoaded, setSatelliteClientIdLoaded] = useState(false);
   const satelliteAvailabilityControllerRef = useRef<AbortController | null>(null);
   const [isServiceAlertModalVisible, setIsServiceAlertModalVisible] = useState(false);
   const [isServiceAlertTabDismissed, setIsServiceAlertTabDismissed] = useState(false);
@@ -805,6 +827,10 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const trafficLookupCell = trafficCoordinate
     ? `${isSimulating ? 'simulation' : 'live'}:${Math.round(trafficCoordinate[1] * 100)},${Math.round(trafficCoordinate[0] * 100)}`
     : null;
+  const satelliteStatusTile = React.useMemo(
+    () => coordinateToSatelliteTile(trafficCoordinate),
+    [trafficLookupCell],
+  );
   // Simulations make one immediate lookup so the integration can be checked;
   // active real navigation refreshes the result on the bounded interval below.
   const shouldFetchTraffic = !loading
@@ -865,30 +891,55 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     };
   }, [directionId, isSimulating, routeId, shouldFetchTraffic, trafficLookupCell, tripId]);
 
+  useEffect(() => {
+    let disposed = false;
+    void loadSatelliteClientId().then((clientId) => {
+      if (disposed) return;
+      setSatelliteClientId(clientId);
+      setSatelliteClientIdLoaded(true);
+    });
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
   const refreshSatelliteAvailability = React.useCallback(() => {
+    if (!satelliteClientIdLoaded) return;
     satelliteAvailabilityControllerRef.current?.abort();
     const requestController = new AbortController();
     satelliteAvailabilityControllerRef.current = requestController;
-    void apiService.fetchSatelliteAvailability(requestController.signal)
+    void apiService.fetchSatelliteAvailability({
+      clientId: satelliteClientId,
+      tile: satelliteStatusTile,
+      signal: requestController.signal,
+    })
       .then((status) => {
-        if (!requestController.signal.aborted) setSatelliteAvailable(status.available);
+        if (requestController.signal.aborted) return;
+        setSatelliteAvailable(status.available);
+        if (status.clientId && status.clientId !== satelliteClientId) {
+          setSatelliteClientId(status.clientId);
+          void saveSatelliteClientId(status.clientId);
+        }
       })
       .catch(() => {
         // Keep the last known state during an ordinary network interruption.
       });
-  }, []);
+  }, [satelliteClientId, satelliteClientIdLoaded, satelliteStatusTile]);
 
   useEffect(() => {
+    if (!satelliteClientIdLoaded) return undefined;
     refreshSatelliteAvailability();
     const refreshTimer = setInterval(
       refreshSatelliteAvailability,
-      SATELLITE_STATUS_REFRESH_INTERVAL_MS,
+      mapTheme === 'satellite'
+        ? SATELLITE_ACTIVE_STATUS_REFRESH_INTERVAL_MS
+        : SATELLITE_STATUS_REFRESH_INTERVAL_MS,
     );
     return () => {
       clearInterval(refreshTimer);
       satelliteAvailabilityControllerRef.current?.abort();
     };
-  }, [refreshSatelliteAvailability]);
+  }, [mapTheme, refreshSatelliteAvailability, satelliteClientIdLoaded]);
 
   const directionName = React.useMemo(() => {
     if (directionLabel) {
@@ -927,7 +978,20 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   // not map consistently to Material icons, whereas an alert triangle stays
   // clear at the small size of the persistent tab.
   const serviceAlertIcon: IconName = 'alert-outline';
-  const activeMapTheme = MAP_THEME_OPTIONS[mapTheme];
+  const activeMapTheme = React.useMemo(() => {
+    const selectedTheme = MAP_THEME_OPTIONS[mapTheme];
+    if (mapTheme !== 'satellite' || !satelliteClientId) {
+      return selectedTheme;
+    }
+
+    // MapLibre cannot attach our API headers to a raster source. The BFF
+    // therefore returns a per-installation style URL with an opaque client
+    // identifier in its tile template; only its HMAC is stored server-side.
+    return {
+      ...selectedTheme,
+      style: `${BASE_URL}/maps/satellite/style.json?client_id=${encodeURIComponent(satelliteClientId)}`,
+    };
+  }, [mapTheme, satelliteClientId]);
   const usesLightChrome = mapTheme === 'light';
   const chromeTextColor = usesLightChrome ? '#1F2937' : '#FFFFFF';
   const chromeMutedTextColor = usesLightChrome ? '#6B7280' : '#9FB0C8';
@@ -1069,6 +1133,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     : undefined;
   const canFetchIbus = !loading
     && !error
+    && preferences.fleetTrackingEnabled
     && Boolean(iBusStopId);
 
   useEffect(() => {
@@ -1468,25 +1533,43 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
       )] : []),
     ];
   }, [currentRouteProgress, effectiveSpeedKmh, ibusFleet, nextStop?.stop_name, stopsOnRoute, t]);
-  const visibleFleetMetrics = fleetMetrics.length > 0 ? fleetMetrics : iBusFleetMetrics;
-  const iBusSummaryRows = React.useMemo(() => iBusFleetMetrics.slice(0, 2).map((metric) => {
+  const visibleFleetMetrics = preferences.fleetTrackingEnabled
+    ? (fleetMetrics.length > 0 ? fleetMetrics : iBusFleetMetrics)
+    : [];
+  const iBusSummaryRows = React.useMemo(() => (
+    preferences.fleetTrackingEnabled ? iBusFleetMetrics.slice(0, 2).map((metric) => {
     const stop = metric.stopName.split(/\s+-\s+/)[0].trim();
     return {
       ...metric,
       label: `${metric.title}: ${formatEta(Math.ceil(metric.etaSeconds / 60), language)} · ${stop}`,
     };
-  }), [iBusFleetMetrics, language]);
+    }) : []
+  ), [iBusFleetMetrics, language, preferences.fleetTrackingEnabled]);
   // The route radar samples every other stop and groups the iBus predictions
-  // into inferred services. These markers are stop-arrival based rather than
-  // GPS dots, but let the driver see all detected buses on the same rail.
+  // into inferred services. iBus gives an arrival prediction for a stop, not
+  // a GPS coordinate. When several services point at the same stop, render
+  // only the earliest one: drawing them on top of each other would imply a
+  // precision that the provider does not supply.
   const iBusJourneyVehicles = React.useMemo(() => {
-    if (routePath.totalDistance <= 0 || !ibusFleet) return [];
+    if (!preferences.fleetTrackingEnabled || routePath.totalDistance <= 0 || !ibusFleet) return [];
     const positions = ibusFleet.route_positions.length > 0
       ? ibusFleet.route_positions
       : ibusFleet.ahead_position
         ? [{ ...ibusFleet.ahead_position, relation: 'ahead' as const }]
         : [];
-    return positions.flatMap((position, index) => {
+    const visiblePositions = positions.reduce<Array<(typeof positions)[number]>>((result, position) => {
+      const key = position.stop_id || `${position.stop_sequence}-${position.relation}`;
+      const existingIndex = result.findIndex((item) => (
+        (item.stop_id || `${item.stop_sequence}-${item.relation}`) === key
+      ));
+      if (existingIndex === -1) {
+        result.push(position);
+      } else if (position.prediction.arrival_epoch < result[existingIndex].prediction.arrival_epoch) {
+        result[existingIndex] = position;
+      }
+      return result;
+    }, []);
+    return visiblePositions.flatMap((position) => {
       const observedStop = stopsOnRoute.find((stop) => (
         stop.stop_id === position.stop_id && stop.distanceAlong !== null
       ));
@@ -1499,10 +1582,9 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
           Math.ceil(position.prediction.eta_seconds / 60),
           language,
         )}`,
-        offset: (index % 2 === 0 ? -1 : 1) * 3,
       }];
     });
-  }, [ibusFleet, language, routePath.totalDistance, stopsOnRoute]);
+  }, [ibusFleet, language, preferences.fleetTrackingEnabled, routePath.totalDistance, stopsOnRoute]);
   const driverMetrics: DriverMetric[] = [
     { icon: 'speedometer' as IconName, label: `${currentSpeedLabel} km/h` },
     nextStopDistanceMeters !== null
@@ -1864,22 +1946,17 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
       animationFrameRef.current = null;
     }
 
-    const initialProgressMeters = clamp(
-      routePath.totalDistance * simulationStartProgress,
-      0,
-      routePath.totalDistance,
-    );
-    const initialPose = poseAtRouteDistance(routePath, initialProgressMeters);
+    const initialPose = poseAtRouteDistance(routePath, 0);
     if (!initialPose) return undefined;
 
     visualPoseRef.current = initialPose;
-    lastSnappedProgressRef.current = initialProgressMeters;
+    lastSnappedProgressRef.current = 0;
     setVisualPose(initialPose);
-    setDisplayRouteProgress(initialProgressMeters);
+    setDisplayRouteProgress(0);
     setSimulationSpeedKmh(0);
     setIsCameraFollowing(true);
 
-    let progressMeters = initialProgressMeters;
+    let progressMeters = 0;
     let speedMetersPerSecond = 0;
     let previousTimestamp: number | null = null;
     let cruiseSpeedKmh = randomBetween(
@@ -1897,10 +1974,6 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
         && distance < routePath.totalDistance - 3
       ))
       .filter((distance, index, distances) => index === 0 || distance - distances[index - 1] > 8);
-    nextStopIndex = simulationStops.findIndex((distance) => distance > progressMeters + 2);
-    if (nextStopIndex < 0) {
-      nextStopIndex = simulationStops.length;
-    }
 
     const step = (timestamp: number) => {
       if (previousTimestamp !== null) {
@@ -1991,7 +2064,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
         simulationFrameRef.current = null;
       }
     };
-  }, [isSimulating, routePath, simulationRunToken, simulationStartProgress, stopsOnRoute]);
+  }, [isSimulating, routePath, stopsOnRoute]);
 
   // Load route data and connect WebSocket
   useEffect(() => {
@@ -2362,7 +2435,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   };
 
   const handleMapThemeChange = (theme: MapTheme) => {
-    if (theme === 'satellite' && !satelliteAvailable) {
+    if (theme === 'satellite' && (!satelliteAvailable || !satelliteClientId)) {
       return;
     }
     setIsMapThemePickerOpen(false);
@@ -2506,23 +2579,11 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
 
     if (count >= 3) {
       simulationTitleTapRef.current = { count: 0, lastTapAt: 0 };
-      setSimulationStartProgress(0);
-      setSimulationRunToken((token) => token + 1);
       setIsSimulating(true);
       return;
     }
 
     simulationTitleTapRef.current = { count, lastTapAt: now };
-  };
-
-  const handleStartSimulationAtMidpoint = () => {
-    if (!routePath.segments.length || routePath.totalDistance <= 0) {
-      return;
-    }
-
-    setSimulationStartProgress(0.5);
-    setSimulationRunToken((token) => token + 1);
-    setIsSimulating(true);
   };
 
   return (
@@ -2834,7 +2895,9 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
             {(Object.keys(MAP_THEME_OPTIONS) as MapTheme[]).map((theme) => {
               const option = MAP_THEME_OPTIONS[theme];
               const isActive = theme === (pendingMapTheme ?? mapTheme);
-              const isUnavailable = theme === 'satellite' && !satelliteAvailable;
+              const isUnavailable = theme === 'satellite' && (
+                !satelliteAvailable || !satelliteClientId
+              );
 
               return (
                 <TouchableOpacity
@@ -2906,25 +2969,6 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
         >
           <MaterialCommunityIcons name="crosshairs-gps" size={21} color="#FFFFFF" />
         </TouchableOpacity>
-        {__DEV__ ? (
-          <TouchableOpacity
-            style={[
-              styles.mapRecenterTrigger,
-              isSimulating && simulationStartProgress === 0.5 && styles.mapRecenterTriggerActive,
-              (!routePath.segments.length || routePath.totalDistance <= 0) && styles.mapControlDisabled,
-            ]}
-            onPress={handleStartSimulationAtMidpoint}
-            disabled={!routePath.segments.length || routePath.totalDistance <= 0}
-            accessibilityRole="button"
-            accessibilityLabel={t('map.simulateFromMiddle')}
-            accessibilityState={{
-              disabled: !routePath.segments.length || routePath.totalDistance <= 0,
-              selected: isSimulating && simulationStartProgress === 0.5,
-            }}
-          >
-            <MaterialCommunityIcons name="fast-forward" size={21} color="#FFFFFF" />
-          </TouchableOpacity>
-        ) : null}
       </View>
 
       {activeServiceAlert && !isServiceAlertTabDismissed ? (
@@ -3121,7 +3165,24 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
                     ]}
                   />
                 ))}
-                <View style={[styles.driverJourneyVehicle, { left: `${Math.min(96, Math.max(2, routeProgressPercent))}%` }]} />
+                <View
+                  style={[
+                    styles.driverJourneyOwnVehicle,
+                    usesLightChrome && styles.driverJourneyOwnVehicleLight,
+                    {
+                      left: `${Math.min(96, Math.max(2, routeProgressPercent))}%`,
+                      borderColor: vehicleAccent,
+                    },
+                  ]}
+                  accessible
+                  accessibilityLabel={t('map.ownVehiclePosition')}
+                >
+                  <MaterialCommunityIcons
+                    name={preferences.vehicleMarker === 'arrow' ? 'navigation' : 'bus'}
+                    size={11}
+                    color={vehicleAccent}
+                  />
+                </View>
                 {iBusJourneyVehicles.map((vehicle) => (
                   <View
                     key={vehicle.key}
@@ -3130,7 +3191,6 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
                       vehicle.relation === 'behind' && styles.driverJourneyIbusVehicleBehind,
                       {
                         left: `${vehicle.progress}%`,
-                        transform: [{ translateY: vehicle.offset }],
                       },
                     ]}
                     accessible
@@ -3691,15 +3751,21 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     backgroundColor: colors.primary,
   },
-  driverJourneyVehicle: {
+  driverJourneyOwnVehicle: {
     position: 'absolute',
-    width: 9,
-    height: 9,
-    marginLeft: -4,
-    borderRadius: 999,
+    top: -4,
+    width: 18,
+    height: 18,
+    marginLeft: -9,
+    borderRadius: 9,
     borderWidth: 2,
-    borderColor: '#FFFFFF',
-    backgroundColor: colors.primary,
+    backgroundColor: '#F7FBF9',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 3,
+  },
+  driverJourneyOwnVehicleLight: {
+    backgroundColor: '#FFFFFF',
   },
   driverJourneyIbusVehicle: {
     position: 'absolute',

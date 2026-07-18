@@ -587,7 +587,14 @@ export interface IbusFleetSummary {
 
 export interface SatelliteAvailability {
   available: boolean;
+  clientId: string | null;
 }
+
+export type SatelliteTileCoordinates = {
+  z: number;
+  x: number;
+  y: number;
+};
 
 export type LiveWebSocketMessage =
   | { type: 'subscribed'; topics: string[] }
@@ -946,12 +953,27 @@ export const apiService = {
     }).then(parseIbusFleetSummary);
   },
 
-  fetchSatelliteAvailability(signal?: AbortSignal): Promise<SatelliteAvailability> {
-    return requestJson<unknown>('/maps/satellite/status', {
+  fetchSatelliteAvailability(options: {
+    clientId?: string | null;
+    tile?: SatelliteTileCoordinates | null;
+    signal?: AbortSignal;
+  } = {}): Promise<SatelliteAvailability> {
+    const clientId = options.clientId?.trim();
+    const tile = options.tile;
+    const query = createQuery({
+      client_id: clientId || undefined,
+      z: tile?.z,
+      x: tile?.x,
+      y: tile?.y,
+    });
+    return requestJson<unknown>(`/maps/satellite/status${query}`, {
       reportTelemetry: false,
-      signal,
+      signal: options.signal,
     }).then((payload) => ({
       available: isRecord(payload) && payload.available === true,
+      clientId: isRecord(payload) && isBoundedString(payload.client_id, 100)
+        ? payload.client_id
+        : null,
     }));
   },
 

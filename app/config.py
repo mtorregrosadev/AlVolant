@@ -150,6 +150,14 @@ class Settings(BaseSettings):
     # load tripping the safety guard before the day budget is relevant.
     SATELLITE_GLOBAL_REQUESTS_PER_MINUTE: int = Field(default=600, ge=1, le=10_000)
     SATELLITE_GLOBAL_REQUESTS_PER_DAY: int = Field(default=50_000, ge=1, le=2_000_000)
+    # A mobile installation receives a private opaque identifier used only to
+    # account for satellite tiles. Redis stores an HMAC digest, never that ID.
+    # The IP ceiling prevents an abusive client from evading its device quota
+    # just by repeatedly clearing local storage.
+    SATELLITE_CLIENT_REQUESTS_PER_MINUTE: int = Field(default=300, ge=1, le=10_000)
+    SATELLITE_CLIENT_REQUESTS_PER_DAY: int = Field(default=3_000, ge=1, le=100_000)
+    SATELLITE_IP_REQUESTS_PER_MINUTE: int = Field(default=600, ge=1, le=10_000)
+    SATELLITE_IP_REQUESTS_PER_DAY: int = Field(default=6_000, ge=1, le=200_000)
     SATELLITE_PROVIDER_CIRCUIT_SECONDS: int = Field(default=3_600, ge=5, le=86_400)
 
     # -------------------------------------------------------------------------
@@ -204,6 +212,14 @@ class Settings(BaseSettings):
         if self.SATELLITE_GLOBAL_REQUESTS_PER_MINUTE > self.SATELLITE_GLOBAL_REQUESTS_PER_DAY:
             raise ValueError(
                 "SATELLITE_GLOBAL_REQUESTS_PER_MINUTE cannot exceed the daily satellite limit"
+            )
+        if self.SATELLITE_CLIENT_REQUESTS_PER_MINUTE > self.SATELLITE_CLIENT_REQUESTS_PER_DAY:
+            raise ValueError(
+                "SATELLITE_CLIENT_REQUESTS_PER_MINUTE cannot exceed the daily client limit"
+            )
+        if self.SATELLITE_IP_REQUESTS_PER_MINUTE > self.SATELLITE_IP_REQUESTS_PER_DAY:
+            raise ValueError(
+                "SATELLITE_IP_REQUESTS_PER_MINUTE cannot exceed the daily IP limit"
             )
         return self
 

@@ -17,6 +17,7 @@ from app.api.satellite import router as satellite_router
 from app.cache.redis_manager import CacheManager
 from app.config import Settings
 from app.services.satellite_tile_service import (
+    SatelliteTileClientQuotaExceededError,
     SatelliteTileNotFoundError,
     SatelliteTileQuotaExceededError,
     SatelliteTileService,
@@ -51,6 +52,45 @@ async def test_satellite_tile_is_cached_and_coalesces_concurrent_requests(
     fetched.assert_awaited_once_with(14, 8290, 6119)
     assert await service.get_tile(14, 8290, 6119) == images[0]
     fetched.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_satellite_cached_tiles_do_not_consume_client_quota(settings: Settings) -> None:
+    service = SatelliteTileService(_settings(settings, SATELLITE_TILE_CACHE_ENTRIES=2))
+    fetched = AsyncMock(return_value=_jpeg())
+    service._fetch_provider_tile = fetched
+
+    first = await service.get_tile(14, 8290, 6119)
+    service._client_request_allowed = AsyncMock(return_value=False)
+
+    cached = await service.get_tile(
+        14,
+        8290,
+        6119,
+        client_id="A" * 24,
+        client_ip="127.0.0.1",
+    )
+
+    assert cached == first
+    service._client_request_allowed.assert_not_awaited()
+    fetched.assert_awaited_once_with(14, 8290, 6119)
+
+
+@pytest.mark.asyncio
+async def test_satellite_client_quota_is_reserved_only_for_cold_tiles(settings: Settings) -> None:
+    service = SatelliteTileService(_settings(settings))
+    service._client_request_allowed = AsyncMock(return_value=False)
+
+    with pytest.raises(SatelliteTileClientQuotaExceededError):
+        await service.get_tile(
+            14,
+            8290,
+            6119,
+            client_id="A" * 24,
+            client_ip="127.0.0.1",
+        )
+
+    service._client_request_allowed.assert_awaited_once_with("A" * 24, "127.0.0.1")
 
 
 @pytest.mark.asyncio
@@ -132,6 +172,31 @@ async def test_satellite_global_minute_quota_disables_availability(
 
 
 @pytest.mark.asyncio
+async def test_satellite_status_keeps_a_cached_area_enabled_after_global_quota(
+    settings: Settings,
+    cache: CacheManager,
+) -> None:
+    service = SatelliteTileService(
+        _settings(
+            settings,
+            SATELLITE_GLOBAL_REQUESTS_PER_MINUTE=1,
+            SATELLITE_GLOBAL_REQUESTS_PER_DAY=1,
+        ),
+        cache,
+    )
+    service._fetch_provider_tile = AsyncMock(return_value=_jpeg())
+    await service.get_tile(14, 8290, 6119)
+    assert await service._provider_request_allowed() is True
+    assert await service.is_available() is False
+
+    assert await service.is_client_available(
+        "A" * 24,
+        "127.0.0.1",
+        tile=(14, 8290, 6119),
+    ) is True
+
+
+@pytest.mark.asyncio
 async def test_satellite_quota_prevents_an_upstream_request(
     settings: Settings,
     cache: CacheManager,
@@ -163,26 +228,30 @@ def test_satellite_endpoint_is_public_but_tightly_bounded() -> None:
     app.include_router(satellite_router)
     client = TestClient(app)
 
-    response = client.get("/maps/satellite/14/8290/6119.jpg")
+    client_id = "A" * 24
+    response = client.get(f"/maps/satellite/14/8290/6119.jpg?client_id={client_id}")
 
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/jpeg"
     assert response.headers["cache-control"].startswith("public")
     assert response.content == image
-    get_tile.assert_awaited_once_with(14, 8290, 6119)
+    get_tile.assert_awaited_once_with(14, 8290, 6119, client_id=client_id, client_ip="testclient")
 
 
 def test_satellite_status_does_not_expose_quota_or_credentials() -> None:
     app = FastAPI()
-    app.state.satellite_tile_service = SimpleNamespace(is_available=AsyncMock(return_value=False))
+    available = AsyncMock(return_value=False)
+    app.state.satellite_tile_service = SimpleNamespace(is_client_available=available)
     app.include_router(satellite_router)
     client = TestClient(app)
 
     response = client.get("/maps/satellite/status")
 
     assert response.status_code == 200
-    assert response.json() == {"available": False}
+    assert response.json()["available"] is False
+    assert len(response.json()["client_id"]) >= 24
     assert response.headers["cache-control"] == "no-store"
+    available.assert_awaited_once()
 
 
 def test_satellite_endpoint_returns_429_after_quota_exhaustion() -> None:
@@ -192,7 +261,35 @@ def test_satellite_endpoint_returns_429_after_quota_exhaustion() -> None:
     app.include_router(satellite_router)
     client = TestClient(app)
 
-    response = client.get("/maps/satellite/14/8290/6119.jpg")
+    response = client.get(f"/maps/satellite/14/8290/6119.jpg?client_id={'A' * 24}")
 
     assert response.status_code == 429
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_satellite_endpoint_returns_client_quota_marker() -> None:
+    get_tile = AsyncMock(side_effect=SatelliteTileClientQuotaExceededError)
+    app = FastAPI()
+    app.state.satellite_tile_service = SimpleNamespace(get_tile=get_tile)
+    app.include_router(satellite_router)
+    client = TestClient(app)
+
+    response = client.get(f"/maps/satellite/14/8290/6119.jpg?client_id={'A' * 24}")
+
+    assert response.status_code == 429
+    assert response.headers["x-satellite-disabled"] == "client-quota"
+
+
+def test_satellite_style_binds_tiles_to_the_opaque_client_id() -> None:
+    app = FastAPI()
+    app.include_router(satellite_router)
+    client = TestClient(app)
+    client_id = "A" * 24
+
+    response = client.get(f"/maps/satellite/style.json?client_id={client_id}")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    tile_url = response.json()["sources"]["satellite"]["tiles"][0]
+    assert f"client_id={client_id}" in tile_url
+    assert "token=" not in tile_url

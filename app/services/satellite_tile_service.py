@@ -10,7 +10,11 @@ not a generic image proxy.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import math
+import re
+import secrets
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -41,6 +45,9 @@ _MAX_LONGITUDE = 3.50
 _SATELLITE_QUOTA_MINUTE_PREFIX = "rl:satellite:minute"
 _SATELLITE_QUOTA_DAY_PREFIX = "rl:satellite:day"
 _SATELLITE_CIRCUIT_KEY = "rl:satellite:circuit"
+_SATELLITE_CLIENT_QUOTA_PREFIX = "rl:satellite:client"
+_SATELLITE_IP_QUOTA_PREFIX = "rl:satellite:ip"
+_CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{24,80}$")
 
 
 class SatelliteTileNotFoundError(ValueError):
@@ -53,6 +60,10 @@ class SatelliteTileUnavailableError(RuntimeError):
 
 class SatelliteTileQuotaExceededError(SatelliteTileUnavailableError):
     """Raised once the configured shared provider budget is exhausted."""
+
+
+class SatelliteTileClientQuotaExceededError(SatelliteTileUnavailableError):
+    """Raised when one installation or IP has exhausted its imagery budget."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,7 +101,15 @@ class SatelliteTileService:
             await self._client.aclose()
             self._client = None
 
-    async def get_tile(self, z: int, x: int, y: int) -> bytes:
+    async def get_tile(
+        self,
+        z: int,
+        x: int,
+        y: int,
+        *,
+        client_id: str | None = None,
+        client_ip: str | None = None,
+    ) -> bytes:
         """Return a bounded, cached XYZ JPEG tile for a visible map area."""
         key = _validate_tile_coordinates(z, x, y)
         if not self._settings.SATELLITE_TILES_ENABLED or not _tile_intersects_catalonia(*key):
@@ -98,17 +117,21 @@ class SatelliteTileService:
         if not self._settings.ARCGIS_API_KEY:
             raise SatelliteTileUnavailableError
 
-        now = time.monotonic()
-        cached = self._memory_cache.get(key)
-        if cached and cached.expires_at > now:
-            self._memory_cache.move_to_end(key)
-            return cached.image
-        if cached:
-            self._memory_cache.pop(key, None)
+        cached = self._cached_image(key)
+        if cached is not None:
+            return cached
 
         async with self._inflight_lock:
             task = self._inflight.get(key)
             if task is None:
+                # A client consumes its allowance only when this process has
+                # to start a new cold-tile fetch. Returning an in-memory tile
+                # or joining an already-running fetch remains free: it does
+                # not add an Esri request and must not make a cached area
+                # unusable once the daily allowance has been reached.
+                if client_id is not None:
+                    if not client_ip or not await self._client_request_allowed(client_id, client_ip):
+                        raise SatelliteTileClientQuotaExceededError
                 task = asyncio.create_task(self._fetch_and_cache(key), name="satellite-tile-fetch")
                 self._inflight[key] = task
         try:
@@ -151,6 +174,85 @@ class SatelliteTileService:
                 logger.error("Satellite imagery quota unavailable — imagery disabled")
                 return False
             logger.warning("Satellite imagery quota unavailable — development imagery allowed")
+            return True
+
+    async def is_client_available(
+        self,
+        client_id: str,
+        client_ip: str,
+        *,
+        tile: tuple[int, int, int] | None = None,
+    ) -> bool:
+        """Return whether satellite can be used in the requested map area.
+
+        A cached tile stays available even after a client, IP, or shared
+        upstream allowance has been exhausted.  This matters while a driver
+        is moving through an area already loaded by the BFF: serving the cache
+        neither calls Esri nor consumes a quota token.
+        """
+        if not self._settings.SATELLITE_TILES_ENABLED or not self._settings.ARCGIS_API_KEY:
+            return False
+        if tile is not None and self.has_cached_tile(*tile):
+            return True
+        if not await self.is_available():
+            return False
+        return await self._client_quota_has_capacity(client_id, client_ip)
+
+    def has_cached_tile(self, z: int, x: int, y: int) -> bool:
+        """Return whether an allowed map tile remains in the process cache."""
+        try:
+            key = _validate_tile_coordinates(z, x, y)
+        except SatelliteTileNotFoundError:
+            return False
+        if not self._settings.SATELLITE_TILES_ENABLED or not _tile_intersects_catalonia(*key):
+            return False
+        return self._cached_image(key) is not None
+
+    def _cached_image(self, key: tuple[int, int, int]) -> bytes | None:
+        """Read an unexpired tile and remove expired entries eagerly."""
+        cached = self._memory_cache.get(key)
+        if cached is None:
+            return None
+        if cached.expires_at <= time.monotonic():
+            self._memory_cache.pop(key, None)
+            return None
+        self._memory_cache.move_to_end(key)
+        return cached.image
+
+    async def _client_quota_has_capacity(self, client_id: str, client_ip: str) -> bool:
+        """Check limits without reserving a tile fetch."""
+        if self._cache is None:
+            return self._settings.ENVIRONMENT != "production"
+
+        try:
+            now = int(time.time())
+            client_digest = self._quota_digest(client_id)
+            ip_digest = self._quota_digest(client_ip)
+            client_minute_key = self._client_quota_key("minute", client_digest, now)
+            client_day_key = self._client_quota_key("day", client_digest, now)
+            ip_minute_key = self._ip_quota_key("minute", ip_digest, now)
+            ip_day_key = self._ip_quota_key("day", ip_digest, now)
+            raw_counts = await asyncio.gather(
+                self._cache.get(client_minute_key),
+                self._cache.get(client_day_key),
+                self._cache.get(ip_minute_key),
+                self._cache.get(ip_day_key),
+            )
+            counts = [int(value) if value else 0 for value in raw_counts]
+            return bool(
+                counts[0] < self._settings.SATELLITE_CLIENT_REQUESTS_PER_MINUTE
+                and counts[1] < self._settings.SATELLITE_CLIENT_REQUESTS_PER_DAY
+                and counts[2] < self._settings.SATELLITE_IP_REQUESTS_PER_MINUTE
+                and counts[3] < self._settings.SATELLITE_IP_REQUESTS_PER_DAY
+            )
+        except (TypeError, ValueError):
+            logger.warning("Satellite client quota state is invalid")
+            return False
+        except Exception:
+            if self._settings.ENVIRONMENT == "production":
+                logger.error("Satellite client quota unavailable — imagery disabled")
+                return False
+            logger.warning("Satellite client quota unavailable — development imagery allowed")
             return True
 
     async def _fetch_and_cache(self, key: tuple[int, int, int]) -> bytes:
@@ -227,6 +329,69 @@ class SatelliteTileService:
             logger.warning("Satellite imagery quota unavailable — development tile allowed")
             return True
 
+    async def _client_request_allowed(self, client_id: str, client_ip: str) -> bool:
+        """Reserve one tile request for a hashed installation and IP bucket."""
+        if self._cache is None:
+            return self._settings.ENVIRONMENT != "production"
+
+        try:
+            now = int(time.time())
+            client_digest = self._quota_digest(client_id)
+            ip_digest = self._quota_digest(client_ip)
+            client_minute_key = self._client_quota_key("minute", client_digest, now)
+            client_day_key = self._client_quota_key("day", client_digest, now)
+            ip_minute_key = self._ip_quota_key("minute", ip_digest, now)
+            ip_day_key = self._ip_quota_key("day", ip_digest, now)
+            pipe = self._cache.client.pipeline(transaction=True)
+            for key, ttl in (
+                (client_minute_key, 65),
+                (client_day_key, 86_405),
+                (ip_minute_key, 65),
+                (ip_day_key, 86_405),
+            ):
+                pipe.incr(key)
+                pipe.expire(key, ttl)
+            (
+                client_minute_count,
+                _client_minute_expiry,
+                client_day_count,
+                _client_day_expiry,
+                ip_minute_count,
+                _ip_minute_expiry,
+                ip_day_count,
+                _ip_day_expiry,
+            ) = await pipe.execute()
+            return bool(
+                int(client_minute_count) <= self._settings.SATELLITE_CLIENT_REQUESTS_PER_MINUTE
+                and int(client_day_count) <= self._settings.SATELLITE_CLIENT_REQUESTS_PER_DAY
+                and int(ip_minute_count) <= self._settings.SATELLITE_IP_REQUESTS_PER_MINUTE
+                and int(ip_day_count) <= self._settings.SATELLITE_IP_REQUESTS_PER_DAY
+            )
+        except Exception:
+            if self._settings.ENVIRONMENT == "production":
+                logger.error("Satellite client quota unavailable — tile rejected")
+                return False
+            logger.warning("Satellite client quota unavailable — development tile allowed")
+            return True
+
+    def _quota_digest(self, identifier: str) -> str:
+        secret = self._settings.RATE_LIMIT_HASH_KEY or "development-satellite-quota-salt"
+        return hmac.new(
+            secret.encode("utf-8"),
+            identifier.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()[:24]
+
+    @staticmethod
+    def _client_quota_key(bucket: str, digest: str, now: int) -> str:
+        period = now // (60 if bucket == "minute" else 86_400)
+        return f"{_SATELLITE_CLIENT_QUOTA_PREFIX}:{bucket}:{digest}:{period}"
+
+    @staticmethod
+    def _ip_quota_key(bucket: str, digest: str, now: int) -> str:
+        period = now // (60 if bucket == "minute" else 86_400)
+        return f"{_SATELLITE_IP_QUOTA_PREFIX}:{bucket}:{digest}:{period}"
+
     async def _open_provider_circuit(self) -> None:
         if self._cache is None:
             return
@@ -253,6 +418,19 @@ def _validate_tile_coordinates(z: int, x: int, y: int) -> tuple[int, int, int]:
     if not 0 <= x < tile_count or not 0 <= y < tile_count:
         raise SatelliteTileNotFoundError
     return z, x, y
+
+
+def normalize_satellite_client_id(value: str | None) -> str | None:
+    """Accept only opaque server-issued installation identifiers."""
+    if not value:
+        return None
+    normalized = value.strip()
+    return normalized if _CLIENT_ID_RE.fullmatch(normalized) else None
+
+
+def new_satellite_client_id() -> str:
+    """Create a high-entropy opaque identifier; it is never persisted raw server-side."""
+    return secrets.token_urlsafe(24)
 
 
 def _tile_intersects_catalonia(z: int, x: int, y: int) -> bool:

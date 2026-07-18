@@ -38,6 +38,7 @@ type PreferencesContextValue = {
   setBuildings3dEnabled: (enabled: boolean) => void;
   setRouteLineDynamic: (enabled: boolean) => void;
   setRouteLineColor: (color: RouteLineColor) => void;
+  setFleetTrackingEnabled: (enabled: boolean) => void;
 };
 
 const PreferencesContext = createContext<PreferencesContextValue | null>(null);
@@ -148,6 +149,11 @@ export function PreferencesProvider({ children }: PropsWithChildren) {
     updatePreferences((current) => ({ ...current, routeLineColor }));
   }, [updatePreferences]);
 
+  const setFleetTrackingEnabled = useCallback((enabled: boolean) => {
+    telemetry.capture('preference_changed', { setting: 'fleet_tracking', value: enabled });
+    updatePreferences((current) => ({ ...current, fleetTrackingEnabled: enabled }));
+  }, [updatePreferences]);
+
   const value = useMemo<PreferencesContextValue>(() => ({
     ready,
     preferences,
@@ -163,6 +169,7 @@ export function PreferencesProvider({ children }: PropsWithChildren) {
     setBuildings3dEnabled,
     setRouteLineDynamic,
     setRouteLineColor,
+    setFleetTrackingEnabled,
   }), [
     preferences,
     ready,
@@ -173,6 +180,7 @@ export function PreferencesProvider({ children }: PropsWithChildren) {
     setBuildings3dEnabled,
     setRouteLineDynamic,
     setRouteLineColor,
+    setFleetTrackingEnabled,
     setLanguage,
     setVehicleColor,
     setVehicleMarker,

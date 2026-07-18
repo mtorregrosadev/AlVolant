@@ -114,6 +114,7 @@ export default function SettingsScreen({ navigation }: SettingsScreenProps) {
     setBuildings3dEnabled,
     setRouteLineDynamic,
     setRouteLineColor,
+    setFleetTrackingEnabled,
     setLanguage,
     setHomeAgencies,
     setVehicleColor,
@@ -407,6 +408,21 @@ export default function SettingsScreen({ navigation }: SettingsScreenProps) {
                 </View>
               </View>
             ) : null}
+
+            <View style={[styles.preferenceRow, styles.routeLinePreference]}>
+              <View style={styles.preferenceCopy}>
+                <Text style={styles.preferenceTitle}>{t('settings.fleetTracking')}</Text>
+                <Text style={styles.preferenceHint}>{t('settings.fleetTrackingHint')}</Text>
+              </View>
+              <Switch
+                value={preferences.fleetTrackingEnabled}
+                onValueChange={setFleetTrackingEnabled}
+                trackColor={{ false: '#AABEB4', true: colors.primary }}
+                thumbColor={colors.white}
+                ios_backgroundColor="#AABEB4"
+                accessibilityLabel={t('settings.fleetTracking')}
+              />
+            </View>
           </View>
 
           <View style={[

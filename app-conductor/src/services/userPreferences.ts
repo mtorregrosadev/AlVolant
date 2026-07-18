@@ -42,6 +42,7 @@ export type UserPreferences = {
   buildings3dEnabled: boolean;
   routeLineDynamic: boolean;
   routeLineColor: RouteLineColor;
+  fleetTrackingEnabled: boolean;
 };
 
 type StoredPreferences = UserPreferences & {
@@ -62,6 +63,7 @@ export const EMPTY_USER_PREFERENCES: UserPreferences = {
   buildings3dEnabled: true,
   routeLineDynamic: true,
   routeLineColor: 'blue',
+  fleetTrackingEnabled: true,
 };
 
 let writeQueue: Promise<void> = Promise.resolve();
@@ -169,6 +171,7 @@ function normalizePreferences(value: unknown): UserPreferences {
     buildings3dEnabled: value.buildings3dEnabled !== false,
     routeLineDynamic: value.routeLineDynamic !== false,
     routeLineColor,
+    fleetTrackingEnabled: value.fleetTrackingEnabled !== false,
   };
 }
 

@@ -1,4 +1,7 @@
-# AlVolant - BFF and APP
+<h1>
+  <img src="app-conductor/assets/alvolant-app-icon.png" width="52" alt="Logotip d’AlVolant" align="center">
+  AlVolant — BFF i app
+</h1>
 
 https://github.com/user-attachments/assets/89d218e5-36ec-40dc-b13b-15113fd39b5f
 

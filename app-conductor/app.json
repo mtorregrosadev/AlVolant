@@ -6,7 +6,7 @@
     "description": "Planifica i segueix serveis d'autobús en temps real.",
     "version": "1.0.0",
     "orientation": "default",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/alvolant-app-icon.png",
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": false,
@@ -72,7 +72,7 @@
       "package": "com.mtorregrosadev.alvolant"
     },
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/alvolant-favicon.png"
     },
     "plugins": [
       "./plugins/withLocalLiveActivities",

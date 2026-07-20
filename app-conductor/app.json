@@ -59,10 +59,8 @@
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
+        "backgroundColor": "#F1EFE8",
+        "foregroundImage": "./assets/alvolant-app-icon.png"
       },
       "predictiveBackGestureEnabled": false,
       "permissions": [

@@ -36,14 +36,15 @@ def _stops(*coordinates: tuple[float, float]) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_fresh_index_groups_under_canonical_route_id(
+async def test_fresh_index_keeps_each_source_route_separate(
     settings: Settings,
     cache: CacheManager,
 ) -> None:
     service = GTFSService(settings=settings, cache=cache)
     route_infos = [
-        {"route_id": "canonical-a", "route_ids": ["a-outbound", "a-inbound"]},
-        {"route_id": "canonical-b", "route_ids": ["b"]},
+        {"route_id": "a-outbound", "route_ids": ["a-outbound"]},
+        {"route_id": "a-inbound", "route_ids": ["a-inbound"]},
+        {"route_id": "b", "route_ids": ["b"]},
     ]
     route_to_trip = {
         ("a-outbound", 0): "trip-a-0",
@@ -63,10 +64,11 @@ async def test_fresh_index_groups_under_canonical_route_id(
     )
     await service._cache_route_proximity_index(proximity_index)
 
-    assert set(proximity_index) == {"canonical-a", "canonical-b"}
-    assert len(proximity_index["canonical-a"]) == 3
-    nearby = await service.get_nearby_routes(41.3800, 2.1700, limit=2)
-    assert [route.route_id for route in nearby] == ["canonical-a", "canonical-b"]
+    assert set(proximity_index) == {"a-outbound", "a-inbound", "b"}
+    assert len(proximity_index["a-outbound"]) == 2
+    assert len(proximity_index["a-inbound"]) == 2
+    nearby = await service.get_nearby_routes(41.3800, 2.1700, limit=3)
+    assert [route.route_id for route in nearby] == ["a-inbound", "a-outbound", "b"]
     assert nearby[0].distance_meters == 0
 
     cached = await cache.get_json(_KEY_PROXIMITY_INDEX)
@@ -84,8 +86,8 @@ async def test_nearby_routes_lazily_rebuilds_from_existing_stop_keys(
     await cache.set_json(
         _KEY_ROUTES,
         [
-            {"route_id": "canonical-a", "route_ids": ["raw-a"]},
-            {"route_id": "canonical-b", "route_ids": ["raw-b"]},
+            {"route_id": "raw-a", "route_ids": ["raw-a"]},
+            {"route_id": "raw-b", "route_ids": ["raw-b"]},
         ],
         ttl=settings.CACHE_TTL_GTFS_SHAPES,
     )
@@ -107,9 +109,9 @@ async def test_nearby_routes_lazily_rebuilds_from_existing_stop_keys(
 
     nearby = await service.get_nearby_routes(41.3800, 2.1700, limit=2)
 
-    assert [route.route_id for route in nearby] == ["canonical-a", "canonical-b"]
+    assert [route.route_id for route in nearby] == ["raw-a", "raw-b"]
     cached = await cache.get_json(_KEY_PROXIMITY_INDEX)
-    assert set(cached["routes"]) == {"canonical-a", "canonical-b"}
+    assert set(cached["routes"]) == {"raw-a", "raw-b"}
     cached_keys = {
         key.decode() if isinstance(key, bytes) else key
         async for key in cache.client.scan_iter(match="gtfs:*")

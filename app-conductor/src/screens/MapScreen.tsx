@@ -1131,9 +1131,14 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
     && Number.isInteger(scheduledDepartureEpoch)
     ? scheduledDepartureEpoch
     : undefined;
+  // iBus is the live-radar provider only for the two catalog families that
+  // publish to it. Keeping this test on the stable source route id avoids
+  // accidentally querying TMB for a similarly named route from another firm.
+  const isIbusSupportedRoute = /^(TMB|AMB)_/i.test(routeId);
   const canFetchIbus = !loading
     && !error
     && preferences.fleetTrackingEnabled
+    && isIbusSupportedRoute
     && Boolean(iBusStopId);
 
   useEffect(() => {

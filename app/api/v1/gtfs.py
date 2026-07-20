@@ -197,8 +197,9 @@ async def get_upcoming_trips(
     request: Request,
     limit: Annotated[int, Query(ge=1, le=20)] = 4,
     past_minutes: Annotated[int, Query(ge=0, le=_MAX_PAST_DEPARTURES_MINUTES)] = 0,
-) -> list[dict]:
-    """Return enriched upcoming trips with origin, destination label, and status."""
+    include_status: bool = False,
+) -> list[dict] | dict[str, object]:
+    """Return enriched departures, optionally with an availability state."""
     gtfs_service = request.app.state.gtfs_service
 
     try:
@@ -218,7 +219,7 @@ async def get_upcoming_trips(
 
     calendar_exists = await gtfs_service._cache.get_json("gtfs:calendar")
     if not calendar_exists:
-        return [
+        maintenance_trip = [
             {
                 "trip_id": "MAINTENANCE_FALLBACK",
                 "is_maintenance": True,
@@ -231,14 +232,30 @@ async def get_upcoming_trips(
                 "trip_status": "scheduled",
             }
         ]
+        if include_status:
+            return {"status": "unavailable", "trips": maintenance_trip}
+        return maintenance_trip
 
-    trips = await gtfs_service.get_upcoming_trips(
-        route_id=route_id,
-        direction_id=direction_id,
-        date_str=date_str,
-        time_str=time_str,
-        limit=max(limit * 4, 20),
-    )
+    availability_status = "available"
+    if include_status:
+        summary = await gtfs_service.get_upcoming_trip_summary(
+            route_id=route_id,
+            direction_id=direction_id,
+            date_str=date_str,
+            time_str=time_str,
+            limit=max(limit * 4, 20),
+        )
+        availability_status = str(summary.get("status", "unavailable"))
+        summary_trips = summary.get("trips", [])
+        trips = summary_trips if isinstance(summary_trips, list) else []
+    else:
+        trips = await gtfs_service.get_upcoming_trips(
+            route_id=route_id,
+            direction_id=direction_id,
+            date_str=date_str,
+            time_str=time_str,
+            limit=max(limit * 4, 20),
+        )
     if past_minutes > _DEPARTURE_GRACE_MINUTES:
         # The explicit history request should start with the latest completed
         # departures, not the oldest one inside the lookback window.
@@ -324,4 +341,6 @@ async def get_upcoming_trips(
         if len(enriched) >= limit:
             break
 
+    if include_status:
+        return {"status": availability_status, "trips": enriched}
     return enriched

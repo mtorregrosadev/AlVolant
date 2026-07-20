@@ -11,7 +11,7 @@ import {
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import type { EdgeInsets } from 'react-native-safe-area-context';
-import type { RouteInfo, UpcomingTrip } from '../services/api';
+import type { RouteInfo, UpcomingTrip, UpcomingTripsAvailability } from '../services/api';
 import type { ReliefCandidate } from '../services/reliefDetection';
 import { formatDirectionLabel } from '../services/directionLabel';
 import { cardShadow, colors, fonts, radii, safeHexColor, spacing, typography } from '../theme';
@@ -23,6 +23,7 @@ type ServiceAssignmentModalProps = {
   insets: EdgeInsets;
   selectedRoute: RouteInfo | null;
   upcomingTrips: UpcomingTrip[];
+  upcomingTripsAvailability: UpcomingTripsAvailability;
   mode: 'detecting' | 'candidate' | 'departures';
   candidate: ReliefCandidate | null;
   nearbyStopName: string;
@@ -63,6 +64,7 @@ export default function ServiceAssignmentModal({
   insets,
   selectedRoute,
   upcomingTrips,
+  upcomingTripsAvailability,
   mode,
   candidate,
   nearbyStopName,
@@ -104,6 +106,33 @@ export default function ServiceAssignmentModal({
     paddingBottom: Math.max(insets.bottom + spacing.md, spacing.xl),
     paddingLeft: Math.max(insets.left + spacing.xl, spacing.xl),
   };
+  const usesIbusData = Boolean(selectedRoute && /^(TMB|AMB)_/i.test(selectedRoute.route_id));
+  const emptyState = (() => {
+    switch (upcomingTripsAvailability) {
+      case 'no_schedule_data':
+        return {
+          title: t('assignment.noScheduleData'),
+          hint: t('assignment.noScheduleDataHint'),
+        };
+      case 'no_service_today':
+        return {
+          title: t('assignment.noServiceToday'),
+          hint: t('assignment.noServiceTodayHint'),
+        };
+      case 'no_remaining_departures':
+      case 'available':
+        return {
+          title: t('assignment.noRemainingDepartures'),
+          hint: t('assignment.noRemainingDeparturesHint'),
+        };
+      case 'unavailable':
+      default:
+        return {
+          title: t('assignment.dataUnavailable'),
+          hint: t('assignment.dataUnavailableHint'),
+        };
+    }
+  })();
 
   return (
     <Modal
@@ -153,7 +182,9 @@ export default function ServiceAssignmentModal({
               ? 'relief.subtitle'
               : mode === 'detecting'
                 ? 'relief.searching'
-                : 'assignment.subtitle')}
+                : usesIbusData
+                  ? 'assignment.subtitle'
+                  : 'assignment.staticSubtitle')}
           </Text>
 
           {mode === 'detecting' ? (
@@ -231,8 +262,8 @@ export default function ServiceAssignmentModal({
               ) : orderedUpcomingTrips.length === 0 ? (
                 <View style={styles.emptyState}>
                   <MaterialCommunityIcons name="calendar-blank-outline" size={28} color={colors.transitDark} />
-                  <Text style={styles.emptyTitle}>{t('assignment.empty')}</Text>
-                  <Text style={styles.emptyText}>{t('assignment.emptyHint')}</Text>
+                  <Text style={styles.emptyTitle}>{emptyState.title}</Text>
+                  <Text style={styles.emptyText}>{emptyState.hint}</Text>
                 </View>
               ) : orderedUpcomingTrips.map((trip) => {
                 const scheduledTime = formatServiceTime(trip.departure_time);

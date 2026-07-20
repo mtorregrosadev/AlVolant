@@ -10,14 +10,15 @@ import pytest
 from google.transit import gtfs_realtime_pb2
 
 from app.config import Settings
+from app.models.ibus import IbusFleetSummary, IbusVehiclePrediction
 from app.services.tmb_ibus_service import (
-    _AMBTripPrediction,
     TMBIbusService,
-    _StopPrediction,
+    _AMBTripPrediction,
     _parse_amb_gtfs_rt_payload,
     _parse_arrival_epoch,
     _parse_tmb_ibus_payload,
     _provider_rate_limit_headers,
+    _StopPrediction,
 )
 
 
@@ -47,6 +48,75 @@ def test_parses_tmb_stop_payload_and_normalizes_milliseconds() -> None:
         ("", now_epoch + 180),
     ]
     assert _parse_arrival_epoch(True, now_epoch) is None
+
+
+@pytest.mark.asyncio
+async def test_amb_route_prefers_ibus_before_the_resilience_fallback() -> None:
+    service = TMBIbusService(
+        settings=Settings(TMB_APP_ID="test-app-id", TMB_APP_KEY="test-app-key"),
+        cache=None,
+        gtfs_service=AsyncMock(),  # type: ignore[arg-type]
+    )
+    service._get_ibus_fleet_summary = AsyncMock(  # type: ignore[method-assign]
+        return_value=IbusFleetSummary(
+            status="available",
+            stop_id="AMB_107401",
+            stop_name="La Virreina",
+            ahead_vehicle=IbusVehiclePrediction(
+                arrival_epoch=int(time.time()) + 120,
+                eta_seconds=120,
+            ),
+        ),
+    )
+    service._get_amb_fleet_summary = AsyncMock()  # type: ignore[method-assign]
+
+    summary = await service.get_fleet_summary(
+        route_id="AMB_415",
+        trip_id="AMB_415.35.2.3.30",
+        direction_id=1,
+        stop_id="AMB_107401",
+        scheduled_departure_epoch=int(time.time()),
+    )
+
+    assert summary.source == "tmb_ibus"
+    assert summary.status == "available"
+    service._get_amb_fleet_summary.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_amb_falls_back_when_ibus_has_no_directional_bus_context() -> None:
+    service = TMBIbusService(
+        settings=Settings(TMB_APP_ID="test-app-id", TMB_APP_KEY="test-app-key"),
+        cache=None,
+        gtfs_service=AsyncMock(),  # type: ignore[arg-type]
+    )
+    service._get_ibus_fleet_summary = AsyncMock(  # type: ignore[method-assign]
+        return_value=IbusFleetSummary(
+            status="available",
+            stop_id="AMB_107401",
+            stop_name="La Virreina",
+        ),
+    )
+    service._get_stop_contexts = AsyncMock(return_value=[])  # type: ignore[method-assign]
+    service._get_amb_fleet_summary = AsyncMock(  # type: ignore[method-assign]
+        return_value=IbusFleetSummary(
+            source="amb_gtfs_rt",
+            status="available",
+            stop_id="AMB_107401",
+            stop_name="La Virreina",
+        ),
+    )
+
+    summary = await service.get_fleet_summary(
+        route_id="AMB_415",
+        trip_id="AMB_415.35.2.3.30",
+        direction_id=1,
+        stop_id="AMB_107401",
+        scheduled_departure_epoch=int(time.time()),
+    )
+
+    assert summary.source == "amb_gtfs_rt"
+    service._get_amb_fleet_summary.assert_awaited_once()  # type: ignore[attr-defined]
 
 
 def test_keeps_only_safe_provider_rate_limit_headers() -> None:
@@ -414,7 +484,7 @@ async def test_amb_full_pattern_places_a_new_departure_behind_the_driver() -> No
 async def test_matches_scheduled_trip_and_exposes_adjacent_buses() -> None:
     class FakeGTFS:
         async def get_trip_stop_context(self, route_id: str, trip_id: str, stop_id: str) -> dict:
-            assert (route_id, trip_id, stop_id) == ("route-n9", "trip-n9", "AMB_000313")
+            assert (route_id, trip_id, stop_id) == ("TMB_n9", "trip-n9", "AMB_000313")
             return {
                 "stop_name": "Pg de Gràcia - Gran Via",
                 "stop_code": "313",
@@ -441,7 +511,7 @@ async def test_matches_scheduled_trip_and_exposes_adjacent_buses() -> None:
     )
 
     summary = await service.get_fleet_summary(
-        route_id="route-n9",
+        route_id="TMB_n9",
         trip_id="trip-n9",
         direction_id=0,
         stop_id="AMB_000313",
@@ -476,7 +546,7 @@ async def test_reports_unconfigured_without_calling_tmb() -> None:
     service._get_stop_predictions = AsyncMock()  # type: ignore[method-assign]
 
     summary = await service.get_fleet_summary(
-        route_id="route-n9",
+        route_id="TMB_n9",
         trip_id="trip-n9",
         direction_id=0,
         stop_id="AMB_000313",
@@ -496,7 +566,7 @@ async def test_uses_live_arrival_queue_without_a_selected_trip() -> None:
             direction_id: int,
             stop_id: str,
         ) -> dict:
-            assert (route_id, direction_id, stop_id) == ("route-n9", 0, "AMB_000313")
+            assert (route_id, direction_id, stop_id) == ("TMB_n9", 0, "AMB_000313")
             return {
                 "stop_name": "Pg de Gràcia - Gran Via",
                 "stop_code": "313",
@@ -520,7 +590,7 @@ async def test_uses_live_arrival_queue_without_a_selected_trip() -> None:
     )
 
     summary = await service.get_fleet_summary(
-        route_id="route-n9",
+        route_id="TMB_n9",
         trip_id=None,
         direction_id=0,
         stop_id="AMB_000313",
@@ -548,7 +618,7 @@ async def test_scans_downstream_stops_to_locate_preceding_service() -> None:
             stop_stride: int,
         ) -> list[dict]:
             assert (route_id, trip_id, stop_id, max_stops, stop_stride) == (
-                "route-n9", "trip-n9", "AMB_000313", 16, 2,
+                    "TMB_n9", "trip-n9", "AMB_000313", 16, 2,
             )
             return [
                 {
@@ -599,7 +669,7 @@ async def test_scans_downstream_stops_to_locate_preceding_service() -> None:
     )
 
     summary = await service.get_fleet_summary(
-        route_id="route-n9",
+        route_id="TMB_n9",
         trip_id="trip-n9",
         direction_id=0,
         stop_id="AMB_000313",
@@ -630,7 +700,7 @@ async def test_tmb_full_route_scan_finds_a_bus_that_has_not_reached_the_driver_s
             stop_stride: int,
         ) -> list[dict]:
             assert (route_id, trip_id, stop_id, max_stops, stop_stride) == (
-                "tmb-h10", "trip-h10", "stop-current", 16, 2,
+                    "TMB_h10", "trip-h10", "stop-current", 16, 2,
             )
             return [
                 {
@@ -653,7 +723,7 @@ async def test_tmb_full_route_scan_finds_a_bus_that_has_not_reached_the_driver_s
             stop_stride: int,
         ) -> list[dict]:
             assert (route_id, trip_id, max_stops, stop_stride) == (
-                "tmb-h10", "trip-h10", 16, 2,
+                    "TMB_h10", "trip-h10", 16, 2,
             )
             return [
                 {
@@ -701,7 +771,7 @@ async def test_tmb_full_route_scan_finds_a_bus_that_has_not_reached_the_driver_s
     )
 
     summary = await service.get_fleet_summary(
-        route_id="tmb-h10",
+        route_id="TMB_h10",
         trip_id="trip-h10",
         direction_id=0,
         stop_id="stop-current",
@@ -762,7 +832,7 @@ async def test_keeps_scanning_downstream_when_current_stop_has_no_prediction() -
     )
 
     summary = await service.get_fleet_summary(
-        route_id="route-n9",
+        route_id="TMB_n9",
         trip_id="trip-n9",
         direction_id=0,
         stop_id="AMB_000313",

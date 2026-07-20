@@ -32,6 +32,7 @@ import {
   type RouteInfo,
   type RTTripUpdate,
   type UpcomingTrip,
+  type UpcomingTripsAvailability,
   type VehiclePosition,
 } from '../services/api';
 import {
@@ -460,6 +461,7 @@ function HomeContent({ navigation, route }: HomeScreenProps) {
   >(null);
   const [isCheckingManualVehicle, setIsCheckingManualVehicle] = useState(false);
   const [upcomingTrips, setUpcomingTrips] = useState<UpcomingTrip[]>([]);
+  const [upcomingTripsAvailability, setUpcomingTripsAvailability] = useState<UpcomingTripsAvailability>('unavailable');
   const [isLoadingTrips, setIsLoadingTrips] = useState(false);
   const [isLoadingPastDepartures, setIsLoadingPastDepartures] = useState(false);
   const [hasLoadedPastDepartures, setHasLoadedPastDepartures] = useState(false);
@@ -933,6 +935,7 @@ function HomeContent({ navigation, route }: HomeScreenProps) {
 
     telemetry.capture('route_selected', { direction: directionId, source: 'home' });
     setUpcomingTrips([]);
+    setUpcomingTripsAvailability('unavailable');
     setIsLoadingTrips(true);
     setIsLoadingPastDepartures(false);
     setHasLoadedPastDepartures(false);
@@ -942,14 +945,16 @@ function HomeContent({ navigation, route }: HomeScreenProps) {
     setShowAssignModal(true);
 
     void apiService.fetchUpcomingTrips(routeSnapshot.route_id, directionSnapshot)
-      .then((trips) => {
+      .then((result) => {
         if (mountedRef.current && assignmentRequestRef.current === requestId) {
-          setUpcomingTrips(trips);
+          setUpcomingTrips(result.trips);
+          setUpcomingTripsAvailability(result.status);
         }
       })
       .catch(() => {
         if (mountedRef.current && assignmentRequestRef.current === requestId) {
           setUpcomingTrips([]);
+          setUpcomingTripsAvailability('unavailable');
         }
       })
       .finally(() => {
@@ -1143,8 +1148,9 @@ function HomeContent({ navigation, route }: HomeScreenProps) {
       directionSnapshot,
       undefined,
       120,
-    ).then((pastTrips) => {
+    ).then((result) => {
       if (!mountedRef.current) return;
+      const pastTrips = result.trips;
       const pastCutoffEpoch = Math.floor(Date.now() / 1000) - 5 * 60;
       if (pastTrips.some((trip) => trip.scheduled_epoch < pastCutoffEpoch)) {
         setHasLoadedPastDepartures(true);
@@ -1673,6 +1679,7 @@ function HomeContent({ navigation, route }: HomeScreenProps) {
         insets={insets}
         selectedRoute={selectedRoute}
         upcomingTrips={upcomingTrips}
+        upcomingTripsAvailability={upcomingTripsAvailability}
         mode={assignmentMode}
         candidate={reliefCandidate}
         nearbyStopName={nearbyReliefStopName}

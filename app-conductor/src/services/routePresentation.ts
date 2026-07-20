@@ -9,10 +9,64 @@ export const AGENCY_OPTIONS: readonly AgencyFilter[] = [
   'Tots',
   'TMB',
   'AMB',
-  'FGC',
-  'Rodalies',
+  'Sagalés',
+  'TEISA',
+  'HIFE',
+  'Empresa Plana',
+  'Moventis',
   'Altres',
 ];
+
+/**
+ * Brand mapping for agencies that the ATM feed exposes under several contract
+ * identifiers. Values are deliberately exclusive: one source route belongs to
+ * one visible brand, so filters and home preferences never show a line twice.
+ *
+ * The IDs come from the GTFS `agency.txt` file. Unknown/new agencies fall back
+ * to `Altres`, which keeps the catalogue correct when ATM refreshes the feed.
+ */
+const GTFS_BRAND_BY_ID: Readonly<Record<string, HomeAgency>> = {
+  // Sagalés, including its area-specific feed identifiers and the joint Casas service.
+  BGE_4: 'Sagalés',
+  BGS_8: 'Sagalés',
+  CIN_5: 'Sagalés',
+  COS_9: 'Sagalés',
+  FYT_12: 'Sagalés',
+  GEN_42557: 'Sagalés',
+  GEN_42605: 'Sagalés',
+  OSO_10: 'Sagalés',
+  SAG_13: 'Sagalés',
+
+  // TEISA. The TEISA/SARFA joint service is assigned to Moventis below.
+  GEN_42641: 'TEISA',
+  TEI_98: 'TEISA',
+
+  // HIFE, including the Alsina Graells / LHIFE joint service.
+  AMP_1: 'HIFE',
+  CAL_1: 'HIFE',
+  CUB_1: 'HIFE',
+  GEN_42570: 'HIFE',
+  GEN_42725: 'HIFE',
+  TRD_1: 'HIFE',
+  TTS_1: 'HIFE',
+
+  // Empresa Plana, including its shared Cintoi service.
+  CUN_1: 'Empresa Plana',
+  GEN_42634: 'Empresa Plana',
+  GEN_42676: 'Empresa Plana',
+
+  // Moventis brands. Shared services with SARFA are kept under Moventis.
+  GEN_42628: 'Moventis',
+  // Empresa Casas operates the C10 shown in Moventis' official timetable.
+  GEN_42671: 'Moventis',
+  GEN_42735: 'Moventis',
+  GEN_42742: 'Moventis',
+  LLE_5: 'Moventis',
+  PUJ_11: 'Moventis',
+  SAA_2: 'Moventis',
+  SAB_1: 'Moventis',
+  TCC_4: 'Moventis',
+};
 
 function hasAgencyPrefix(value: string, prefix: string) {
   return value === prefix || value.startsWith(`${prefix}_`);
@@ -24,8 +78,8 @@ export function getAgencyFilter(route: RouteInfo): HomeAgency {
 
   if (hasAgencyPrefix(agencyId, 'TMB') || hasAgencyPrefix(routeId, 'TMB')) return 'TMB';
   if (hasAgencyPrefix(agencyId, 'AMB') || hasAgencyPrefix(routeId, 'AMB')) return 'AMB';
-  if (hasAgencyPrefix(agencyId, 'FGC') || hasAgencyPrefix(routeId, 'FGC')) return 'FGC';
-  if (hasAgencyPrefix(agencyId, 'ROD') || hasAgencyPrefix(routeId, 'ROD')) return 'Rodalies';
+  const brand = GTFS_BRAND_BY_ID[agencyId] || GTFS_BRAND_BY_ID[routeId];
+  if (brand) return brand;
   return 'Altres';
 }
 

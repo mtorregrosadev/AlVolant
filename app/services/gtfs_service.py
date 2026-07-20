@@ -58,7 +58,10 @@ _PROXIMITY_INDEX_VERSION = 1
 _PROXIMITY_STOP_KEY_BATCH_SIZE = 500
 _TRIP_INDEX_VERSION = 3
 _SCHEDULE_INDEX_VERSION = 2
-_SNAPSHOT_VERSION = 3
+# Increment when the public route identity contract changes.  This makes a
+# deployment reject a complete-but-semantically-incompatible Redis snapshot
+# and refresh it immediately instead of retaining stale route aliases.
+_SNAPSHOT_VERSION = 4
 _TRIP_INDEX_WRITE_BATCH_SIZE = 500
 _TRIP_INDEX_WRITE_BATCH_BYTES = 4 * 1024 * 1024
 _TRIP_INDEX_CLEANUP_BATCH_SIZE = 250
@@ -218,7 +221,7 @@ class GTFSService:
         zip_bytes = await self._download_gtfs_zip()
         (
             route_shapes,
-            deduped_routes,
+            catalog_routes,
             route_to_trip,
             representative_stops,
             proximity_index,
@@ -237,7 +240,7 @@ class GTFSService:
         snapshot_id = uuid.uuid4().hex
         await self._cache.unlink(_KEY_SNAPSHOT_ACTIVE)
 
-        await self._cache_shapes(route_shapes, deduped_routes)
+        await self._cache_shapes(route_shapes, catalog_routes)
         await self._cache_stops(route_to_trip, representative_stops)
         await self._cache_route_proximity_index(proximity_index)
         trip_manifest = await self._cache_trip_indexes(
@@ -336,7 +339,7 @@ class GTFSService:
             route_to_trip=route_to_trip,
             trip_meta_by_id=trip_meta_by_id,
         )
-        deduped_routes = self._build_deduplicated_routes(routes_by_id, trip_meta_by_id)
+        catalog_routes = self._build_catalog_routes(routes_by_id, trip_meta_by_id)
         trips_by_route_dir = self._build_trips_by_route_direction(
             trip_rows,
             trip_start_times,
@@ -350,13 +353,13 @@ class GTFSService:
             stop_patterns_by_id=stop_patterns_by_id,
         )
         proximity_index = self._build_route_proximity_index(
-            route_infos=deduped_routes,
+            route_infos=catalog_routes,
             route_to_trip=route_to_trip,
             trip_stops_by_id=representative_stops,
         )
         return (
             route_shapes,
-            deduped_routes,
+            catalog_routes,
             route_to_trip,
             representative_stops,
             proximity_index,
@@ -534,7 +537,7 @@ class GTFSService:
         longitude: float,
         limit: int = 20,
     ) -> list[NearbyRoute]:
-        """Return canonical routes ordered by distance to their closest cached stop.
+        """Return source routes ordered by distance to their closest cached stop.
 
         User coordinates are used only for this in-memory calculation. They are
         deliberately not logged, persisted, or included in a Redis cache key.
@@ -737,7 +740,14 @@ class GTFSService:
         return None
 
     async def resolve_group_route_ids(self, route_id: str) -> list[str]:
-        """Return every underlying GTFS route id represented by a catalog route."""
+        """Return the source GTFS route id represented by a catalogue route.
+
+        Catalogue entries deliberately map one-to-one to upstream ``route_id``
+        values.  Public route numbers such as ``21`` and ``M1`` are not unique
+        across the integrated ATM feed, so expanding them into aliases can
+        combine unrelated agencies, schedules, shapes, and realtime vehicles.
+        The method name is retained for its callers in the relief matcher.
+        """
         return await self._resolve_group_route_ids(route_id)
 
     async def _get_trip_meta_record(self, trip_id: str) -> tuple[dict | None, dict | None]:
@@ -916,6 +926,30 @@ class GTFSService:
         limit: int = 4,
     ) -> list[dict]:
         """Fetch upcoming trips for route/direction with calendar-aware service-day logic."""
+        summary = await self.get_upcoming_trip_summary(
+            route_id=route_id,
+            direction_id=direction_id,
+            date_str=date_str,
+            time_str=time_str,
+            limit=limit,
+        )
+        return summary["trips"]
+
+    async def get_upcoming_trip_summary(
+        self,
+        route_id: str,
+        direction_id: int,
+        date_str: str,
+        time_str: str,
+        limit: int = 4,
+    ) -> dict[str, str | list[dict]]:
+        """Return departures plus an explicit availability state.
+
+        Static GTFS feeds can distinguish a line with no published timetable,
+        an inactive calendar today, and a service day whose departures have
+        already passed. Keeping those states separate prevents the driver UI
+        from treating every empty list as the same operational situation.
+        """
         from datetime import timedelta
 
         try:
@@ -929,7 +963,7 @@ class GTFSService:
         schedule_manifest = await self._get_active_schedule_index()
         schedule_generation = await self._select_schedule_generation(schedule_manifest)
         if schedule_manifest is not None and schedule_generation is None:
-            return []
+            return {"status": "unavailable", "trips": []}
         grouped_trips = await self._load_route_schedule_trips(
             route_ids,
             direction_id,
@@ -937,7 +971,7 @@ class GTFSService:
         )
 
         if not grouped_trips:
-            return []
+            return {"status": "no_schedule_data", "trips": []}
 
         try:
             query_dt = datetime.strptime(f"{date_str} {time_str}", "%Y%m%d %H:%M:%S")
@@ -946,7 +980,11 @@ class GTFSService:
         except Exception:
             query_dt = datetime.now(tz=local_tz) if local_tz else datetime.now()
 
-        service_days = [query_dt - timedelta(days=1), query_dt, query_dt + timedelta(days=1)]
+        # A previous service day is required for trips scheduled after 24:00.
+        # A normal next-day timetable is intentionally excluded: the selector
+        # is about the current service day and must not turn "does not run
+        # today" into an apparently available departure tomorrow.
+        service_days = [query_dt - timedelta(days=1), query_dt]
         service_date_strings = [service_day.strftime("%Y%m%d") for service_day in service_days]
         service_ids = sorted(
             {
@@ -961,6 +999,7 @@ class GTFSService:
             generation=schedule_generation,
         )
         candidates: list[dict] = []
+        has_active_service_today = False
 
         for service_day in service_days:
             service_date_str = service_day.strftime("%Y%m%d")
@@ -989,6 +1028,9 @@ class GTFSService:
 
                 if not is_active:
                     continue
+
+                if service_date_str == query_dt.strftime("%Y%m%d"):
+                    has_active_service_today = True
 
                 dep_time_str = trip.get("departure_time")
                 if not dep_time_str:
@@ -1030,7 +1072,11 @@ class GTFSService:
             if len(final_trips) >= max(limit * 5, 20):
                 break
 
-        return final_trips
+        if final_trips:
+            return {"status": "available", "trips": final_trips}
+        if has_active_service_today:
+            return {"status": "no_remaining_departures", "trips": []}
+        return {"status": "no_service_today", "trips": []}
 
     async def _load_route_schedule_trips(
         self,
@@ -1795,40 +1841,47 @@ class GTFSService:
 
         return route_shapes
 
-    def _build_deduplicated_routes(
+    def _build_catalog_routes(
         self, routes_by_id: dict[str, dict], trip_meta_by_id: dict[str, dict]
     ) -> list[dict]:
-        grouped: dict[str, list[str]] = defaultdict(list)
+        """Build a source-faithful catalogue without public-number aliases.
 
+        ``route_short_name`` is a display value, not a globally unique
+        identifier.  For example, the ATM feed can publish TMB's ``21`` and
+        Tarragona EMT's ``21`` at the same time.  A catalogue entry therefore
+        represents exactly one upstream ``route_id``.  Individual trip IDs
+        remain the identity for variants that share a route and direction,
+        such as two M30 departures to the same destination from different
+        origins.
+        """
+        destinations_by_route: dict[str, dict[int, str]] = defaultdict(dict)
+        for trip_meta in trip_meta_by_id.values():
+            route_id = trip_meta.get("route_id")
+            direction_id = trip_meta.get("direction_id")
+            if not isinstance(route_id, str) or route_id not in routes_by_id:
+                continue
+            if direction_id not in (0, 1):
+                continue
+            if destinations_by_route[route_id].get(direction_id):
+                continue
+
+            route_info = routes_by_id[route_id]
+            destination_name = (
+                trip_meta.get("destination_stop_name")
+                or trip_meta.get("trip_headsign")
+                or route_info.get("route_long_name", "")
+            )
+            if isinstance(destination_name, str):
+                destinations_by_route[route_id][direction_id] = destination_name
+
+        route_infos: list[dict] = []
         for route_id, route_info in routes_by_id.items():
             if int(route_info.get("route_type", 3)) != 3:
                 continue
-            short_name = (route_info.get("route_short_name") or route_id).strip().upper()
-            grouped[short_name].append(route_id)
-
-        route_infos: list[dict] = []
-        for grouped_route_ids in grouped.values():
-            grouped_route_ids.sort()
-            canonical_route_id = grouped_route_ids[0]
-            canonical = routes_by_id.get(canonical_route_id, {})
-
             direction_destinations: list[DirectionInfo] = []
-            by_direction: dict[int, str] = {}
-            for trip_meta in trip_meta_by_id.values():
-                if trip_meta.get("route_id") not in grouped_route_ids:
-                    continue
-                direction_id = int(trip_meta.get("direction_id", 0))
-                if direction_id in by_direction and by_direction[direction_id]:
-                    continue
-                destination_name = (
-                    trip_meta.get("destination_stop_name")
-                    or trip_meta.get("trip_headsign")
-                    or canonical.get("route_long_name", "")
-                )
-                by_direction[direction_id] = destination_name
-
-            for direction_id in sorted(by_direction.keys()):
-                destination_name = by_direction[direction_id]
+            for direction_id, destination_name in sorted(
+                destinations_by_route.get(route_id, {}).items()
+            ):
                 direction_destinations.append(
                     DirectionInfo(
                         direction_id=direction_id,
@@ -1839,18 +1892,18 @@ class GTFSService:
 
             route_infos.append(
                 RouteInfo(
-                    route_id=canonical_route_id,
-                    route_short_name=canonical.get("route_short_name", ""),
-                    route_long_name=canonical.get("route_long_name", ""),
-                    route_color=canonical.get("route_color", ""),
-                    route_text_color=canonical.get("route_text_color", ""),
-                    route_type=int(canonical.get("route_type", 3)),
-                    agency_id=canonical.get("agency_id", ""),
-                    route_ids=grouped_route_ids,
+                    route_id=route_id,
+                    route_short_name=route_info.get("route_short_name", ""),
+                    route_long_name=route_info.get("route_long_name", ""),
+                    route_color=route_info.get("route_color", ""),
+                    route_text_color=route_info.get("route_text_color", ""),
+                    route_type=int(route_info.get("route_type", 3)),
+                    agency_id=route_info.get("agency_id", ""),
+                    route_ids=[route_id],
                     direction_destinations=direction_destinations,
                     display_name=(
-                        f"{canonical.get('route_short_name', '').strip()} "
-                        f"{canonical.get('route_long_name', '').strip()}"
+                        f"{route_info.get('route_short_name', '').strip()} "
+                        f"{route_info.get('route_long_name', '').strip()}"
                     ).strip(),
                 ).model_dump(mode="json")
             )
@@ -1897,8 +1950,13 @@ class GTFSService:
         return dict(trips_by_route_dir)
 
     @staticmethod
-    def _canonical_route_groups(route_infos: list[dict]) -> dict[str, list[str]]:
-        """Map each canonical route to every underlying GTFS route identifier."""
+    def _route_identity_groups(route_infos: list[dict]) -> dict[str, list[str]]:
+        """Map each catalogue route to its single authoritative GTFS route ID.
+
+        Ignore legacy ``route_ids`` aliases while rebuilding derived indexes.
+        They were written by previous releases that merged public line numbers
+        across agencies and must never reintroduce that data corruption.
+        """
         groups: dict[str, list[str]] = {}
 
         for raw_route in route_infos:
@@ -1908,20 +1966,11 @@ class GTFSService:
             if not isinstance(route, dict):
                 continue
 
-            canonical_route_id = route.get("route_id")
-            if not isinstance(canonical_route_id, str) or not canonical_route_id:
+            route_id = route.get("route_id")
+            if not isinstance(route_id, str) or not route_id:
                 continue
 
-            identifiers = [canonical_route_id]
-            grouped_route_ids = route.get("route_ids")
-            if isinstance(grouped_route_ids, list):
-                identifiers.extend(
-                    route_id
-                    for route_id in grouped_route_ids
-                    if isinstance(route_id, str) and route_id
-                )
-
-            groups[canonical_route_id] = list(dict.fromkeys(identifiers))
+            groups[route_id] = [route_id]
 
         return groups
 
@@ -1995,22 +2044,16 @@ class GTFSService:
         route_to_trip: dict[tuple[str, int], str],
         trip_stops_by_id: dict[str, dict],
     ) -> ProximityIndex:
-        """Build a compact canonical route-to-stops index during a GTFS refresh."""
-        groups = cls._canonical_route_groups(route_infos)
-        canonical_by_route_id = {
-            route_id: canonical_route_id
-            for canonical_route_id, route_ids in groups.items()
-            for route_id in route_ids
-        }
+        """Build a compact source-route-to-stops index during a GTFS refresh."""
+        route_ids = set(cls._route_identity_groups(route_infos))
         route_points: dict[str, set[tuple[float, float]]] = defaultdict(set)
 
         for (route_id, _direction_id), trip_id in route_to_trip.items():
-            canonical_route_id = canonical_by_route_id.get(route_id)
-            if canonical_route_id is None:
+            if route_id not in route_ids:
                 continue
             cls._add_stop_collection(
                 route_points,
-                canonical_route_id,
+                route_id,
                 trip_stops_by_id.get(trip_id),
             )
 
@@ -2047,8 +2090,8 @@ class GTFSService:
         self,
         route_infos: list[dict],
     ) -> ProximityIndex:
-        """Lazily rebuild the index for Redis data written by earlier app versions."""
-        groups = self._canonical_route_groups(route_infos)
+        """Lazily rebuild a source-route index from compatible route stop keys."""
+        groups = self._route_identity_groups(route_infos)
         stop_key_owners: dict[str, str] = {}
 
         for canonical_route_id, route_ids in groups.items():
@@ -2545,18 +2588,9 @@ class GTFSService:
         return grouped_exceptions
 
     async def _resolve_group_route_ids(self, route_id: str) -> list[str]:
-        route_data = await self._cache.get_json(_KEY_ROUTES)
-        if not route_data:
-            return [route_id]
-
-        for item in route_data:
-            canonical_route_id = item.get("route_id")
-            grouped_route_ids = item.get("route_ids") or []
-            if route_id == canonical_route_id or route_id in grouped_route_ids:
-                return (
-                    grouped_route_ids or [canonical_route_id] if canonical_route_id else [route_id]
-                )
-
+        # A route_id is the source identity.  Never resolve public-number
+        # aliases from old cache entries: they can join unrelated routes such
+        # as TMB 21 and Tarragona EMT 21.
         return [route_id]
 
     async def _trip_matches_route(

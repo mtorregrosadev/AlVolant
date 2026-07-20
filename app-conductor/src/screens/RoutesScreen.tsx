@@ -42,14 +42,18 @@ type RoutesScreenProps = NativeStackScreenProps<RootStackParamList, 'Routes'>;
 type ChipVisual = {
   icon?: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
   image?: ImageSourcePropType;
+  wide?: boolean;
 };
 
 const AGENCY_VISUALS: Record<AgencyFilter, ChipVisual> = {
   Tots: { icon: 'transit-connection-variant' },
   TMB: { image: require('../../assets/logo-tmb.png') },
   AMB: { image: require('../../assets/logo-amb.png') },
-  FGC: { image: require('../../assets/logo_fgc.png') },
-  Rodalies: { image: require('../../assets/logo_rodalies.png') },
+  'Sagalés': { image: require('../../assets/logo-sagales.png') },
+  TEISA: { image: require('../../assets/logo-teisa.png') },
+  HIFE: { image: require('../../assets/logo-hife.png') },
+  'Empresa Plana': { image: require('../../assets/logo-empresa-plana.png'), wide: true },
+  Moventis: { image: require('../../assets/logo-moventis.png'), wide: true },
   Altres: { icon: 'bus-multiple' },
 };
 
@@ -117,7 +121,14 @@ export default function RoutesScreen({ navigation }: RoutesScreenProps) {
   const renderAgencyVisual = (agency: AgencyFilter, active: boolean) => {
     const visual = AGENCY_VISUALS[agency];
     if (visual.image) {
-      return <Image source={visual.image} style={styles.agencyLogo} resizeMode="contain" accessible={false} />;
+      return (
+        <Image
+          source={visual.image}
+          style={[styles.agencyLogo, visual.wide && styles.agencyLogoWide]}
+          resizeMode="contain"
+          accessible={false}
+        />
+      );
     }
 
     return (
@@ -494,6 +505,7 @@ const styles = StyleSheet.create({
   },
   agencyChipActive: { backgroundColor: colors.transitDark, borderColor: colors.transitDark },
   agencyLogo: { width: 20, height: 14 },
+  agencyLogoWide: { width: 54, height: 16 },
   agencyText: { fontFamily: fonts.medium, color: colors.inkSoft, fontSize: 9.5, lineHeight: 12 },
   agencyTextActive: { fontFamily: fonts.label, color: colors.white },
   listHeading: { marginTop: spacing.xs, marginBottom: spacing.sm },

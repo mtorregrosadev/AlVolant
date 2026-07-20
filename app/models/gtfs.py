@@ -71,7 +71,7 @@ class RouteInfo(BaseModel):
     agency_id: str = ""
     route_ids: list[str] = Field(
         default_factory=list,
-        description="Merged GTFS route_ids for this route_short_name",
+        description="Source GTFS route_id represented by this catalogue item",
     )
     direction_destinations: list[DirectionInfo] = Field(
         default_factory=list,
@@ -91,7 +91,7 @@ class NearbyRoutesRequest(BaseModel):
 
 
 class NearbyRoute(BaseModel):
-    """A canonical route and its distance to the closest representative stop."""
+    """A source GTFS route and its distance to the closest representative stop."""
 
     route_id: str
     distance_meters: float = Field(..., ge=0)

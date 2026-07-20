@@ -23,6 +23,7 @@ from app.services.gtfs_service import (
     _KEY_TRIP_SHAPE_PREFIX,
     _KEY_TRIP_STOPS_PREFIX,
     _KEY_TRIPS_PREFIX,
+    _SNAPSHOT_VERSION,
     GTFSService,
 )
 
@@ -105,10 +106,152 @@ def test_direction_destination_uses_the_last_stop_when_headsign_is_reversed(
         stop_times_by_trip=stop_times,
         trip_start_times=start_times,
     )
-    routes_payload = service._build_deduplicated_routes(routes, trip_meta)
+    routes_payload = service._build_catalog_routes(routes, trip_meta)
 
     assert trip_meta["trip-out"]["destination_name"] == "Destí"
     assert routes_payload[0]["direction_destinations"][0]["destination_name"] == "Destí"
+
+
+def test_catalog_keeps_same_public_number_from_different_agencies_separate(
+    settings: Settings,
+    cache: CacheManager,
+) -> None:
+    service = GTFSService(settings=settings, cache=cache)
+    routes = {
+        "TAR_21": {
+            "route_short_name": "21",
+            "route_long_name": "Tarragona circular",
+            "route_type": 3,
+            "agency_id": "TAR_EMT",
+        },
+        "TMB_2.21.2973": {
+            "route_short_name": "21",
+            "route_long_name": "Paral·lel / El Prat",
+            "route_type": 3,
+            "agency_id": "TMB_",
+        },
+    }
+    trip_meta = {
+        "tar-trip": {
+            "route_id": "TAR_21",
+            "direction_id": 0,
+            "destination_stop_name": "Tarragona",
+        },
+        "tmb-trip": {
+            "route_id": "TMB_2.21.2973",
+            "direction_id": 0,
+            "destination_stop_name": "El Prat",
+        },
+    }
+
+    catalog = service._build_catalog_routes(routes, trip_meta)
+    by_id = {item["route_id"]: item for item in catalog}
+
+    assert set(by_id) == {"TAR_21", "TMB_2.21.2973"}
+    assert by_id["TAR_21"]["route_ids"] == ["TAR_21"]
+    assert by_id["TMB_2.21.2973"]["route_ids"] == ["TMB_2.21.2973"]
+    assert by_id["TAR_21"]["agency_id"] == "TAR_EMT"
+    assert by_id["TMB_2.21.2973"]["agency_id"] == "TMB_"
+    assert by_id["TMB_2.21.2973"]["direction_destinations"] == [
+        {"direction_id": 0, "destination_name": "El Prat", "label": "Towards El Prat"}
+    ]
+
+
+def test_catalog_keeps_same_direction_trip_variants_under_one_source_route(
+    settings: Settings,
+    cache: CacheManager,
+) -> None:
+    service = GTFSService(settings=settings, cache=cache)
+    routes = {
+        "AMB_415": {
+            "route_short_name": "M30",
+            "route_long_name": "Sta. Coloma G. - Montgat",
+            "route_type": 3,
+            "agency_id": "AMB_44",
+        }
+    }
+    trip_rows = [
+        {
+            "trip_id": "m30-origin-a",
+            "route_id": "AMB_415",
+            "direction_id": 1,
+            "service_id": "weekday",
+            "trip_headsign": "Sta. Coloma G.",
+            "shape_id": "shape-a",
+        },
+        {
+            "trip_id": "m30-origin-b",
+            "route_id": "AMB_415",
+            "direction_id": 1,
+            "service_id": "weekday",
+            "trip_headsign": "Sta. Coloma G.",
+            "shape_id": "shape-b",
+        },
+    ]
+    trip_meta = {
+        "m30-origin-a": {
+            "route_id": "AMB_415",
+            "direction_id": 1,
+            "origin_stop_name": "Origin A",
+            "destination_stop_name": "Sta. Coloma G.",
+            "towards_label": "Towards Sta. Coloma G.",
+            "destination_name": "Sta. Coloma G.",
+        },
+        "m30-origin-b": {
+            "route_id": "AMB_415",
+            "direction_id": 1,
+            "origin_stop_name": "Origin B",
+            "destination_stop_name": "Sta. Coloma G.",
+            "towards_label": "Towards Sta. Coloma G.",
+            "destination_name": "Sta. Coloma G.",
+        },
+    }
+
+    catalog = service._build_catalog_routes(routes, trip_meta)
+    trips_by_direction = service._build_trips_by_route_direction(
+        trip_rows,
+        {"m30-origin-a": "08:00:00", "m30-origin-b": "08:10:00"},
+        trip_meta,
+    )
+
+    assert len(catalog) == 1
+    assert catalog[0]["route_id"] == "AMB_415"
+    assert catalog[0]["route_ids"] == ["AMB_415"]
+    assert catalog[0]["direction_destinations"] == [
+        {
+            "direction_id": 1,
+            "destination_name": "Sta. Coloma G.",
+            "label": "Towards Sta. Coloma G.",
+        }
+    ]
+    assert [trip["trip_id"] for trip in trips_by_direction[("AMB_415", 1)]] == [
+        "m30-origin-a",
+        "m30-origin-b",
+    ]
+    assert [trip["origin_stop_name"] for trip in trips_by_direction[("AMB_415", 1)]] == [
+        "Origin A",
+        "Origin B",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_legacy_catalog_aliases_are_never_resolved(
+    settings: Settings,
+    cache: CacheManager,
+) -> None:
+    service = GTFSService(settings=settings, cache=cache)
+    await cache.set_json(
+        _KEY_ROUTES,
+        [
+            {
+                "route_id": "TAR_21",
+                "route_ids": ["TAR_21", "TMB_2.21.2973"],
+            }
+        ],
+        ttl=60,
+    )
+
+    assert await service.resolve_group_route_ids("TMB_2.21.2973") == ["TMB_2.21.2973"]
 
 
 def _legacy_shape(trip_id: str = "legacy-trip") -> dict:
@@ -430,6 +573,65 @@ async def test_v2_upcoming_query_reads_only_requested_schedule_hash_fields(
 
 
 @pytest.mark.asyncio
+async def test_upcoming_trip_summary_distinguishes_empty_schedule_states(
+    settings: Settings,
+    cache: CacheManager,
+) -> None:
+    service = GTFSService(settings=settings, cache=cache)
+    await cache.set_json(
+        _KEY_ROUTES,
+        [{"route_id": "route-1", "route_ids": ["route-1"]}],
+        ttl=60,
+    )
+    await service._cache_calendar_and_trips(
+        [
+            {
+                "service_id": "weekday-service",
+                "monday": 1,
+                "tuesday": 0,
+                "wednesday": 0,
+                "thursday": 0,
+                "friday": 0,
+                "saturday": 0,
+                "sunday": 0,
+                "start_date": "20260101",
+                "end_date": "20261231",
+            }
+        ],
+        {},
+        {
+            ("route-1", 0): [
+                {
+                    "trip_id": "weekday-trip",
+                    "route_id": "route-1",
+                    "service_id": "weekday-service",
+                    "departure_time": "09:00:00",
+                }
+            ]
+        },
+    )
+
+    available = await service.get_upcoming_trip_summary(
+        "route-1", direction_id=0, date_str="20260105", time_str="08:00:00",
+    )
+    finished = await service.get_upcoming_trip_summary(
+        "route-1", direction_id=0, date_str="20260105", time_str="10:00:00",
+    )
+    inactive = await service.get_upcoming_trip_summary(
+        "route-1", direction_id=0, date_str="20260106", time_str="08:00:00",
+    )
+    missing = await service.get_upcoming_trip_summary(
+        "route-without-trips", direction_id=0, date_str="20260105", time_str="08:00:00",
+    )
+
+    assert available["status"] == "available"
+    assert [trip["trip_id"] for trip in available["trips"]] == ["weekday-trip"]
+    assert finished == {"status": "no_remaining_departures", "trips": []}
+    assert inactive == {"status": "no_service_today", "trips": []}
+    assert missing == {"status": "no_schedule_data", "trips": []}
+
+
+@pytest.mark.asyncio
 async def test_trip_lookup_falls_back_to_retained_previous_generation(
     settings: Settings,
     cache: CacheManager,
@@ -499,7 +701,7 @@ async def test_complete_cache_and_refresh_deadline_require_both_current_manifest
         "component_counts": {"calendar": 0, "exceptions": 0, "trips": 0},
     }
     snapshot = {
-        "version": 3,
+        "version": _SNAPSHOT_VERSION,
         "snapshot_id": snapshot_id,
         "trip_generation": trip_manifest["generation"],
         "schedule_generation": schedule_manifest["generation"],
@@ -517,6 +719,13 @@ async def test_complete_cache_and_refresh_deadline_require_both_current_manifest
 
     assert await service.has_complete_cache() is True
     assert 50 <= await service.seconds_until_refresh() <= 60
+
+    await cache.set_json(
+        _KEY_SNAPSHOT_ACTIVE,
+        {**snapshot, "version": _SNAPSHOT_VERSION - 1},
+        ttl=120,
+    )
+    assert await service.has_complete_cache() is False
 
     mismatched = {**snapshot, "schedule_generation": "c" * 32}
     await cache.set_json(_KEY_SNAPSHOT_ACTIVE, mismatched, ttl=120)

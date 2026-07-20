@@ -486,6 +486,18 @@ export interface UpcomingTrip {
   is_maintenance?: boolean;
 }
 
+export type UpcomingTripsAvailability =
+  | 'available'
+  | 'no_schedule_data'
+  | 'no_service_today'
+  | 'no_remaining_departures'
+  | 'unavailable';
+
+export interface UpcomingTripsResult {
+  status: UpcomingTripsAvailability;
+  trips: UpcomingTrip[];
+}
+
 export interface VehiclePosition {
   vehicle_id: string;
   route_id: string;
@@ -787,7 +799,7 @@ export const apiService = {
     directionId: number,
     signal?: AbortSignal,
     pastMinutes?: number,
-  ): Promise<UpcomingTrip[]> {
+  ): Promise<UpcomingTripsResult> {
     if (directionId !== 0 && directionId !== 1) {
       return Promise.reject(new ApiError('Direcció de ruta no vàlida.'));
     }
@@ -798,13 +810,37 @@ export const apiService = {
       && pastMinutes > 5
       ? Math.min(180, Math.round(pastMinutes))
       : undefined;
-    return requestJson<UpcomingTrip[]>(
+    return requestJson<unknown>(
       `/api/v1/gtfs/routes/${route}/upcoming-trips${createQuery({
         direction_id: directionId,
+        include_status: 1,
         ...(normalizedPastMinutes ? { past_minutes: normalizedPastMinutes, limit: 12 } : {}),
       })}`,
       { endpoint: 'upcoming_trips', signal },
-    ).then((trips) => Array.isArray(trips) ? trips : []);
+    ).then((payload): UpcomingTripsResult => {
+      // Supports an older local BFF during a rolling mobile/server restart.
+      if (Array.isArray(payload)) {
+        return { status: 'available', trips: payload as UpcomingTrip[] };
+      }
+      if (!payload || typeof payload !== 'object') {
+        throw new ApiError('Les sortides de la línia no són vàlides.', undefined, 'invalid_response');
+      }
+      const record = payload as { status?: unknown; trips?: unknown };
+      const validStatuses: UpcomingTripsAvailability[] = [
+        'available',
+        'no_schedule_data',
+        'no_service_today',
+        'no_remaining_departures',
+        'unavailable',
+      ];
+      if (!validStatuses.includes(record.status as UpcomingTripsAvailability) || !Array.isArray(record.trips)) {
+        throw new ApiError('L’estat de les sortides no és vàlid.', undefined, 'invalid_response');
+      }
+      return {
+        status: record.status as UpcomingTripsAvailability,
+        trips: record.trips as UpcomingTrip[],
+      };
+    });
   },
 
   fetchReliefCandidates(

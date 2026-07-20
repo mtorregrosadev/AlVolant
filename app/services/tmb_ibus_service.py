@@ -67,6 +67,7 @@ _AMB_RT_CACHE_KEY = "amb:gtfsrt:trip-updates:v1"
 _QUOTA_MINUTE_PREFIX = "rl:ibus:minute"
 _QUOTA_DAY_PREFIX = "rl:ibus:day"
 _CIRCUIT_KEY = "rl:ibus:circuit"
+_IBUS_ROUTE_PREFIXES = ("TMB_", "AMB_")
 
 LookupStatus = Literal["available", "rate_limited", "unavailable"]
 
@@ -148,40 +149,97 @@ class TMBIbusService:
         stop_id: str,
         scheduled_departure_epoch: int | None,
     ) -> IbusFleetSummary:
-        """Return a schedule match plus live positions from the suitable provider."""
-        can_use_amb_rt = bool(
+        """Return live fleet information from the agreed provider policy.
+
+        iBus is the primary live source for both TMB and AMB catalog routes.
+        The AMB GTFS-RT adapter is retained as a resilience fallback for AMB
+        when iBus is unavailable *or has no ahead/behind context*; it is never
+        used for another operator.
+        """
+        normalized_route_id = route_id.upper()
+        if not normalized_route_id.startswith(_IBUS_ROUTE_PREFIXES):
+            return self._empty_summary("unavailable", stop_id, "")
+
+        try:
+            ibus_summary = await self._get_ibus_fleet_summary(
+                route_id=route_id,
+                trip_id=trip_id,
+                direction_id=direction_id,
+                stop_id=stop_id,
+                scheduled_departure_epoch=scheduled_departure_epoch,
+            )
+        except Exception:
+            # A malformed or stale static context must not prevent AMB's
+            # retained fallback from serving an otherwise usable live feed.
+            logger.warning("iBus fleet summary could not be built", exc_info=True)
+            ibus_summary = self._empty_summary("unavailable", stop_id, "")
+        can_fallback_to_amb_rt = bool(
             trip_id
-            and route_id.startswith("AMB_")
-            and trip_id.startswith("AMB_")
+            and normalized_route_id.startswith("AMB_")
+            and trip_id.upper().startswith("AMB_")
         )
+        if (
+            ibus_summary.status == "available"
+            and (
+                not can_fallback_to_amb_rt
+                or self._has_directional_fleet_context(ibus_summary)
+            )
+        ):
+            return ibus_summary
+        if not can_fallback_to_amb_rt:
+            return ibus_summary
+
         contexts = await self._get_stop_contexts(
             route_id=route_id,
             trip_id=trip_id,
             direction_id=direction_id,
             stop_id=stop_id,
-            # AMB's feed is route-wide and does not cost one request per stop.
-            # Retain the full remaining static pattern whenever a trip is known
-            # so it can position metropolitan services exactly on the rail.
+            include_downstream=True,
+            full_pattern=True,
+        )
+        fallback = await self._get_amb_fleet_summary(
+            route_id=route_id,
+            trip_id=trip_id,
+            direction_id=direction_id,
+            current_stop_id=stop_id,
+            contexts=contexts,
+            scheduled_departure_epoch=scheduled_departure_epoch,
+            now_epoch=int(time.time()),
+        )
+        return fallback or ibus_summary
+
+    @staticmethod
+    def _has_directional_fleet_context(summary: IbusFleetSummary) -> bool:
+        """Whether iBus can actually draw a bus ahead of or behind the driver."""
+        return bool(
+            summary.ahead_vehicle
+            or summary.behind_vehicle
+            or summary.ahead_position
+            or summary.route_positions
+        )
+
+    async def _get_ibus_fleet_summary(
+        self,
+        *,
+        route_id: str,
+        trip_id: str | None,
+        direction_id: int,
+        stop_id: str,
+        scheduled_departure_epoch: int | None,
+    ) -> IbusFleetSummary:
+        """Build one iBus-derived summary for a TMB or AMB catalog route."""
+        contexts = await self._get_stop_contexts(
+            route_id=route_id,
+            trip_id=trip_id,
+            direction_id=direction_id,
+            stop_id=stop_id,
             include_downstream=trip_id is not None,
-            full_pattern=can_use_amb_rt,
+            full_pattern=False,
         )
         context = contexts[0] if contexts else None
         stop_name = str(context.get("stop_name", "")) if context else ""
         if context is None:
             return self._empty_summary("unavailable", stop_id, stop_name)
-
-        if can_use_amb_rt:
-            amb_summary = await self._get_amb_fleet_summary(
-                route_id=route_id,
-                trip_id=trip_id,
-                direction_id=direction_id,
-                current_stop_id=stop_id,
-                contexts=contexts,
-                scheduled_departure_epoch=scheduled_departure_epoch,
-                now_epoch=int(time.time()),
-            )
-            if amb_summary is not None:
-                return amb_summary
 
         if not self._configured:
             return self._empty_summary("unconfigured", stop_id, stop_name)
@@ -196,10 +254,10 @@ class TMBIbusService:
         # iBus exposes arrivals per stop rather than a route-wide vehicle
         # feed.  A scan only from the driver's current stop to the terminus
         # can never find the service that left the origin behind them.  For a
-        # selected TMB trip, sample the complete static pattern every N stops;
+        # selected TMB or AMB trip, sample the complete static pattern every N stops;
         # the result is shared by the static route fingerprint and protected by
         # the global provider budget.
-        if trip_id and not can_use_amb_rt:
+        if trip_id:
             full_contexts = await self._get_full_tmb_route_scan_contexts(route_id, trip_id)
             if full_contexts:
                 route_scan_contexts = full_contexts

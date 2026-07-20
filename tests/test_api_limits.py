@@ -21,9 +21,14 @@ def _gtfs_client() -> TestClient:
     app = FastAPI()
     app.state.api_key = "test-api-key"
     app.state.gtfs_service = SimpleNamespace(
+        _cache=SimpleNamespace(get_json=AsyncMock(return_value=[{"service_id": "weekday"}])),
         get_route_shape=AsyncMock(),
         get_route_stops=AsyncMock(),
         get_upcoming_trips=AsyncMock(),
+        get_upcoming_trip_summary=AsyncMock(
+            return_value={"status": "no_service_today", "trips": []}
+        ),
+        _resolve_group_route_ids=AsyncMock(return_value=["AMB_415"]),
     )
     app.include_router(gtfs_router, prefix="/api/v1")
     return TestClient(app)
@@ -75,6 +80,17 @@ def test_upcoming_trip_direction_and_limit_are_bounded(query: str) -> None:
         )
 
     assert response.status_code == 422
+
+
+def test_upcoming_trips_can_return_an_explicit_availability_state() -> None:
+    with _gtfs_client() as client:
+        response = client.get(
+            "/api/v1/gtfs/routes/AMB_415/upcoming-trips?direction_id=0&include_status=true",
+            headers=_HEADERS,
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "no_service_today", "trips": []}
 
 
 @pytest.mark.parametrize(

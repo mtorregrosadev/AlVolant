@@ -18,13 +18,24 @@ export type AppLanguage = 'ca' | 'es' | 'gl' | 'eu';
 export type VehicleColor = 'red' | 'yellow' | 'green' | 'route';
 export type VehicleMarker = 'bus' | 'arrow';
 export type RouteLineColor = 'red' | 'yellow' | 'green' | 'blue' | 'white';
-export type HomeAgency = 'TMB' | 'AMB' | 'FGC' | 'Rodalies' | 'Altres';
+export type HomeAgency =
+  | 'TMB'
+  | 'AMB'
+  | 'Sagalés'
+  | 'TEISA'
+  | 'HIFE'
+  | 'Empresa Plana'
+  | 'Moventis'
+  | 'Altres';
 
 export const HOME_AGENCIES: readonly HomeAgency[] = [
   'TMB',
   'AMB',
-  'FGC',
-  'Rodalies',
+  'Sagalés',
+  'TEISA',
+  'HIFE',
+  'Empresa Plana',
+  'Moventis',
   'Altres',
 ];
 

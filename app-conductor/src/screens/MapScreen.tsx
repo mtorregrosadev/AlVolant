@@ -1605,7 +1605,10 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const visibleDriverMetrics = driverMetrics;
   const portraitDriverPanelHeightWithIbus = portraitDriverPanelHeight
     + Math.max(0, iBusSummaryRows.length - 1) * 16;
-  const landscapeDriverPanelHeight = visibleFleetMetrics.length > 0 ? 146 : 104;
+  // In landscape the fleet information is deliberately a compact text line.
+  // A full card consumed too much of the map for information that is already
+  // represented by a bus marker on the journey rail.
+  const landscapeDriverPanelHeight = visibleFleetMetrics.length > 0 ? 120 : 104;
   const driverPanelClearance = isLandscape
     ? landscapeDriverPanelHeight + 18
     : portraitDriverPanelHeightWithIbus + 20;
@@ -3268,10 +3271,24 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
               </View>
             ))}
           </View>
-          {(isLandscape || iBusSummaryRows.length === 0) && visibleFleetMetrics.length > 0 ? (
+          {isLandscape && visibleFleetMetrics.length > 0 ? (
+            <View style={styles.driverFleetTextRow}>
+              {visibleFleetMetrics.map((metric) => (
+                <View key={`${metric.icon}-${metric.title}`} style={styles.driverFleetTextMetric}>
+                  <MaterialCommunityIcons name={metric.icon} size={12} color={colors.primary} />
+                  <Text
+                    style={[styles.driverFleetText, { color: chromeTextColor }]}
+                    numberOfLines={1}
+                  >
+                    {`${metric.title}: ${metric.location}`}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          ) : null}
+          {!isLandscape && iBusSummaryRows.length === 0 && visibleFleetMetrics.length > 0 ? (
             <View style={[
               styles.driverFleetRow,
-              isLandscape && styles.driverFleetRowLandscape,
             ]}>
               {visibleFleetMetrics.map((metric) => (
                 <View key={`${metric.icon}-${metric.title}`} style={styles.driverFleetMetric}>
@@ -3963,7 +3980,27 @@ const styles = StyleSheet.create({
     gap: 7,
     width: '100%',
   },
-  driverFleetRowLandscape: { marginTop: 0 },
+  driverFleetTextRow: {
+    minHeight: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    width: '100%',
+  },
+  driverFleetTextMetric: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  driverFleetText: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: 10,
+    lineHeight: 13,
+    fontWeight: '800',
+  },
   driverFleetMetric: {
     flex: 1,
     minWidth: 0,

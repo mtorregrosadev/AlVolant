@@ -44,6 +44,10 @@ data/*.csv
 *.pmtiles
 !data/.gitkeep
 
+# One-time local vector-map bootstrap. run-local.sh builds this from public
+# OpenStreetMap data; it must never be added to the repository.
+.alvolant/
+
 # Coverage
 htmlcov/
 .coverage

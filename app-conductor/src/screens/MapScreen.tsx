@@ -135,6 +135,34 @@ type MapThemeOption = {
   style: any;
 };
 
+const LOCAL_MAP_DEFAULT_ORIGIN = 'http://localhost:3002';
+
+/**
+ * The portable runner starts its vector-map gateway on iPhone Simulator
+ * loopback. A deployed build can opt into an HTTPS origin, but the source code
+ * never relies on a developer-owned DNS name.
+ */
+function resolveMapOrigin(value: string | undefined) {
+  const candidate = value?.trim().replace(/\/+$/, '');
+  if (!candidate) return LOCAL_MAP_DEFAULT_ORIGIN;
+
+  try {
+    const parsed = new URL(candidate);
+    const isLoopback = parsed.hostname === 'localhost'
+      || parsed.hostname === '127.0.0.1'
+      || parsed.hostname === '::1';
+    if (parsed.protocol === 'https:' || (parsed.protocol === 'http:' && isLoopback)) {
+      return parsed.origin;
+    }
+  } catch {
+    // The local gateway is safer than accepting an invalid or non-HTTP origin.
+  }
+
+  return LOCAL_MAP_DEFAULT_ORIGIN;
+}
+
+const MAP_ORIGIN = resolveMapOrigin(process.env.EXPO_PUBLIC_MAP_ORIGIN);
+
 const MS_TO_KMH = 3.6;
 const MIN_MOVING_SPEED_KMH = 3;
 const MAX_JOURNEY_STOP_MARKERS = 9;
@@ -666,20 +694,20 @@ const MAP_THEME_OPTIONS: Record<MapTheme, MapThemeOption> = {
   dark: {
     labelKey: 'map.dark',
     icon: 'weather-night',
-    style: 'https://alvolant.duckdns.org/maps/styles/dark.json',
+    style: `${MAP_ORIGIN}/maps/styles/dark.json`,
   },
   light: {
     labelKey: 'map.light',
     icon: 'white-balance-sunny',
-    style: 'https://alvolant.duckdns.org/maps/styles/light.json',
+    style: `${MAP_ORIGIN}/maps/styles/light.json`,
   },
   satellite: {
     labelKey: 'map.satellite',
     icon: 'satellite-variant',
-    // Revision is intentional: native MapLibre keeps style documents in its
-    // HTTP cache. It prevents an installed development build from retaining
-    // the previous EOX source after this provider migration.
-    style: 'https://alvolant.duckdns.org/maps/styles/satellite-esri.json?rev=2',
+    // The selected satellite style is replaced with a BFF-issued, per-client
+    // style after the opaque client id is ready. This fallback is deliberately
+    // local too: no map mode depends on a developer-owned public DNS name.
+    style: `${BASE_URL}/maps/satellite/style.json`,
   },
 };
 
@@ -2647,7 +2675,7 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
         {preferences.buildings3dEnabled && mapTheme === 'satellite' ? (
           <VectorSource
             id="satelliteBuildings"
-            url="https://alvolant.duckdns.org/maps/tiles/catalunya"
+            url={`${MAP_ORIGIN}/maps/tiles/catalunya`}
             minzoom={0}
             maxzoom={15}
           >

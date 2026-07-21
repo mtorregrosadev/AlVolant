@@ -10,6 +10,7 @@ DERIVED_DATA="$WORK_DIR/DerivedData"
 STAGING_DIR="$WORK_DIR/package"
 BUILD_LOG="$OUTPUT_DIR/unsigned-ipa-build.log"
 MIN_FREE_KB=$((3 * 1024 * 1024))
+IOS_BUILD_LOCK="$APP_DIR/build/.ios-native-build.lock"
 
 for command in node npm npx pod xcodebuild xcrun git ditto zip unzip tee; do
   if ! command -v "$command" >/dev/null 2>&1; then
@@ -19,6 +20,32 @@ for command in node npm npx pod xcodebuild xcrun git ditto zip unzip tee; do
 done
 
 mkdir -p "$OUTPUT_DIR"
+
+acquire_ios_build_lock() {
+  mkdir -p "$(dirname "$IOS_BUILD_LOCK")"
+  if mkdir "$IOS_BUILD_LOCK" 2>/dev/null; then
+    printf '%s\n' "$$" > "$IOS_BUILD_LOCK/pid"
+    return
+  fi
+
+  local owner_pid=''
+  if [[ -f "$IOS_BUILD_LOCK/pid" ]]; then
+    owner_pid="$(<"$IOS_BUILD_LOCK/pid")"
+  fi
+  if [[ "$owner_pid" =~ ^[0-9]+$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
+    echo "Error: another iOS native build is still running (PID $owner_pid). Wait for it to finish, then try again." >&2
+  else
+    echo "Error: the iOS native build lock is stale at $IOS_BUILD_LOCK. Remove that directory after confirming that no Xcode build is running." >&2
+  fi
+  exit 6
+}
+
+release_ios_build_lock() {
+  rm -f "$IOS_BUILD_LOCK/pid"
+  rmdir "$IOS_BUILD_LOCK" 2>/dev/null || true
+}
+
+acquire_ios_build_lock
 
 free_kb="$(df -Pk "$APP_DIR" | awk 'NR == 2 { print $4 }')"
 if [[ -z "$free_kb" || "$free_kb" -lt "$MIN_FREE_KB" ]]; then
@@ -33,6 +60,7 @@ cleanup() {
     find "$WORK_DIR" -mindepth 1 -delete
     rmdir "$WORK_DIR" 2>/dev/null || true
   fi
+  release_ios_build_lock
 }
 trap cleanup EXIT
 

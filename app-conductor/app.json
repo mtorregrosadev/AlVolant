@@ -13,7 +13,8 @@
       "bundleIdentifier": "com.mtorregrosadev.AlVolant",
       "infoPlist": {
         "NSAppTransportSecurity": {
-          "NSAllowsArbitraryLoads": false
+          "NSAllowsArbitraryLoads": false,
+          "NSAllowsLocalNetworking": true
         },
         "UIBackgroundModes": [
           "location"

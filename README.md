@@ -1,86 +1,143 @@
+[English](README.md) · [Català](README_cat.md)
+
 <h1>
-  <img src="app-conductor/assets/alvolant-app-icon.png" width="52" alt="Logotip d’AlVolant" align="center">
-  AlVolant — BFF i app
+  <img src="app-conductor/assets/alvolant-app-icon.png" width="52" alt="AlVolant logo" align="center">
+  AlVolant — mobile app and BFF
 </h1>
 
-https://github.com/user-attachments/assets/89d218e5-36ec-40dc-b13b-15113fd39b5f
+https://github.com/user-attachments/assets/bf468c74-a006-4d03-99c4-83f689ed26f9
 
-<p align="center"><sub><strong>Vídeo de presentació d’AlVolant.</strong></sub></p>
+<p align="center"><sub><strong>AlVolant presentation video.</strong></sub></p>
 
-Aplicació mòbil per preparar i seguir serveis d’autobús sobre la xarxa integrada de transport. El repositori inclou una app Expo/React Native orientada a iPhone i un Backend-for-Frontend FastAPI que agrega GTFS estàtic, GTFS-Realtime i informació de trànsit.
+AlVolant is an iPhone app for preparing and following bus services in the integrated transport network of Catalonia. The repository includes an Expo/React Native app and a FastAPI Backend-for-Frontend (BFF). The BFF combines static GTFS, GTFS-Realtime, traffic data, and Redis cache data.
 
-<p align="center">
-  <img src="docs/screenshots/home.png" width="22%" alt="Selecció de línia i preferències locals">
-  &nbsp;
-  <img src="docs/screenshots/routes.png" width="22%" alt="Catàleg complet de línies">
-  &nbsp;
-  <img src="docs/screenshots/settings.png" width="22%" alt="Configuració d’idioma i vehicle">
-  &nbsp;
-  <img src="docs/screenshots/map.png" width="22%" alt="Navegació sobre el mapa fosc">
-</p>
-
-## Exemples en vídeo
+## Screenshots
 
 <table>
   <tr>
-    <td width="33%" align="center">
-      <a href="https://github.com/user-attachments/assets/1a83656e-7913-4b06-b8de-8b71b21d24ea">
-        <img src="docs/videos/01-cerca-m30-retrat.gif" width="100%" alt="Cerca de la línia M30 en retrat">
-      </a>
+    <td width="25%" align="center">
+      <img src="docs/screenshots/home.png" width="100%" alt="Home screen with recents, favourites, and selected lines">
       <br>
-      <sub><strong>1. Cerca de la M30</strong><br>Cerca i selecció d’una línia en retrat.</sub>
+      <sub><strong>1. Prepare a service</strong><br>Select a line, direction, and departure.</sub>
     </td>
-    <td width="33%" align="center">
-      <a href="https://github.com/user-attachments/assets/10486bc3-349a-4a6b-8f4e-11726add6b3d">
-        <img src="docs/videos/02-inici-servei-retrat.gif" width="100%" alt="Inici d’un servei en retrat">
-      </a>
+    <td width="25%" align="center">
+      <img src="docs/screenshots/routes.png" width="100%" alt="Full catalogue of available bus lines">
       <br>
-      <sub><strong>2. Inici del servei</strong><br>Preparació i inici d’un servei en retrat.</sub>
+      <sub><strong>2. Browse lines</strong><br>Search and filter the complete catalogue.</sub>
     </td>
-    <td width="33%" align="center">
-      <a href="https://github.com/user-attachments/assets/cc9737dd-e623-4af7-a777-2abd90f4b6ef">
-        <img src="docs/videos/03-simulacio-m30-retrat.gif" width="100%" alt="Simulació de la línia M30 en retrat">
-      </a>
+    <td width="25%" align="center">
+      <img src="docs/screenshots/settings.png" width="100%" alt="App settings for language, operators, and vehicle">
       <br>
-      <sub><strong>3. Simulació en retrat</strong><br>Navegació de la línia M30 durant el servei.</sub>
+      <sub><strong>3. Make it yours</strong><br>Choose language, operators, and vehicle style.</sub>
     </td>
-  </tr>
-  <tr>
-    <td colspan="2" align="center">
-      <a href="https://mtorregrosa.is-a.dev/alvolant/videos/04-simulacio-m30-horitzontal.mp4">
-        <img src="docs/videos/04-simulacio-m30-horitzontal.gif" width="100%" alt="Simulació de la línia M30 en horitzontal">
-      </a>
+    <td width="25%" align="center">
+      <img src="docs/screenshots/map.png" width="100%" alt="Dark 3D map following the M30 service">
       <br>
-      <sub><strong>4. Simulació en horitzontal</strong><br>Navegació amb la interfície adaptada al mode horitzontal.</sub>
-    </td>
-    <td width="33%" align="center">
-      <a href="https://github.com/user-attachments/assets/636e2ddd-c81b-40c3-a20c-542b605f9bc2">
-        <img src="docs/videos/05-preferencies-retrat.gif" width="100%" alt="Preferències de l’aplicació en retrat">
-      </a>
-      <br>
-      <sub><strong>5. Preferències</strong><br>Configuració de les preferències de l’app.</sub>
+      <sub><strong>4. Follow the route</strong><br>Track the service on a live 3D map.</sub>
     </td>
   </tr>
 </table>
 
-## Què permet fer
+## Built with Codex and GPT-5.6
 
-- Cercar i filtrar 1.000+ serveis per operador, codi o destinació.
-- Entrar amb una animació de sincronització i passar a un mode de cerca dedicat.
-- Consultar un catàleg complet de línies en una pantalla independent.
-- Guardar favorites en una llista scrollable i fins a quatre rutes recents localment, sense compte d’usuari.
-- Prioritzar les línies amb parades més properes quan hi ha permís d’ubicació.
-- Canviar tota la interfície entre català i castellà.
-- Personalitzar el vehicle del mapa amb quatre accents validats.
-- Seleccionar sentit, sortida programada i vehicle abans d’iniciar el servei.
-- Navegar sobre un mapa fosc amb ruta, parades, edificis 3D i trànsit; el vehicle s’ajusta a la línia quan el GPS és coherent i mostra la posició real durant desviaments.
-- Treballar en retrat i horitzontal respectant les safe areas de l’iPhone.
+AlVolant was built during OpenAI Build Week with Codex and GPT-5.6.
 
-Les preferències es desen amb AsyncStorage, estan versionades, validades i limitades de mida. No s’hi desa cap dada sensible ni credencial d’usuari. La ubicació no forma part de les preferències ni de la telemetria: per ordenar línies properes, l’app l’arrodoneix abans d’enviar-la al BFF; per consultar el trànsit viatja dins el cos d’un `POST` i el BFF l’arrodoneix abans de consultar el proveïdor. Les coordenades exactes no es registren ni es persisteixen. Consulta la [política de privacitat](docs/PRIVACY.md) per veure els fluxos i la retenció.
+- Codex helped implement and refine the Expo app, FastAPI BFF, iOS build tools, tests, security checks, and documentation.
+- GPT-5.6 helped iterate on the product flow, responsive UI, map behavior, route simulation, and technical design.
+- The developer made the product choices, reviewed the changes, tested the iPhone build, and kept the final code in this repository.
 
-## Arquitectura
+## Quick start for judges
 
-```text
+Use macOS with Docker Desktop, Node.js and npm, Xcode, CocoaPods, and at least one iPhone Simulator runtime. Do not use an iPad runtime.
+
+~~~bash
+./run-local.sh
+~~~
+
+The script does the following:
+
+1. Creates .env and app-conductor/.env.local only when they do not exist.
+2. Uses random local development keys. It does not print them.
+3. Asks before the first local basemap bootstrap. If approved, it downloads public OpenStreetMap and Planetiler data, builds a Catalunya PMTiles archive, and caches it in ignored `.alvolant/maps/`.
+4. Starts Redis, the BFF, Martin, and a loopback-only map gateway with Docker Compose.
+5. Waits for the local map, `/health/ready`, and the GTFS catalogue. The first map and GTFS downloads can take several minutes.
+6. Opens Simulator, builds a Release app, and installs it on an iPhone Simulator only.
+
+If an existing .env does not contain the values Docker needs, the script keeps it unchanged and creates an ignored .env.run-local profile.
+For the Simulator build, it injects the matching local BFF URL and key into the build process. It does not change an existing app-conductor/.env.local file.
+
+The normal light and dark maps do not use `alvolant.duckdns.org`, any other personal server, or a hosted tile API. The first bootstrap needs Internet access, at least 8 GiB free disk space, and at least 4 GiB assigned to Docker Desktop (6 GiB is recommended for the complete stack). Later runs use the cached local PMTiles archive, including when the public map host is unavailable. Enter `Y` at the prompt, or use `ALVOLANT_BOOTSTRAP_MAPS=1 ./run-local.sh` for a non-interactive first run.
+
+The runner is deliberately for the iPhone Simulator. It uses loopback-only `http://localhost:3002` and permits clear-text HTTP only to explicit loopback BFF addresses for this local build. This is correct for Simulator but not for a physical iPhone, where `localhost` means the phone itself. A physical-device build needs an HTTPS map origin and BFF origin that you operate or another supported deployment path.
+
+The local stack is tested on Apple Silicon and Intel Macs. The pinned Martin, Planetiler, and nginx images publish both `arm64` and `amd64` variants, so Docker does not need CPU emulation on either Mac type. `./run-local.sh` checks the macOS/iPhone prerequisites before it starts the large first map download. On another operating system, `./run-local.sh --no-ios` can start the services when Docker is available, but the iPhone build is macOS-only.
+
+Use this command to start the complete local stack without building iOS:
+
+~~~bash
+./run-local.sh --no-ios
+~~~
+
+Stop the local services with:
+
+~~~bash
+./run-local.sh --down
+~~~
+
+The Release build includes its JavaScript bundle. Metro is not required for this path. Use Metro only when you change JavaScript during development.
+
+## Product flows
+
+<table>
+  <tr>
+    <td width="33%" align="center">
+      <img src="docs/videos/01-cerca-m30-retrat.gif" width="100%" alt="Search for a bus line in portrait">
+      <br>
+      <sub><strong>1. Search a line</strong><br>Find a service by line, destination, or operator.</sub>
+    </td>
+    <td width="33%" align="center">
+      <img src="docs/videos/02-inici-servei-retrat.gif" width="100%" alt="Start a bus service in portrait">
+      <br>
+      <sub><strong>2. Start a service</strong><br>Select a direction and begin the route.</sub>
+    </td>
+    <td width="33%" align="center">
+      <img src="docs/videos/03-simulacio-m30-retrat.gif" width="100%" alt="Arrival at a bus stop in portrait">
+      <br>
+      <sub><strong>3. Reach the stop</strong><br>Follow the service as it approaches the stop.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center">
+      <img src="docs/videos/04-simulacio-m30-horitzontal.gif" width="100%" alt="M30 route simulation in landscape">
+      <br>
+      <sub><strong>4. Follow M30 in landscape</strong><br>Use the responsive live-map view during the service.</sub>
+    </td>
+    <td width="33%" align="center">
+      <img src="docs/videos/05-preferencies-retrat.gif" width="100%" alt="App preferences in portrait">
+      <br>
+      <sub><strong>5. Set preferences</strong><br>Personalise language, operators, and vehicle appearance.</sub>
+    </td>
+  </tr>
+</table>
+
+## Main functions
+
+- Search and filter more than 1,000 services by operator, code, or destination.
+- Show an animated data sync screen, then switch to a focused search mode.
+- Open the full catalogue on a separate screen.
+- Store favourite routes and up to four recent routes locally. No account is required.
+- Sort lines by nearby stops when location permission is available.
+- Switch the whole UI between Catalan and Spanish.
+- Select one of four vehicle accent colours.
+- Select direction, scheduled departure, and vehicle before starting a service.
+- Follow a dark map with route, stops, 3D buildings, traffic, and a bus marker. The marker follows the route only when GPS is consistent. It shows the real position during a diversion.
+- Work in portrait and landscape while respecting iPhone safe areas.
+
+Preferences use AsyncStorage. They are versioned, validated, and size-limited. They do not store user credentials or sensitive data. The app does not save precise location in preferences or telemetry. It rounds nearby-line coordinates before it sends them to the BFF. Traffic coordinates use a POST body and are rounded by the BFF before a provider request. The system does not store or log exact coordinates.
+
+## Architecture
+
+~~~text
 ATM GTFS / GTFS-RT          TomTom Traffic
           \                    /
            \                  /
@@ -88,90 +145,93 @@ ATM GTFS / GTFS-RT          TomTom Traffic
          FastAPI BFF  <-->  Redis
               |
               | HTTPS/WSS
-              | X-API-Key temporal, no autenticació forta
+              | Temporary X-API-Key, not strong authentication
               | WebSocket /api/v1/ws/live
               v
        Expo / React Native
        iPhone portrait + landscape
-```
+~~~
 
-### App mòbil
+### Mobile app
 
-- Expo SDK 57 i React Native 0.86.
-- React Navigation amb pantalles d’inici, catàleg, configuració i mapa.
-- MapLibre Native amb CARTO i Esri World Imagery.
-- Cache local acotada per a favorites i recents.
-- Peticions amb timeout, validació d’identificadors i HTTPS obligatori fora de desenvolupament.
-- Invalidacions GTFS-Realtime per WebSocket amb reconnexió acotada, refresc coalescent i conservació de l’última dada vàlida.
-- Telemetria pròpia acotada, sense ubicació, identificadors de línia, missatges d’error ni traces.
+- Expo SDK 57 and React Native 0.86.
+- React Navigation screens for home, catalogue, settings, and map.
+- MapLibre Native with CARTO and Esri World Imagery.
+- Bounded local cache for favourites and recents.
+- Requests with timeouts, identifier validation, and HTTPS outside development.
+- GTFS-Realtime invalidation through WebSocket. Reconnects are bounded, refreshes are coalesced, and the app keeps the last valid data.
+- Bounded first-party telemetry. It stores no location, route ID, error message, or stack trace.
 
 ### BFF
 
-- FastAPI amb respostes ORJSON.
-- Redis per a geometries, metadades i dades en temps real.
-- Control d’accés HTTP i WebSocket amb `X-API-Key` per al desenvolupament.
-- Rate limiting per connexió directa, límits de cos i WebSocket i validació estricta de payloads.
-- Hosts i destinacions sortints permesos explícitament en producció.
-- Càrrega i renovació GTFS fora de l’event loop, amb descàrregues i ZIPs acotats.
-- Snapshot GTFS generacional: catàleg, trips i calendari només passen a `ready` junts.
-- GTFS-Realtime parcial i acotat per bytes, entitats i camps repetits; un feed corrupte no invalida els altres.
-- Telemetria pròpia d’escriptura única, amb retenció curta i consulta administrativa directa a Redis.
+- FastAPI with ORJSON responses.
+- Redis for shapes, metadata, and live data.
+- HTTP and WebSocket access control with X-API-Key during development.
+- Per-connection rate limits, body and WebSocket limits, and strict payload validation.
+- Explicit trusted hosts and outbound destinations in production.
+- GTFS download and renewal outside the event loop. Downloads and ZIP files have limits.
+- Generational GTFS snapshots. Catalogue, trips, and calendar become ready together.
+- Bounded partial GTFS-Realtime parsing. A bad feed does not invalidate other feeds.
+- Write-only, short-retention telemetry in Redis. Local administrators can query it directly.
 
-## Estructura del repositori
+## Repository layout
 
-```text
-app-conductor/             App Expo / React Native
-  src/screens/             Inici, catàleg, configuració i mapa
-  src/services/            API, presentació i preferències locals
-app/                       BFF FastAPI
-  api/v1/                  GTFS, GTFS-RT, trànsit i WebSocket
-  services/                Ingesta, normalització i cache
-tests/                     Proves del backend
-docs/screenshots/          Captures reals de l’iPhone Simulator
-docs/videos/               Vídeo de presentació i exemples d’ús
-docs/design/               Handoff vectorial del vehicle
-docs/PRIVACY.md            Política i inventari de dades
-```
+~~~text
+app-conductor/             Expo / React Native app
+  src/screens/             Home, catalogue, settings, and map
+  src/services/            API, presentation, and local preferences
+app/                       FastAPI BFF
+  api/v1/                  GTFS, GTFS-RT, traffic, and WebSocket routes
+  services/                Ingestion, normalisation, and cache
+tests/                     BFF tests
+docs/screenshots/          Real iPhone Simulator screenshots
+docs/videos/               Presentation video and product examples
+docs/design/               Vehicle design handoff
+maps/                      Versioned style templates, fonts, and local map server config
+~~~
 
-## Model del vehicle
+## Vehicle model
 
-El marcador del bus és programàtic i no depèn d’una malla 3D. El handoff de disseny inclou les vistes superior, lateral, frontal i posterior, les proporcions i les quatre variants d’accent:
+The bus marker is generated in code. It does not use a 3D mesh. The design handoff includes top, side, front, and back views, proportions, and the four accent variants.
 
-- [SVG editable](docs/design/bus-vehicle-model.svg)
-- [Previsualització PNG](docs/design/bus-vehicle-model.png)
+- [Editable SVG](docs/design/bus-vehicle-model.svg)
+- [PNG preview](docs/design/bus-vehicle-model.png)
 
-## Requisits
+## Requirements
 
-- Python 3.12 o superior.
-- Node.js i npm.
-- Redis local o Docker.
-- Xcode amb un iPhone Simulator per executar iOS.
+- macOS for the iPhone build.
+- Xcode and an iPhone Simulator runtime.
+- Docker Desktop.
+- At least 8 GiB free disk space for the one-time local vector-map bootstrap.
+- At least 4 GiB assigned to Docker Desktop; 6 GiB is recommended for the full local stack.
+- Node.js and npm.
+- CocoaPods.
+- Python 3.12 or later for native BFF development and tests.
 
-## Configuració
+## Configuration
 
-Parteix dels exemples versionats i no reutilitzis cap secret entre serveis:
+The quickest local setup is ./run-local.sh. It creates random values when the local files are absent. It keeps an existing .env unchanged and uses .env.run-local only when the existing file cannot start Docker.
 
-```bash
+`run-local.sh` also starts the local MapLibre stack. `maps/` contains the style templates, font files, and server configuration; only generated OSM input and PMTiles output live under ignored `.alvolant/maps/`. The runner asks before the first download and never uses a developer-owned DNS name. Set `EXPO_PUBLIC_MAP_ORIGIN=http://localhost:3002` for a manual iPhone Simulator build, or an HTTPS origin for a deployed build.
+
+You can also copy the tracked examples:
+
+~~~bash
 cp .env.example .env
 cp app-conductor/.env.example app-conductor/.env.local
-```
+~~~
 
-El BFF necessita una clau de desenvolupament i Redis local:
+The two files work together as a loopback-only local profile. They contain the same public development BFF key. This key is part of the Expo bundle. It is not a production secret and is not strong authentication.
 
-```ini
-BFF_API_KEY=replace-with-at-least-32-random-characters
-REDIS_URL=redis://localhost:6379/0
-```
+Do not deploy the example values. They include a marker that production validation rejects. For a public deployment, use new high-entropy values for BFF_API_KEY, RATE_LIMIT_HASH_KEY, and REDIS_PASSWORD. Use HTTPS and WSS. Do not expose Uvicorn, Redis, or Metro directly to the Internet.
 
-Configura la mateixa clau de desenvolupament a `app-conductor/.env.local`.
+TomTom, ArcGIS, and TMB credentials are optional for the local demo. When they are empty, only the feature that needs the provider is unavailable. The BFF and the route catalogue still start. Docker Compose mounts a non-empty optional provider key as a runtime secret.
 
-`EXPO_PUBLIC_BFF_API_KEY` queda inclosa al bundle i no s’ha de considerar un secret ni una autenticació forta. Serveix per separar el desenvolupament casual del BFF, però una persona pot extreure-la d’una build. La distribució de producció queda condicionada a registrar l’App ID i el bundle identifier definitius, validar App Attest al servidor i intercanviar l’atestació per credencials de curta durada. També cal usar HTTPS/WSS; no s’ha d’exposar directament Uvicorn a Internet.
+### Hardened Docker profile
 
-### Perfil Docker endurit
+For a production-like Docker profile, set separate high-entropy values in .env:
 
-Per aixecar l’stack contenidoritzat, defineix a `.env` valors diferents i d’alta entropia per a `BFF_API_KEY`, `RATE_LIMIT_HASH_KEY` i `REDIS_PASSWORD`, i afegeix la clau de TomTom:
-
-```ini
+~~~ini
 ENVIRONMENT=production
 DOCS_ENABLED=false
 TRUSTED_HOSTS=bff.example.cat
@@ -181,125 +241,126 @@ RATE_LIMIT_HASH_KEY=replace-with-a-different-random-value
 REDIS_PASSWORD=replace_with_another_random_value_2026
 TOMTOM_API_KEY=replace-with-the-provider-key
 FORWARDED_ALLOW_IPS=127.0.0.1
-```
+~~~
 
-Després:
+Then run:
 
-```bash
+~~~bash
 docker compose up --build
-```
+~~~
 
-Compose no publica Redis al host: només el BFF hi pot accedir per la xarxa interna, amb una contrasenya URL-safe de 32–512 caràcters i una ACL que no permet `KEYS`, administració ni claus fora dels namespaces de l’app. El perfil reserva per defecte 3 GiB al BFF i 1,5 GiB al contenidor Redis (`maxmemory=1gb`): el benchmark del feed oficial del 12 de juliol de 2026 va arribar a 2,27 GiB de RSS durant el parse i a 533 MiB de Redis durant un rollover de dues generacions.
+Compose does not publish Redis. Only the BFF can reach it on the internal network. Redis uses a 32–512 character URL-safe password and an ACL. The ACL blocks KEYS, administrative commands, and keys outside the app namespaces. The default profile reserves 3 GiB for the BFF and 1.5 GiB for Redis. The Redis maxmemory value is 1 GiB.
 
-El BFF s’executa sense privilegis, amb el sistema de fitxers de només lectura, límits de recursos i comprovació de liveness. `TRUSTED_HOSTS` ha de contenir només els hosts preservats pel reverse proxy. `FORWARDED_ALLOW_IPS` ha de contenir exclusivament la IP o CIDR del proxy que elimina qualsevol `X-Forwarded-*` entrant abans de crear-ne un de nou; no utilitzis `*`. El comodí, Swagger i Redis sense autenticació fan fallar l’arrencada en producció.
+The BFF runs without privileges, uses a read-only filesystem, resource limits, and a liveness check. In production, TRUSTED_HOSTS must list only the hosts kept by the reverse proxy. FORWARDED_ALLOW_IPS must list only the proxy IP or CIDR that removes and recreates forwarded headers. Do not use a wildcard. Open Swagger and unauthenticated Redis make the production process fail at startup.
 
-## Execució local
+## Local development
 
-Instal·la el backend i inicia Redis:
+To run the BFF without Docker, install Redis and the backend dependencies:
 
-```bash
+~~~bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 redis-server
-```
+~~~
 
-En un altre terminal, inicia el BFF:
+Start the BFF in another terminal:
 
-```bash
+~~~bash
 .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
-```
+~~~
 
-Per fer una prova temporal des d’un iPhone fora de casa, segueix el perfil de [proxy HTTPS i port forwarding](docs/REMOTE_TESTING.md). No publiquis directament els ports del BFF, Redis o Metro.
+For the iPhone Simulator:
 
-Instal·la i executa l’app:
-
-```bash
+~~~bash
 ./install-ios.sh
-```
+~~~
 
-Aquesta ordre genera el projecte natiu, valida TypeScript, compila una build
-`Release` autònoma i la instal·la al primer iPhone Simulator arrencat. No tria
-mai un iPad. Pots fixar el dispositiu amb `IOS_SIMULATOR_UDID=<udid>`.
+This command creates the native project, validates TypeScript, builds a standalone Release app, and installs it on the first booted iPhone Simulator. It never selects an iPad. Set IOS_SIMULATOR_UDID to choose a specific iPhone.
 
-### IPA unsigned d’una sola ordre
+### One-command unsigned IPA
 
-En un Mac amb Xcode i CocoaPods, el script reprodueix el prebuild, valida
-TypeScript, compila per a iPhone físic sense signatura i comprova el ZIP final:
+On macOS with Xcode and CocoaPods:
 
-```bash
+~~~bash
 ./install-ios.sh --ipa
-```
+~~~
 
-L’artefacte queda a `app-conductor/build/AlVolant-unsigned-<versió>-<revisió>.ipa`
-i el log a `app-conductor/build/unsigned-ipa-build.log`. Calen com a mínim 3 GiB
-lliures. L’IPA inclou l’extensió de Live Activities, però no es pot instal·lar en
-un iPhone fins que se signi l’app i l’extensió amb un certificat i perfils de
-provisioning compatibles.
+The artifact is stored in app-conductor/build/AlVolant-unsigned-version-revision.ipa. The build log is stored in app-conductor/build/unsigned-ipa-build.log. The process needs at least 3 GiB of free disk space.
 
-## API principal
+The IPA includes the Live Activities extension. You cannot install it on an iPhone until you sign the app and extension with compatible certificates and provisioning profiles.
 
-Tots els endpoints de dades requereixen `X-API-Key`.
+## Main API
 
-- `GET /api/v1/gtfs/routes`
-- `POST /api/v1/gtfs/routes/nearby`
-- `GET /api/v1/gtfs/shapes/{route_id}`
-- `GET /api/v1/gtfs/stops/{route_id}`
-- `GET /api/v1/gtfs/routes/{route_id}/upcoming-trips`
-- `GET /api/v1/atm_rt/vehicles/{route_id}`
-- `GET /api/v1/atm_rt/trips/{route_id}`
-- `POST /api/v1/traffic/summary`
-- `POST /api/v1/telemetry/events`
-- `WS /api/v1/ws/live`
+All data endpoints require X-API-Key.
 
-Swagger UI està disponible a `http://localhost:8000/docs` només quan `DOCS_ENABLED=true`, pensat per a desenvolupament.
+- GET /api/v1/gtfs/routes
+- POST /api/v1/gtfs/routes/nearby
+- GET /api/v1/gtfs/shapes/{route_id}
+- GET /api/v1/gtfs/stops/{route_id}
+- GET /api/v1/gtfs/routes/{route_id}/upcoming-trips
+- GET /api/v1/atm_rt/vehicles/{route_id}
+- GET /api/v1/atm_rt/trips/{route_id}
+- POST /api/v1/traffic/summary
+- POST /api/v1/telemetry/events
+- WS /api/v1/ws/live
 
-## Diagnòstics i telemetria
+Swagger UI is available at http://localhost:8000/docs only when DOCS_ENABLED=true. It is for development.
 
-La telemetria és pròpia, d’escriptura única i orientada a detectar regressions: compta pantalles, fases d’ús, errors JavaScript per tipus i rendiment de peticions. No accepta coordenades, identificadors de ruta o vehicle, URL completes, cossos de petició, capçaleres, missatges d’error ni traces. La sessió és efímera i el BFF només en desa un hash curt; no hi ha compte ni identificador persistent.
+## Diagnostics and telemetry
 
-Redis conserva els esdeveniments durant tres dies per defecte, amb quotes diàries, llistes acotades i redacció addicional al servidor. No existeix cap endpoint HTTP de lectura. En un entorn local amb accés explícit a Redis, genera l’informe així:
+The telemetry is first-party, write-only, and designed to find regressions. It counts screens, app phases, JavaScript error types, and request performance. It does not accept coordinates, route IDs, vehicle IDs, complete URLs, request bodies, headers, error messages, or stack traces.
 
-```bash
+The session is temporary. The BFF stores only a short hash. It has no account and no persistent person identifier. Redis retains events for three days by default. It also applies daily limits, bounded lists, and server-side redaction. There is no HTTP read endpoint.
+
+With explicit local Redis access, generate a report with:
+
+~~~bash
 .venv/bin/python scripts/telemetry_report.py --days 3 --errors 50
-```
+~~~
 
-Aquest informe és per a manteniment local i no s’ha de servir des d’una ruta pública. Els errors natius fatals, MapLibre i els tancaments per memòria poden no arribar a la cua JavaScript; les builds de prova s’han de distribuir amb TestFlight i revisar també a Xcode Organizer.
+This report is for local maintenance. Do not publish it through a public route. Fatal native errors, MapLibre failures, and out-of-memory exits can miss the JavaScript queue. TestFlight builds should also be checked in Xcode Organizer.
 
-## Model de seguretat i portes de producció
+## Security model and production gates
 
-- El BFF rebutja configuracions de producció insegures: clau curta, `TRUSTED_HOSTS=*`, CORS comodí, documentació oberta o Redis sense autenticació/TLS.
-- Les coordenades de trànsit viatgen al cos d’un `POST`, no a l’URL ni als access logs; el servei limita l’àrea i les arrodoneix abans del proveïdor i de la cache.
-- Les consultes TomTom comparteixen cache i single-flight, tenen quotes globals a Redis i obren circuit temporal davant un `429` del proveïdor.
-- Les descàrregues externes exigeixen HTTPS i hosts permesos, no segueixen redireccions fora de la llista i imposen límits de mida, nombre de fitxers i ràtio de compressió.
-- Els cossos HTTP, llistes, caches, connexions i missatges WebSocket tenen límits explícits. Els logs redacten secrets, query strings, coordenades i directoris d’usuari.
-- Les dependències Python de producció estan bloquejades amb hashes i els contenidors usen versions fixades.
-- El rate limit s’aplica abans de llegir el cos; el desplegament públic també ha de posar davant un reverse proxy amb TLS, límits de connexions i timeout de capçaleres/cos lent.
-- `/health` és una liveness barata; `/health/ready` està limitat i comprova també una escriptura efímera a Redis, de manera que `noeviction`/OOM no deixa el servei anunciat com a preparat.
+- Production rejects insecure configuration: short keys, TRUSTED_HOSTS=*, wildcard CORS, open documentation, or Redis without authentication and TLS where TLS is needed.
+- Traffic coordinates use a POST body, not a URL or access log. The service limits and rounds the area before provider and cache use.
+- TomTom requests share cache and single-flight work. They use Redis global quotas and open a temporary circuit after a provider 429 response.
+- External downloads require HTTPS and allowed hosts. Redirects cannot leave the allow-list. Files, ZIP entries, and compression ratios have limits.
+- HTTP bodies, lists, caches, connections, and WebSocket messages have explicit limits. Logs redact secrets, query strings, coordinates, and user directories.
+- Production Python dependencies use hashes. Container images use pinned versions.
+- Rate limiting happens before the body is read. A public deployment still needs a TLS reverse proxy with connection limits and slow-header and body timeouts.
+- /health is a cheap liveness endpoint. /health/ready is rate-limited and checks Redis writes and the complete GTFS cache.
 
-Abans d’una distribució pública encara són obligatoris requisits externs que el repositori no pot completar sol: substituir la clau estàtica del client per [App Attest](https://developer.apple.com/documentation/devicecheck/validating-apps-that-connect-to-your-server), amb reptes d’un sol ús i credencials curtes; validar una build signada a [TestFlight](https://developer.apple.com/testflight/) (fallades natives, dSYM, manifest/informe de privacitat i declaracions d’App Store Connect); i construir/executar l’stack amb un daemon Docker real, escanejar la imatge/SBOM i provar el reverse proxy de producció. Sense aquestes portes, el sistema és adequat per a desenvolupament i proves controlades, no per considerar-lo autenticat fortament a Internet.
+Before public distribution, complete these external gates:
 
-## Verificació
+1. Replace the static client key with [App Attest](https://developer.apple.com/documentation/devicecheck/validating-apps-that-connect-to-your-server), one-time challenges, and short-lived credentials.
+2. Validate a signed build in [TestFlight](https://developer.apple.com/testflight/). Check native failures, dSYMs, privacy manifest, and App Store Connect declarations.
+3. Build the stack with a real Docker daemon. Scan the image and SBOM. Test the production reverse proxy.
 
-```bash
+Without these gates, AlVolant is suitable for development and controlled tests. It is not strong-authenticated public Internet software.
+
+## Verification
+
+~~~bash
 cd app-conductor && npx tsc --noEmit
 cd .. && .venv/bin/python -m pytest -q
 git diff --check
-```
+~~~
 
-## Funcionament del servidor BFF
+## BFF flow
 
-```text
-ATM GTFS / GTFS-RT ----HTTPS acotat----+
+~~~text
+ATM GTFS / GTFS-RT ----bounded HTTPS----+
                                          v
-TomTom Traffic --------HTTPS acotat--> FastAPI BFF <--> Redis privat
+TomTom Traffic --------bounded HTTPS--> FastAPI BFF <--> Private Redis
                                          ^   |
-                                         |   +-- workers GTFS-RT i renovació GTFS
+                                         |   +-- GTFS-RT workers and GTFS refresh
                                          |   +-- REST /api/v1/{gtfs,atm_rt,traffic}
                                          |   +-- POST /api/v1/telemetry/events
                                          |   +-- WS /api/v1/ws/live
                                          |
                                   HTTPS/WSS + controls
                                          |
-                                  App Expo per a iPhone
-```
+                                  Expo app for iPhone
+~~~

@@ -1,0 +1,22 @@
+# Local, loopback-only vector tile server used by run-local.sh.
+#
+# The PMTiles archive is generated on the host into .alvolant/maps and mounted
+# read-only at /data. Martin only serves data already present on disk.
+listen_addresses: 0.0.0.0:3000
+base_path: /maps/tiles
+
+cache:
+  size_mb: 128
+  expiry: 2h
+  maxzoom: 16
+
+fonts:
+  paths:
+    - /data/fonts
+  cache:
+    size_mb: 32
+
+pmtiles:
+  allow_http: false
+  sources:
+    catalunya: /data/tiles/catalunya.pmtiles

@@ -15,6 +15,7 @@ const STARTUP_TIMEOUT_MS = 15_000;
 const STARTUP_ATTEMPT_TIMEOUT_MS = 4_500;
 const STARTUP_RETRY_DELAY_MS = 750;
 const API_KEY = (process.env.EXPO_PUBLIC_BFF_API_KEY ?? '').trim();
+const ALLOW_INSECURE_LOOPBACK = process.env.EXPO_PUBLIC_ALLOW_INSECURE_LOOPBACK === '1';
 
 function getMetroHost() {
   const scriptURL = NativeModules.SourceCode?.scriptURL as string | undefined;
@@ -41,12 +42,20 @@ function normalizeBaseUrl(value: string | undefined) {
 export const BASE_URL = normalizeBaseUrl(process.env.EXPO_PUBLIC_BFF_URL);
 export const WS_URL = BASE_URL.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');
 
+function isExplicitLoopbackHttpUrl(value: string) {
+  // The local runner is the only Release use case that needs clear-text HTTP.
+  // Keep this exception narrow: no LAN address, credential, path trick, or
+  // arbitrary remote HTTP origin can opt out of the production HTTPS rule.
+  return /^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?$/i.test(value);
+}
+
 function assertSecureConfiguration() {
   if (!API_KEY || API_KEY.length > 512 || /[\u0000-\u001F\u007F]/.test(API_KEY)) {
     throw new ApiError('Falta la configuració segura del BFF.', undefined, 'configuration');
   }
 
-  if (!__DEV__ && !BASE_URL.startsWith('https://')) {
+  const permitsLocalSimulatorBff = ALLOW_INSECURE_LOOPBACK && isExplicitLoopbackHttpUrl(BASE_URL);
+  if (!__DEV__ && !BASE_URL.startsWith('https://') && !permitsLocalSimulatorBff) {
     throw new ApiError('El BFF de producció ha d’utilitzar HTTPS.', undefined, 'configuration');
   }
 }

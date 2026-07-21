@@ -212,7 +212,7 @@ cp app-conductor/.env.example app-conductor/.env.local
 
 Els dos fitxers funcionen junts com a perfil local només de loopback. Contenen la mateixa clau de desenvolupament local perquè el client i el BFF es puguin comunicar. Aquesta clau queda inclosa a Expo, no és un secret de producció i no és una autenticació forta. La manera més segura i simple de generar valors aleatoris locals és executar `./run-local.sh`.
 
-`run-local.sh` també prepara el stack local de MapLibre. `maps/` conté les plantilles d’estil, les tipografies i la configuració del servidor; les dades OSM i la PMTiles generades només es desen a `.alvolant/maps/`, que Git ignora. L’script pregunta abans de la primera descàrrega i no utilitza cap DNS del desenvolupador. Per compilar manualment a l’iPhone Simulator, usa `EXPO_PUBLIC_MAP_ORIGIN=http://localhost:3002`; per a un desplegament real, configura un origen HTTPS propi.
+`run-local.sh` també prepara l’stack local de MapLibre. `maps/` conté les plantilles d’estil, les tipografies i la configuració del servidor; les dades OSM i la PMTiles generades només es desen a `.alvolant/maps/`, que Git ignora. El runner injecta `EXPO_PUBLIC_MAP_ORIGIN=http://localhost:3002` només a la build d’iPhone Simulator. En un iPhone físic, omet aquesta variable perquè l’app usi l’origen HTTPS del BFF configurat per als actius del mapa, o configura un origen HTTPS de mapa explícit.
 
 El BFF necessita una clau de desenvolupament i Redis local:
 

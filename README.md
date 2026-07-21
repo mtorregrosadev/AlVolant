@@ -212,7 +212,7 @@ The bus marker is generated in code. It does not use a 3D mesh. The design hando
 
 The quickest local setup is ./run-local.sh. It creates random values when the local files are absent. It keeps an existing .env unchanged and uses .env.run-local only when the existing file cannot start Docker.
 
-`run-local.sh` also starts the local MapLibre stack. `maps/` contains the style templates, font files, and server configuration; only generated OSM input and PMTiles output live under ignored `.alvolant/maps/`. The runner asks before the first download and never uses a developer-owned DNS name. Set `EXPO_PUBLIC_MAP_ORIGIN=http://localhost:3002` for a manual iPhone Simulator build, or an HTTPS origin for a deployed build.
+`run-local.sh` also starts the local MapLibre stack. `maps/` contains the style templates, font files, and server configuration; only generated OSM input and PMTiles output live under ignored `.alvolant/maps/`. The runner injects `EXPO_PUBLIC_MAP_ORIGIN=http://localhost:3002` only into its iPhone Simulator build. For a physical device, omit that variable to use the configured HTTPS BFF origin for map assets, or set an explicit HTTPS map origin.
 
 You can also copy the tracked examples:
 

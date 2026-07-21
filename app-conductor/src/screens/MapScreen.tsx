@@ -138,24 +138,41 @@ type MapThemeOption = {
 const LOCAL_MAP_DEFAULT_ORIGIN = 'http://localhost:3002';
 
 /**
- * The portable runner starts its vector-map gateway on iPhone Simulator
- * loopback. A deployed build can opt into an HTTPS origin, but the source code
- * never relies on a developer-owned DNS name.
+ * `run-local.sh` passes the loopback gateway explicitly for iPhone Simulator.
+ * A normal device build has no local gateway: when an HTTPS BFF is configured,
+ * its origin is the safe default for the companion map assets. This keeps the
+ * app portable without making a physical iPhone resolve `localhost` to itself.
  */
 function resolveMapOrigin(value: string | undefined) {
   const candidate = value?.trim().replace(/\/+$/, '');
-  if (!candidate) return LOCAL_MAP_DEFAULT_ORIGIN;
 
-  try {
-    const parsed = new URL(candidate);
-    const isLoopback = parsed.hostname === 'localhost'
-      || parsed.hostname === '127.0.0.1'
-      || parsed.hostname === '::1';
-    if (parsed.protocol === 'https:' || (parsed.protocol === 'http:' && isLoopback)) {
-      return parsed.origin;
+  const normalizeOrigin = (origin: string | undefined) => {
+    if (!origin) return null;
+
+    try {
+      const parsed = new URL(origin);
+      const isLoopback = parsed.hostname === 'localhost'
+        || parsed.hostname === '127.0.0.1'
+        || parsed.hostname === '::1';
+      if (parsed.protocol === 'https:' || (parsed.protocol === 'http:' && isLoopback)) {
+        return parsed.origin;
+      }
+    } catch {
+      // Fall through to a safe, known origin.
     }
-  } catch {
-    // The local gateway is safer than accepting an invalid or non-HTTP origin.
+
+    return null;
+  };
+
+  const configuredOrigin = normalizeOrigin(candidate);
+  if (configuredOrigin) return configuredOrigin;
+
+  // The public BFF exposes the companion map gateway at the same HTTPS origin.
+  // `BASE_URL` is accepted only when it is HTTPS; a local BFF still falls back
+  // to the explicit Simulator gateway below.
+  const bffOrigin = normalizeOrigin(BASE_URL);
+  if (bffOrigin?.startsWith('https://')) {
+    return bffOrigin;
   }
 
   return LOCAL_MAP_DEFAULT_ORIGIN;
@@ -1008,9 +1025,14 @@ export default function MapScreen({ route, navigation }: MapScreenProps) {
   const serviceAlertIcon: IconName = 'alert-outline';
   const activeMapTheme = React.useMemo(() => {
     const selectedTheme = MAP_THEME_OPTIONS[mapTheme];
-    if (mapTheme !== 'satellite' || !satelliteClientId) {
+    if (mapTheme !== 'satellite') {
       return selectedTheme;
     }
+
+    // The BFF binds satellite tiles to an opaque installation id. Its style
+    // endpoint correctly rejects a request without that id, so do not hand
+    // MapLibre a known 404 while AsyncStorage/status is still loading.
+    if (!satelliteClientId) return MAP_THEME_OPTIONS.dark;
 
     // MapLibre cannot attach our API headers to a raster source. The BFF
     // therefore returns a per-installation style URL with an opaque client
